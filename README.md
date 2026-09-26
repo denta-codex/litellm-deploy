@@ -119,3 +119,8 @@ uv run --no-sync scripts/verify.py
 model configuration, streaming completion, and a function-call/result round trip.
 It does not print credentials or conversation content. Routine updates need only
 deploy.yml; restart the desktop connection if its configuration changes.
+
+The locked `prisma==0.15.0` client dependency is included solely because stock
+LiteLLM's database-free authentication error handler imports it unconditionally
+(upstream issue https://github.com/BerriAI/litellm/issues/38978). No Prisma engine,
+schema generation, database connection, or database server is configured.
