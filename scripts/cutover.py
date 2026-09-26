@@ -11,7 +11,7 @@ import tomlkit
 p = argparse.ArgumentParser()
 p.add_argument('action', choices=['prepare', 'rollback', 'check-restart', 'finish'])
 p.add_argument('--home', type=Path, default=Path('/home/agent'))
-p.add_argument('--model', default='chatgpt/gpt-5.4')
+p.add_argument('--model', default='chatgpt/gpt-6-astra')
 args = p.parse_args()
 os.umask(0o077)
 config = args.home / '.codex/config.toml'

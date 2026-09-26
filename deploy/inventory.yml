@@ -9,4 +9,4 @@ all:
       litellm_config: /home/agent/.config/litellm
       litellm_state: /home/agent/.local/state/litellm
       litellm_uv: /home/agent/.local/share/mise/installs/uv/0.12.11/.mise-bins/uv
-      litellm_model: chatgpt/gpt-5.4
+      litellm_model: chatgpt/gpt-6-astra

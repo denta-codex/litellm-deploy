@@ -6,7 +6,7 @@ import urllib.error
 import urllib.request
 
 p = argparse.ArgumentParser()
-p.add_argument('--model', default='chatgpt/gpt-5.4')
+p.add_argument('--model', default='chatgpt/gpt-6-astra')
 p.add_argument('--credential', default='/home/agent/.config/litellm/proxy-key.cred')
 args = p.parse_args()
 key = subprocess.check_output([

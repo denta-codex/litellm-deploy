@@ -1,7 +1,7 @@
 # Grace LiteLLM deployment
 
 Stock LiteLLM 1.102.1, uv, and systemd on Grace, for stock Codex through a named
-`litellm` Responses provider. Initial model: `chatgpt/gpt-5.4`. Edit the inventory
+`litellm` Responses provider. Initial model: `chatgpt/gpt-6-astra`. Edit the inventory
 and redeploy to change models. This is a private, single-host deployment.
 
 ## Deploy
