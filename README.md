@@ -72,13 +72,11 @@ before committing to them. Old tasks are not relabeled and may retain `openai`.
 The native provider returns to its normal backend once its gateway override is
 removed. Dynamic merged model discovery is not a cutover requirement.
 
-After validation and confirming the old Modal credential is independently
-recoverable, uninstall the old gateway completely:
+After desktop validation, uninstall the old gateway completely:
 
 ```sh
 ansible-playbook -i deploy/inventory.yml deploy/finalize.yml \
-  -e litellm_desktop_validated=true \
-  -e gateway_recovery_credentials_verified=true
+  -e litellm_desktop_validated=true
 ```
 
 Finalize checks the desktop replaced the app-server socket, validates LiteLLM,
@@ -102,11 +100,12 @@ After uninstall, redeploy the old gateway from:
 https://github.com/denta-codex/codex-gateway/tree/gateway-paused-2026-09-26
 
 The frozen revision is `7883f72f9d9a7ca9075fcef81155b4d23bb7ed55`, including its
-existing Ansible. Reprovision its encrypted Modal credential, then use that
+existing Ansible. Mint new Modal keys and provision its encrypted credential, then use that
 repository's `bin/deploy-grace prepare`, desktop Restart, and
 `bin/deploy-grace finalize`. Remove LiteLLM's provider selection/configuration
 as part of that deliberate recovery; do not run parallel routing workflows.
-Never delete the only recoverable Modal credential during this migration.
+The owner explicitly accepted minting new Modal keys for recovery; the old
+gateway credential is deleted during uninstall and is not backed up.
 
 ## Validation
 

@@ -2,14 +2,13 @@
   hosts: grace
   gather_facts: true
   tasks:
-    - name: Require completed desktop validation and recoverable gateway credentials
+    - name: Require completed desktop validation
       ansible.builtin.assert:
         that:
           - ansible_facts.hostname == 'grace'
           - ansible_facts.user_id == 'agent'
           - litellm_desktop_validated | default(false) | bool
-          - gateway_recovery_credentials_verified | default(false) | bool
-        fail_msg: Complete desktop history/tool checks and confirm the Modal credential can be reprovisioned before uninstalling the gateway.
+        fail_msg: Complete desktop history/tool checks before uninstalling the gateway.
     - name: Verify owner replaced the app server
       ansible.builtin.command:
         argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/cutover.py", check-restart]
