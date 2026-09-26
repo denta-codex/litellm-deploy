@@ -17,7 +17,9 @@ ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
 The proxy listens on `127.0.0.1:4000`. It runs with a locked uv environment and
 no runtime dependency downloads. No database or Redis server is configured;
 stock upstream may include their client libraries among its dependencies.
-No virtual-key administration, middleware, source patches, or custom catalog.
+No virtual-key administration, middleware, or source patches.
+Codex uses a versioned local model catalog to enable hosted Responses search;
+see the compatibility note below.
 Application files live under `~/.local/share/litellm`, configuration under
 `~/.config/litellm`, and mutable state under `~/.local/state/litellm`.
 The root-owned unit is `/etc/systemd/system/litellm.service`.
@@ -64,6 +66,10 @@ HTTP Responses streaming, and credential command. The old gateway stays active
 only during this unfinished migration. One private configuration recovery record
 is retained in `~/.local/state/litellm/cutover.json` and removed on completion.
 Check mode for cutover intentionally performs no inference/config mutation.
+
+Prepare also requires a real stock Codex native-search event and a resumed
+shell-tool round trip with retained search context. A raw API search test alone
+is insufficient to pass this gate.
 
 Before finalizing, verify a new desktop task uses LiteLLM, tool execution and
 follow-up turns work, existing tasks remain visible/reopenable, and cancellation
@@ -114,6 +120,7 @@ It is independent of the uninstalled gateway service; do not copy it into
 ```sh
 uv run --no-sync scripts/test_cutover.py
 uv run --no-sync scripts/verify.py
+uv run --no-sync scripts/verify_codex.py
 ```
 
 `verify.py` sends small subscription requests. It checks unauthenticated rejection,
@@ -125,3 +132,23 @@ The locked `prisma==0.15.0` client dependency is included solely because stock
 LiteLLM's database-free authentication error handler imports it unconditionally
 (upstream issue https://github.com/BerriAI/litellm/issues/38978). No Prisma engine,
 schema generation, database connection, or database server is configured.
+
+### Native web-search compatibility
+
+Validated with Codex 0.155.1 and LiteLLM 1.102.1. Stock Codex's bundled
+`gpt-6-astra` metadata uses Responses Lite and hides hosted web search. Its
+alternative standalone search uses `/v1/alpha/search`, which this LiteLLM
+deployment does not serve. Simply enabling `supports_standalone_web_search`
+would expose a tool whose endpoint does not work.
+
+The supported Codex `model_catalog_json` setting points to
+`~/.config/litellm/codex-models.json`. It retains upstream model metadata and adds
+the LiteLLM model name with `use_responses_lite=false`, selecting hosted search
+on `/v1/responses`. Native search is then executed by the ChatGPT upstream.
+Only the configured LiteLLM model is visible in the picker. This static catalog
+disables remote model discovery; revalidate it on Codex upgrades and when adding
+models. Provenance and exact modifications are in `deploy/files/README.md`.
+
+This proves native search for the subscription model only. A future Modal
+OpenAI-compatible inference endpoint does not automatically gain a hosted
+search engine; its search integration must be configured and validated separately.

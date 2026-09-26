@@ -70,6 +70,11 @@
         dest: "{{ litellm_config }}/config.yaml"
         mode: '0600'
       notify: Restart LiteLLM
+    - name: Install Codex model metadata for hosted Responses search
+      ansible.builtin.copy:
+        src: files/codex-models.json
+        dest: "{{ litellm_config }}/codex-models.json"
+        mode: '0600'
     - name: Install system service
       ansible.builtin.template:
         src: litellm.service.j2

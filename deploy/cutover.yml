@@ -15,6 +15,11 @@
         argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/verify.py", --model, "{{ litellm_model }}"]
       changed_when: false
       when: cutover_action == 'prepare' and not ansible_check_mode
+    - name: Validate real Codex search and tool continuation before switching
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/verify_codex.py", --model, "{{ litellm_model }}"]
+      changed_when: false
+      when: cutover_action == 'prepare' and not ansible_check_mode
     - name: Change only the managed Codex provider configuration
       ansible.builtin.command:
         argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/cutover.py", "{{ cutover_action }}", --model, "{{ litellm_model }}"]

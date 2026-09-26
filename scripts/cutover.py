@@ -49,6 +49,12 @@ if args.action == 'prepare':
         doc.pop('openai_base_url', None)
         doc['model_provider'] = 'litellm'
         doc['model'] = args.model
+        catalog = args.home / '.config/litellm/codex-models.json'
+        entries = json.loads(catalog.read_text())['models']
+        assert any(m['slug'] == args.model and not m['use_responses_lite'] for m in entries), 'Model needs validated hosted Responses metadata'
+        assert 'model_catalog_json' not in doc, 'Existing custom model catalog requires review'
+        doc['model_catalog_json'] = str(catalog)
+        doc['web_search'] = 'live'
         providers = doc.setdefault('model_providers', tomlkit.table())
         if 'litellm' in providers:
             raise RuntimeError('An unmanaged litellm provider already exists; refusing to overwrite')
