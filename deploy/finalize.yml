@@ -32,7 +32,6 @@
       become: true
       loop:
         - /etc/systemd/system/codex-gateway.service
-        - /etc/credstore.encrypted/codex-gateway-modal
         - /home/agent/.local/share/codex-gateway
         - /home/agent/.local/state/codex-gateway
         - /home/agent/.config/codex-gateway

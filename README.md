@@ -100,12 +100,14 @@ After uninstall, redeploy the old gateway from:
 https://github.com/denta-codex/codex-gateway/tree/gateway-paused-2026-09-26
 
 The frozen revision is `7883f72f9d9a7ca9075fcef81155b4d23bb7ed55`, including its
-existing Ansible. Mint new Modal keys and provision its encrypted credential, then use that
+existing Ansible. The encrypted Modal credential is retained at its existing path
+`/etc/credstore.encrypted/codex-gateway-modal`; use that
 repository's `bin/deploy-grace prepare`, desktop Restart, and
 `bin/deploy-grace finalize`. Remove LiteLLM's provider selection/configuration
 as part of that deliberate recovery; do not run parallel routing workflows.
-The owner explicitly accepted minting new Modal keys for recovery; the old
-gateway credential is deleted during uninstall and is not backed up.
+Retain the Modal credential for imminent provider reuse and gateway recovery.
+It is independent of the uninstalled gateway service; do not copy it into
+1Password or delete it during this migration.
 
 ## Validation
 
