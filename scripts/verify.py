@@ -74,4 +74,7 @@ second = completed_response({
     + [{'type': 'function_call_output', 'call_id': calls[0]['call_id'], 'output': 'DEPLOYMENT_TOOL_OK'}],
 })
 assert second['status'] == 'completed', 'follow-up did not complete'
+reply = ''.join(part.get('text', '') for item in second['output'] if item.get('type') == 'message'
+                for part in item.get('content', []) if part.get('type') == 'output_text')
+assert 'DEPLOYMENT_TOOL_OK' in reply, 'Tool result was not used in the continuation'
 print('PASS function call and tool-result continuation', flush=True)

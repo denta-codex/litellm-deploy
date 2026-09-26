@@ -1,0 +1,122 @@
+- name: Explicitly refresh Grace subscription models
+  hosts: grace
+  gather_facts: true
+  vars:
+    source_root: "{{ playbook_dir }}/.."
+    refresh_action: refresh
+    refresh_command: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/refresh_models.py"]
+  tasks:
+    - name: Check target and operation
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.hostname == 'grace'
+          - ansible_facts.user_id == litellm_user
+          - litellm_home == '/home/agent'
+          - refresh_action in ['refresh', 'rollback']
+    - name: Inspect deployment source
+      ansible.builtin.command: git status --porcelain
+      args:
+        chdir: "{{ source_root }}"
+      register: source_status
+      changed_when: false
+      check_mode: false
+    - name: Require committed source
+      ansible.builtin.assert:
+        that: source_status.stdout == ''
+    - name: Require a running LiteLLM installation
+      ansible.builtin.command: systemctl is-active litellm.service
+      changed_when: false
+      check_mode: false
+      when: refresh_action == 'refresh'
+    - name: Discover subscription models and prepare or preview changes
+      ansible.builtin.command:
+        argv: "{{ refresh_command + [('preview' if ansible_check_mode else 'prepare')] }}"
+      register: discovery
+      changed_when: (discovery.stdout | from_json).any_changes
+      check_mode: false
+      when: refresh_action == 'refresh'
+    - name: Show model additions removals and capability changes
+      ansible.builtin.debug:
+        msg: "{{ discovery.stdout | from_json }}"
+      when: refresh_action == 'refresh'
+    - name: Activate and validate changed discovery
+      when:
+        - refresh_action == 'refresh'
+        - not ansible_check_mode
+        - (discovery.stdout | from_json).any_changes
+      block:
+        - name: Activate candidate LiteLLM routes
+          ansible.builtin.command:
+            argv: "{{ refresh_command + ['activate'] }}"
+          changed_when: (discovery.stdout | from_json).routing_changed
+        - name: Restart LiteLLM only for routing changes
+          ansible.builtin.systemd_service:
+            name: litellm.service
+            state: restarted
+          become: true
+          when: (discovery.stdout | from_json).routing_changed
+        - name: Wait for LiteLLM liveness
+          ansible.builtin.uri:
+            url: http://127.0.0.1:4000/health/liveliness
+          register: health
+          until: health.status == 200
+          retries: 30
+          delay: 2
+        - name: Validate changed models with subscription streaming and stock Codex
+          ansible.builtin.command:
+            argv: "{{ refresh_command + ['validate'] }}"
+          changed_when: false
+        - name: Publish validated picker and save discovery
+          ansible.builtin.command:
+            argv: "{{ refresh_command + ['finish'] }}"
+          changed_when: true
+        - name: Report desktop reload requirement
+          ansible.builtin.debug:
+            msg: "{{ 'Refresh complete. Restart Grace through the owning Codex desktop to load the updated model picker.' if (discovery.stdout | from_json).catalog_changed else 'Refresh complete. No desktop restart required.' }}"
+      rescue:
+        - name: Restore previous model files
+          ansible.builtin.command:
+            argv: "{{ refresh_command + ['rollback'] }}"
+          register: recovery
+        - name: Restart restored LiteLLM routes
+          ansible.builtin.systemd_service:
+            name: litellm.service
+            state: restarted
+          become: true
+          when: (recovery.stdout | from_json).restart_required
+        - name: Verify recovered liveness
+          ansible.builtin.uri:
+            url: http://127.0.0.1:4000/health/liveliness
+          register: recovery_health
+          until: recovery_health.status == 200
+          retries: 30
+          delay: 2
+        - name: Remove completed recovery files
+          ansible.builtin.command:
+            argv: "{{ refresh_command + ['cleanup-rollback'] }}"
+        - name: Report rejected refresh
+          ansible.builtin.fail:
+            msg: Refresh failed; previous routing and catalog restored. See the failed validation above.
+    - name: Recover an interrupted refresh explicitly
+      when: refresh_action == 'rollback' and not ansible_check_mode
+      block:
+        - name: Restore pending refresh files
+          ansible.builtin.command:
+            argv: "{{ refresh_command + ['rollback'] }}"
+          register: recovery
+        - name: Restart restored service if routes changed
+          ansible.builtin.systemd_service:
+            name: litellm.service
+            state: restarted
+          become: true
+          when: (recovery.stdout | from_json).restart_required
+        - name: Verify restored liveness
+          ansible.builtin.uri:
+            url: http://127.0.0.1:4000/health/liveliness
+          register: recovery_health
+          until: recovery_health.status == 200
+          retries: 30
+          delay: 2
+        - name: Clean completed recovery
+          ansible.builtin.command:
+            argv: "{{ refresh_command + ['cleanup-rollback'] }}"

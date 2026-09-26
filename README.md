@@ -1,8 +1,8 @@
 # Grace LiteLLM deployment
 
 Stock LiteLLM 1.102.1, uv, and systemd on Grace, for stock Codex through a named
-`litellm` Responses provider. Initial model: `chatgpt/gpt-6-astra`. Edit the inventory
-and redeploy to change models. This is a private, single-host deployment.
+`litellm` Responses provider. Default model: `chatgpt/gpt-6-astra`. Discover subscription models with
+the explicit refresh command below. This is a private, single-host deployment.
 
 ## Deploy
 
@@ -18,7 +18,7 @@ The proxy listens on `127.0.0.1:4000`. It runs with a locked uv environment and
 no runtime dependency downloads. No database or Redis server is configured;
 stock upstream may include their client libraries among its dependencies.
 No virtual-key administration, middleware, or source patches.
-Codex uses a versioned local model catalog to enable hosted Responses search;
+Codex uses a locally discovered model catalog to enable hosted Responses search;
 see the compatibility note below.
 Application files live under `~/.local/share/litellm`, configuration under
 `~/.config/litellm`, and mutable state under `~/.local/state/litellm`.
@@ -33,6 +33,7 @@ CHATGPT_TOKEN_DIR="$HOME/.local/state/litellm/chatgpt" \
 ```
 
 The login prints only the temporary device authorization code, never tokens.
+After login, run `deploy/refresh-models.yml` before the initial Codex cutover.
 Stock LiteLLM OAuth token files are private (0700 directory, 0600 files), but
 are not encrypted by this deployment. Codex's own login is not changed.
 
@@ -133,22 +134,82 @@ LiteLLM's database-free authentication error handler imports it unconditionally
 (upstream issue https://github.com/BerriAI/litellm/issues/38978). No Prisma engine,
 schema generation, database connection, or database server is configured.
 
+## Refresh subscription models explicitly
+
+From a clean committed checkout on Grace:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml
+```
+
+This fetches the account's current Codex catalog using LiteLLM's existing
+ChatGPT login and the installed Codex version. It updates both LiteLLM routes
+and the Codex picker. There is no timer, background synchronizer, or extra server.
+Discovery failures leave the installation unchanged. An expired login is reported
+without starting an interactive login or rotating credentials; use the documented
+stock login command if needed, then retry.
+
+`chatgpt/` is the refresh-owned model namespace. Each upstream selectable model
+gets one `chatgpt/<slug>` route and one visible picker entry. Hidden native entries
+retain metadata for existing tasks. Other provider routes, their settings, and
+catalog entries are preserved. The selected default is not changed; removing it
+from the discovered list aborts the refresh rather than substituting another model.
+Old tasks can retain their native model selection; no task history is rewritten.
+
+Preview shows added/removed model IDs and changed metadata fields, with before/after
+lists. It performs discovery but does not install files, refresh OAuth tokens,
+restart services, validate with inference, or print credentials/model instructions.
+Live refresh checks the candidate catalog with stock Codex, restarts LiteLLM only
+if routes changed, and tests streaming, function-call continuation, and stock Codex
+search/tools/context for new or changed models (two concurrent probes maximum).
+Search is tested only when the discovered model advertises it. Validation consumes
+subscription usage. The picker is published only after every probe succeeds.
+
+A successful discovery is stored privately in
+`~/.local/state/litellm/subscription-models.json`; generated configuration remains
+in `~/.config/litellm`. Neither discovery results nor credentials are committed.
+Ordinary deployment checks and preserves these files; it never reinstalls the
+one-model catalog. If generated files are missing or inconsistent, deployment
+stops and directs you to run refresh. New installations bootstrap the single
+configured default until the first explicit refresh after login.
+
+Unchanged refreshes perform no inference or service restart. After catalog changes,
+restart Grace's connection through the owning desktop to load the new picker.
+Verify the models are listed once in a new task; an existing task can still show
+its old selected native model alongside the routed choices.
+
+Failed activation or validation restores the previous config, catalog, and discovery,
+restarts restored routes when necessary, and checks liveness. One private recovery
+directory is kept only during unfinished work. If the command is interrupted:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml -e refresh_action=rollback
+```
+
+Recovery refuses to overwrite concurrent edits. In that case inspect
+`~/.local/state/litellm/model-refresh` and reconcile before retrying. The directory
+is removed after successful activation or successful recovery. Ordinary deployment
+refuses to proceed while a refresh is unfinished.
+
 ### Native web-search compatibility
 
-Validated with Codex 0.155.1 and LiteLLM 1.102.1. Stock Codex's bundled
-`gpt-6-astra` metadata uses Responses Lite and hides hosted web search. Its
-alternative standalone search uses `/v1/alpha/search`, which this LiteLLM
-deployment does not serve. Simply enabling `supports_standalone_web_search`
-would expose a tool whose endpoint does not work.
+Validated initially with Codex 0.155.1 and LiteLLM 1.102.1. Models using Responses
+Lite suppress hosted web search in this Codex version; its alternative standalone
+search uses `/v1/alpha/search`, which this LiteLLM deployment does not serve.
+The generated routed entries set `use_responses_lite=false` so search uses
+`/v1/responses`. Other upstream metadata is retained, including instructions,
+reasoning levels, context limits, and capabilities. Invalid/incomplete catalogs
+are rejected rather than filling them with invented defaults.
 
-The supported Codex `model_catalog_json` setting points to
-`~/.config/litellm/codex-models.json`. It retains upstream model metadata and adds
-the LiteLLM model name with `use_responses_lite=false`, selecting hosted search
-on `/v1/responses`. Native search is then executed by the ChatGPT upstream.
-Only the configured LiteLLM model is visible in the picker. This static catalog
-disables remote model discovery; revalidate it on Codex upgrades and when adding
-models. Provenance and exact modifications are in `deploy/files/README.md`.
+The supported `model_catalog_json` setting still points to
+`~/.config/litellm/codex-models.json`. This snapshot is loaded at Codex startup;
+run refresh explicitly after model availability or Codex version changes.
+Native-search support is not inferred for future Modal inference endpoints.
 
-This proves native search for the subscription model only. A future Modal
-OpenAI-compatible inference endpoint does not automatically gain a hosted
-search engine; its search integration must be configured and validated separately.
+Development checks:
+
+```sh
+uv run --no-sync scripts/test_refresh_models.py
+uv run --no-sync scripts/test_cutover.py
+```
