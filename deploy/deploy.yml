@@ -48,12 +48,19 @@
       loop: [pyproject.toml, uv.lock]
       register: project_files
       notify: Restart LiteLLM
-    - name: Install application scripts
+    - name: Install service launcher
       ansible.builtin.copy:
-        src: "{{ source_root }}/scripts/"
-        dest: "{{ litellm_root }}/scripts/"
+        src: "{{ source_root }}/scripts/start-litellm"
+        dest: "{{ litellm_root }}/scripts/start-litellm"
         mode: '0700'
       notify: Restart LiteLLM
+    - name: Install deployment utilities without restarting inference
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
+        mode: '0700'
+      with_fileglob: "{{ source_root }}/scripts/*"
+      when: item | basename != 'start-litellm'
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"

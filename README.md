@@ -7,6 +7,9 @@ the explicit refresh command below. This is a private, single-host deployment.
 ## Deploy
 
 Use a clean committed checkout. Python 3.14 and uv use Grace's existing toolchain.
+The repository's `.mise.toml` selects Grace's already-installed Ansible and uv.
+Trust that repo-local file with `mise trust` once after reviewing a new checkout;
+no additional toolchain installation is needed on Grace.
 
 ```sh
 ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --syntax-check
