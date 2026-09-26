@@ -1,0 +1,26 @@
+[Unit]
+Description=Stock LiteLLM subscription proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ litellm_user }}
+Group={{ litellm_user }}
+WorkingDirectory={{ litellm_root }}
+Environment=HOME={{ litellm_home }}
+Environment=CHATGPT_TOKEN_DIR={{ litellm_state }}/chatgpt
+Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
+Environment=LITELLM_TELEMETRY=False
+Environment=UV_OFFLINE=1
+Environment=UV_PYTHON_DOWNLOADS=never
+LoadCredentialEncrypted=litellm-proxy-key:/etc/credstore.encrypted/litellm-proxy-key
+ExecStart={{ litellm_root }}/scripts/start-litellm {{ litellm_uv }} {{ litellm_root }} {{ litellm_config }}/config.yaml
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

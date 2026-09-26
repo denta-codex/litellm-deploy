@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Root only. Plaintext passes through pipes/process memory, never disk or argv.
+set -euo pipefail
+system_credential=/etc/credstore.encrypted/litellm-proxy-key
+user_credential=/home/agent/.config/litellm/proxy-key.cred
+if [[ -e "$system_credential" || -e "$user_credential" ]]; then
+    [[ -f "$system_credential" && -f "$user_credential" ]] || {
+        echo 'Incomplete credential pair; refusing to replace either credential.' >&2
+        exit 1
+    }
+    exit 0
+fi
+umask 077
+install -d -m 0700 /etc/credstore.encrypted
+proxy_key="sk-$(openssl rand -hex 32)"
+systemd-creds encrypt --with-key=host --name=litellm-proxy-key - "$system_credential" <<<"$proxy_key"
+systemd-creds encrypt --user --uid=agent --with-key=host --name=litellm-proxy-key - "$user_credential" <<<"$proxy_key"
+unset proxy_key
+chown agent:agent "$user_credential"
+chmod 0600 "$system_credential" "$user_credential"
+printf 'created\n'

@@ -1,0 +1,105 @@
+- name: Deploy stock LiteLLM on Grace
+  hosts: grace
+  gather_facts: true
+  vars:
+    source_root: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Check destination identity
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.hostname == 'grace'
+          - ansible_facts.user_id == litellm_user
+          - litellm_home == '/home/agent'
+          - litellm_root == '/home/agent/.local/share/litellm'
+    - name: Inspect deployment source
+      ansible.builtin.command: git status --porcelain
+      args:
+        chdir: "{{ source_root }}"
+      register: source_status
+      changed_when: false
+      check_mode: false
+    - name: Require committed deployment source
+      ansible.builtin.assert:
+        that: source_status.stdout == ''
+    - name: Create application directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0700'
+      loop:
+        - "{{ litellm_root }}"
+        - "{{ litellm_root }}/scripts"
+        - "{{ litellm_config }}"
+        - "{{ litellm_state }}"
+        - "{{ litellm_state }}/chatgpt"
+    - name: Install locked project
+      ansible.builtin.copy:
+        src: "{{ source_root }}/{{ item }}"
+        dest: "{{ litellm_root }}/{{ item }}"
+        mode: '0600'
+      loop: [pyproject.toml, uv.lock]
+      register: project_files
+      notify: Restart LiteLLM
+    - name: Install application scripts
+      ansible.builtin.copy:
+        src: "{{ source_root }}/scripts/"
+        dest: "{{ litellm_root }}/scripts/"
+        mode: '0700'
+      notify: Restart LiteLLM
+    - name: Inspect installed Python environment
+      ansible.builtin.stat:
+        path: "{{ litellm_root }}/.venv/bin/litellm"
+      register: installed_cli
+    - name: Synchronize locked environment
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", sync, --locked, --project, "{{ litellm_root }}"]
+      environment:
+        UV_PYTHON_DOWNLOADS: never
+      when: project_files.changed or not installed_cli.stat.exists
+      notify: Restart LiteLLM
+    - name: Create encrypted credential pair without exposing the key
+      ansible.builtin.command:
+        argv: ["{{ litellm_root }}/scripts/provision-key"]
+      become: true
+      register: credentials
+      changed_when: "'created' in credentials.stdout"
+      no_log: true
+    - name: Install LiteLLM configuration
+      ansible.builtin.template:
+        src: config.yaml.j2
+        dest: "{{ litellm_config }}/config.yaml"
+        mode: '0600'
+      notify: Restart LiteLLM
+    - name: Install system service
+      ansible.builtin.template:
+        src: litellm.service.j2
+        dest: /etc/systemd/system/litellm.service
+        mode: '0644'
+      become: true
+      notify: Restart LiteLLM
+    - name: Start and enable LiteLLM
+      ansible.builtin.systemd_service:
+        name: litellm.service
+        enabled: true
+        state: started
+        daemon_reload: true
+      become: true
+      when: not ansible_check_mode
+    - name: Apply service changes
+      ansible.builtin.meta: flush_handlers
+    - name: Verify local service liveness
+      ansible.builtin.uri:
+        url: http://127.0.0.1:4000/health/liveliness
+      register: health
+      until: health.status == 200
+      retries: 20
+      delay: 2
+      when: not ansible_check_mode
+  handlers:
+    - name: Restart LiteLLM
+      ansible.builtin.systemd_service:
+        name: litellm.service
+        state: restarted
+        daemon_reload: true
+      become: true
+      when: not ansible_check_mode

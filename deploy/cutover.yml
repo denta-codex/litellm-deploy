@@ -1,0 +1,26 @@
+- name: Prepare or recover the Codex provider switch
+  hosts: grace
+  gather_facts: true
+  vars:
+    cutover_action: prepare
+  tasks:
+    - name: Check target and operation
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.hostname == 'grace'
+          - ansible_facts.user_id == 'agent'
+          - cutover_action in ['prepare', 'rollback', 'check-restart']
+    - name: Validate subscription before switching
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/verify.py", --model, "{{ litellm_model }}"]
+      changed_when: false
+      when: cutover_action == 'prepare' and not ansible_check_mode
+    - name: Change only the managed Codex provider configuration
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/cutover.py", "{{ cutover_action }}", --model, "{{ litellm_model }}"]
+      changed_when: cutover_action != 'check-restart'
+      when: not ansible_check_mode
+    - name: Explain check mode limitation
+      ansible.builtin.debug:
+        msg: Cutover check mode does not authenticate, make inference requests, or edit Codex config. Review the script and its migration tests; live prepare retains one private config recovery record until finalize.
+      when: ansible_check_mode
