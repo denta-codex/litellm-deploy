@@ -1,0 +1,39 @@
+- name: Install or recover Grace's desktop Fast configuration
+  hosts: grace
+  gather_facts: true
+  vars:
+    fast_toggle_action: prepare
+    source_root: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Check target and operation
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.hostname == 'grace'
+          - ansible_facts.user_id == litellm_user
+          - fast_toggle_action in ['prepare', 'rollback', 'finish']
+          - fast_toggle_action != 'finish' or (fast_desktop_validated | default(false) | bool)
+    - name: Inspect installation source
+      ansible.builtin.command: git status --porcelain
+      args:
+        chdir: "{{ source_root }}"
+      register: fast_source
+      changed_when: false
+      check_mode: false
+      when: fast_toggle_action == 'prepare'
+    - name: Require committed installation source
+      ansible.builtin.assert:
+        that: fast_source.stdout == ''
+      when: fast_toggle_action == 'prepare'
+    - name: Install the repository launcher and migration utility
+      ansible.builtin.copy:
+        src: "{{ source_root }}/scripts/{{ item }}"
+        dest: "{{ litellm_root }}/scripts/{{ item }}"
+        mode: '0700'
+      loop: [codex-launcher, fast_toggle.py]
+      when: fast_toggle_action == 'prepare'
+    - name: Apply the recoverable launcher and configuration change
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/fast_toggle.py", "{{ fast_toggle_action }}"]
+      register: fast_result
+      changed_when: "fast_result.stdout.startswith('changed:')"
+      when: not ansible_check_mode

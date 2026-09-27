@@ -200,22 +200,74 @@ uv run --no-sync scripts/verify.py --service-tier default
 uv run --no-sync scripts/verify_codex.py --service-tier priority
 ```
 
-The API probes require the backend to report the requested tier on streaming,
-function-call, and tool-result responses. Successful text alone is not proof of
-priority service. On September 27, 2026, isolated and direct backend probes
-reported `default` for explicit `priority` requests. A native Codex ChatGPT control
-using the built-in provider, with LiteLLM bypassed, also completed with `priority`
-on the wire and `default` in the response. The isolated shared adapter preserved
-priority on every observed Codex search/tool/resume request. Forwarding is verified;
-backend priority delivery remains unverified, and the strict probe deliberately
-fails on a mismatch. The adapter does not relabel the returned tier.
+The API probes report requested and returned tiers separately. ChatGPT subscription
+responses can report `default` after a `priority` request, including when native
+Codex bypasses LiteLLM. The returned field is not a reliable Fast acceptance gate
+for this subscription endpoint; the earlier equality assertion was incorrect.
+See the [OpenAI contributor's explanation](https://github.com/openai/codex/issues/14204#issuecomment-4033184620).
+Offline regressions strictly check priority forwarding, omission on ordinary
+requests, and unchanged response metadata. These checks do not measure throughput.
 
 The Codex probe enables its fast-mode feature and exercises an explicit tier with
 native search and resumed tool execution. Both probes accept `--base-url` for an
 isolated proxy. Check the desktop Fast toggle before declaring fast mode verified.
-Rollback uses the previous committed adapter and ordinary deployment; there is no
-installed-package edit to restore. Remove this forwarding override when a pinned
-upstream release preserves the tier and passes the same checks.
+Remove the forwarding override when a pinned upstream release preserves the tier
+and passes the same checks.
+
+### Restore the desktop control
+
+The desktop's Fast controls require the host's genuine ChatGPT identity. The
+LiteLLM provider uses `requires_openai_auth = true` and
+`env_key = "LITELLM_PROXY_KEY"`, replacing its incompatible credential-command
+table. The native ChatGPT login, endpoint, catalog, model, and standard-speed
+default remain in place. No desktop or installed package is patched.
+
+The repository-owned `scripts/codex-launcher` is installed at the desktop's existing
+`~/.local/bin/codex` entry point. It decrypts the existing credential into the
+process environment, rejects empty/invalid credentials, and executes the Mise
+`codex/latest/bin/codex` binary with arguments unchanged. Explicit environment
+exclusion keeps the key out of shell tools. **Shell snapshots are disabled**:
+the live stock-Codex probe found that snapshots could restore the startup key
+after exclusion. Disabling them also prevents persisting that startup environment.
+No key is written to TOML, logs, or shell startup files.
+
+After merging and ordinary deployment, use the dedicated Ansible playbook:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/fast-toggle.yml
+uv run --no-sync scripts/verify_fast_app_server.py
+```
+
+The isolated app-server verifier uses an access-only copy of the existing login
+with an empty refresh token. It runs real priority/standard turns and shell tools,
+checks proxy-key authentication through an in-memory relay, and removes its
+private temporary home on exit. It reports no prompts or credentials. Native
+search and resume are covered by `verify_codex.py` using the same migration.
+
+Restart Grace through the owning desktop. Confirm `/fast` and Fast are available
+for a supported subscription model, then send an on turn and an off turn. Check
+follow-up turns, persistence across a second connection restart, and an existing
+task. To observe outgoing adapter metadata temporarily, create the empty file
+`~/.local/state/litellm/fast-observation.jsonl` with mode `0600`. The adapter appends
+only a timestamp and an allowlisted requested tier, stops at 256 KiB, and never
+creates the file itself. Delete it immediately after acceptance or failure.
+The expected observations are `priority` on and omitted (`null`) or `default` off.
+
+The one private recovery record is
+`~/.local/state/litellm/fast-toggle.json`. It retains the previous launcher target
+and configuration until actual desktop acceptance. Rollback refuses to overwrite
+intervening launcher/configuration edits and can recover interrupted preparation.
+
+```sh
+# On acceptance failure, then restart Grace again from the desktop:
+ansible-playbook -i deploy/inventory.yml deploy/fast-toggle.yml -e fast_toggle_action=rollback
+# Only after the actual desktop and request checks pass:
+ansible-playbook -i deploy/inventory.yml deploy/fast-toggle.yml -e fast_toggle_action=finish -e fast_desktop_validated=true
+```
+
+Do not close the task based only on CLI probes or account discovery. Completion
+means working desktop controls and verified on/off requests; a throughput
+benchmark and returned-tier equality are not required.
 
 ## Refresh subscription models explicitly
 

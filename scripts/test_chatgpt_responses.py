@@ -1,6 +1,8 @@
 """Offline checks against the actual pinned provider selection and transformer."""
 import copy
+import json
 import os
+from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -13,7 +15,7 @@ from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPICon
 from litellm.types.router import GenericLiteLLMParams
 from litellm.utils import ProviderConfigManager
 
-from chatgpt_responses import SubscriptionResponsesConfig, install
+from chatgpt_responses import SubscriptionResponsesConfig, install, observe_tier
 
 
 class RequestTests(unittest.TestCase):
@@ -94,6 +96,27 @@ class RequestTests(unittest.TestCase):
                 self.assertFalse(outgoing['store'])
                 self.assertTrue(outgoing['stream'])
                 self.assertIn('reasoning.encrypted_content', outgoing['include'])
+
+    def test_observation_is_opt_in_metadata_only_and_does_not_follow_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / 'observation'
+            with patch('chatgpt_responses.OBSERVATION', target):
+                observe_tier({'service_tier': 'priority'})
+                self.assertFalse(target.exists())
+                target.touch(mode=0o600)
+                observe_tier({'service_tier': 'priority', 'input': 'PRIVATE', 'authorization': 'SECRET'})
+                observe_tier({'service_tier': 'PRIVATE'})
+                entries = [json.loads(line) for line in target.read_text().splitlines()]
+                self.assertEqual(set(entries[0]), {'time', 'requested_tier'})
+                self.assertEqual(entries[0]['requested_tier'], 'priority')
+                self.assertEqual(entries[1]['requested_tier'], 'other')
+                self.assertNotIn('PRIVATE', target.read_text())
+                target.unlink()
+                other = Path(directory) / 'other'
+                other.touch(mode=0o600)
+                target.symlink_to(other)
+                observe_tier({'service_tier': 'priority'})
+                self.assertEqual(other.read_text(), '')
 
 
 if __name__ == '__main__':
