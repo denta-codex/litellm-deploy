@@ -32,11 +32,7 @@
     - name: Preview the runtime transaction without installing or editing
       ansible.builtin.command:
         argv:
-          - "{{ litellm_uv }}"
-          - run
-          - --no-sync
-          - --project
-          - "{{ source_root }}"
+          - "{{ litellm_root }}/.venv/bin/python"
           - "{{ source_root }}/scripts/codex_runtime.py"
           - preview
           - --version
