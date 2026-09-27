@@ -84,6 +84,7 @@ exit 2
         transaction = json.loads(self.runtime.transaction.read_text())
         self.assertEqual(transaction['before'], before)
         self.assertEqual(self.runtime.transaction.stat().st_mode & 0o777, 0o600)
+        self.assertTrue(self.runtime.summary()['restart_required'])
         self.assertFalse(self.runtime.apply()['changed'])
 
     def test_rollback_restores_binary_selection_config_unit_and_override_together(self):
