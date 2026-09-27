@@ -4,6 +4,11 @@ model_list:
       mode: responses
     litellm_params:
       model: {{ litellm_model }}
+  - model_name: codex-auto-review
+    model_info:
+      mode: responses
+    litellm_params:
+      model: chatgpt/codex-auto-review
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   disable_spend_logs: true

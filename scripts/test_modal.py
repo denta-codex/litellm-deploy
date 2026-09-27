@@ -59,32 +59,38 @@ class ModalTests(unittest.TestCase):
                              'litellm_params': {'model': 'chatgpt/astra', 'extra_headers': {'keep': 'yes'}}}
         self.native = {'slug': 'astra', 'visibility': 'list', 'base_instructions': 'Native',
                        'supports_search_tool': True, 'context_window': 272000}
-        self.config = {'model_list': [self.subscription], 'general_settings': {'master_key': 'os.environ/LITELLM_MASTER_KEY'}}
+        self.reviewer = {'slug': 'codex-auto-review', 'visibility': 'hide', 'base_instructions': 'Reviewer',
+                         'use_responses_lite': False}
+        self.review_route = {'model_name': 'codex-auto-review', 'model_info': {'mode': 'responses'},
+                             'litellm_params': {'model': 'chatgpt/codex-auto-review'}}
+        self.config = {'model_list': [self.subscription, self.review_route],
+                       'general_settings': {'master_key': 'os.environ/LITELLM_MASTER_KEY'}}
         self.catalog = {'models': [self.native | {'slug': 'chatgpt/astra', 'use_responses_lite': False},
-                                   self.native | {'visibility': 'hide'}]}
+                                   self.native | {'visibility': 'hide'}, self.reviewer]}
 
     def test_routes_preserve_subscription_and_converge(self):
         config, catalog, summary = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
         self.assertEqual(config['model_list'][0], self.subscription)
+        self.assertEqual(config['model_list'][1], self.review_route)
         self.assertEqual(config['general_settings'], self.config['general_settings'])
-        self.assertEqual(catalog['models'][:2], self.catalog['models'])
+        self.assertEqual(catalog['models'][:3], self.catalog['models'])
         self.assertEqual(len(summary['added']), 3)
-        for route in config['model_list'][1:]:
+        for route in config['model_list'][2:]:
             params = route['litellm_params']
             self.assertEqual(params['api_base'], API_BASE)
             self.assertEqual(params['api_key'], 'os.environ/MODAL_API_KEY')
             self.assertTrue(params['use_chat_completions_api'])
             self.assertEqual(route['model_info']['mode'], 'chat')
-        for entry in catalog['models'][2:]:
+        for entry in catalog['models'][3:]:
             self.assertFalse(entry['supports_search_tool'])
             self.assertFalse(entry['prefer_websockets'])
             self.assertFalse(entry['use_responses_lite'])
         again_config, again_catalog, again = generate(self.source, config, catalog, 'chatgpt/astra')
         self.assertEqual((config, catalog), (again_config, again_catalog))
         self.assertEqual(again['test_models'], [])
-        refreshed_config, refreshed_catalog, _ = generate_subscription({'models': [self.native]}, config, catalog, 'chatgpt/astra')
-        self.assertEqual([m for m in refreshed_catalog['models'] if m['slug'].startswith('modal/')], catalog['models'][2:])
-        self.assertEqual([r for r in refreshed_config['model_list'] if r['model_name'].startswith('modal/')], config['model_list'][1:])
+        refreshed_config, refreshed_catalog, _ = generate_subscription({'models': [self.native, self.reviewer]}, config, catalog, 'chatgpt/astra')
+        self.assertEqual([m for m in refreshed_catalog['models'] if m['slug'].startswith('modal/')], catalog['models'][3:])
+        self.assertEqual([r for r in refreshed_config['model_list'] if r['model_name'].startswith('modal/')], config['model_list'][2:])
 
     def test_manifest_rejections_and_selected_removal(self):
         for source in ({'models': []}, {'models': [self.source['models'][0]] * 2},
@@ -97,9 +103,9 @@ class ModalTests(unittest.TestCase):
 
     def test_changed_route_is_validated(self):
         config, catalog, _ = generate(self.source, self.config, self.catalog, '')
-        config['model_list'][1]['litellm_params']['api_base'] = 'https://old.invalid'
+        config['model_list'][2]['litellm_params']['api_base'] = 'https://old.invalid'
         _, _, summary = generate(self.source, config, catalog, '')
-        self.assertEqual(summary['test_models'], [config['model_list'][1]['model_name']])
+        self.assertEqual(summary['test_models'], [config['model_list'][2]['model_name']])
 
 
 class ActivationTests(ModalTests):
@@ -116,7 +122,7 @@ class ActivationTests(ModalTests):
         self.refresh.paths['config'].write_text(yaml.safe_dump(self.config))
         self.refresh.paths['catalog'].write_text(encode(self.catalog))
         self.subscription_snapshot = self.refresh.state / 'subscription-models.json'
-        self.subscription_snapshot.write_text(encode({'version': 1, 'codex_version': 'test', 'catalog': {'models': [self.native]}}))
+        self.subscription_snapshot.write_text(encode({'version': 1, 'codex_version': 'test', 'catalog': {'models': [self.native, self.reviewer]}}))
         self.snapshot = {'version': 1, 'codex_version': 'test', 'catalog': self.source}
         self.originals = self.refresh.originals()
 
@@ -163,6 +169,24 @@ class ActivationTests(ModalTests):
             self.refresh.finish()
         self.refresh.rollback()
         self.assertEqual(self.refresh.originals(), self.originals)
+
+    def test_followup_modal_change_does_not_probe_reviewer(self):
+        self.prepare()
+        self.refresh.activate()
+        with patch('refresh_models.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')):
+            self.refresh.validate()
+        self.refresh.finish()
+        self.snapshot['catalog']['models'][0]['display_name'] += ' revised'
+        summary = self.prepare()
+        self.assertEqual(len(summary['test_models']), 1)
+        self.assertFalse(summary.get('test_reviewer', False))
+        self.refresh.activate()
+        with patch('refresh_models.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+            self.refresh.validate()
+        self.assertEqual(run.call_count, 2)
+        self.assertFalse(any('verify_review.py' in arg for call in run.call_args_list for arg in call.args[0]))
+        self.refresh.finish()
+        self.assertIn(self.review_route, yaml.safe_load(self.refresh.paths['config'].read_text())['model_list'])
 
     def test_shared_lock_and_recovery_ownership(self):
         self.prepare()

@@ -125,6 +125,7 @@ It is independent of the uninstalled gateway service; do not copy it into
 uv run --no-sync scripts/test_cutover.py
 uv run --no-sync scripts/verify.py
 uv run --no-sync scripts/verify_codex.py
+uv run --no-sync scripts/verify_review.py
 ```
 
 `verify.py` sends small subscription requests. It checks unauthenticated rejection,
@@ -153,12 +154,20 @@ Discovery failures leave the installation unchanged. An expired login is reporte
 without starting an interactive login or rotating credentials; use the documented
 stock login command if needed, then retry.
 
-`chatgpt/` is the refresh-owned model namespace. Each upstream selectable model
-gets one `chatgpt/<slug>` route and one visible picker entry. Hidden native entries
+`chatgpt/` and the reserved `codex-auto-review` route are owned by refresh.
+Each upstream selectable chat model gets one `chatgpt/<slug>` route and one
+visible picker entry. Hidden native entries
 retain metadata for existing tasks. Other provider routes, their settings, and
 catalog entries are preserved. The selected default is not changed; removing it
 from the discovered list aborts the refresh rather than substituting another model.
 Old tasks can retain their native model selection; no task history is rewritten.
+
+Codex sends approval-review requests using the exact name `codex-auto-review`.
+Refresh routes that name to `chatgpt/codex-auto-review`, the subscription's native
+hidden reviewer. It stays hidden in the picker, uses full Responses transport,
+and is never replaced with a general chat model. Discovery that omits the native
+reviewer is rejected before activation. Bootstrap configuration includes the same
+route; the initial refresh after login verifies its availability.
 
 Preview shows added/removed model IDs and changed metadata fields, with before/after
 lists. It performs discovery but does not install files, refresh OAuth tokens,
@@ -168,6 +177,9 @@ if routes changed, and tests streaming, function-call continuation, and stock Co
 search/tools/context for new or changed models (two concurrent probes maximum).
 Search is tested only when the discovered model advertises it. Validation consumes
 subscription usage. The picker is published only after every probe succeeds.
+New or changed review routing/metadata also requires a streaming JSON response
+from the reserved name. A Codex version change revalidates both chat models and
+the reviewer. Reviewer failure triggers the same rollback as chat-model failure.
 
 A successful discovery is stored privately in
 `~/.local/state/litellm/subscription-models.json`; generated configuration remains
@@ -292,11 +304,45 @@ and preservation of subscription refresh. They do not establish live endpoint
 availability or validate the retained secret. Installing and activating this
 change is a separate operation.
 
+### Repair installations missing the approval reviewer
+
+An installation missing the reserved route rejects approval requests with
+`Invalid model name passed in model=codex-auto-review`. From a clean committed
+checkout containing this fix, run refresh **before** ordinary deployment: the
+deployment snapshot check intentionally rejects the old, incomplete routing.
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+uv run --no-sync scripts/verify_review.py
+```
+
+The refresh uses this checkout's scripts and the existing installed environment;
+it requires no reinstall or credential changes. Its preview should show
+`test_reviewer: true`. Unchanged chat routes need no additional inference probes.
+Refresh rolls back routing and metadata if reviewer validation fails; use the
+documented refresh rollback command if the operation is interrupted.
+
+Restart Grace's connection through the owning desktop if refresh reports a
+catalog change. Then exercise one authorized, read-only command that requires
+automatic approval, such as a host service-status check, and confirm an actual
+review decision and command result. `verify_review.py` checks only route access,
+streaming completion, and a JSON response; it does not prove Codex's native
+approval lifecycle. Stock LiteLLM 1.102.1's ChatGPT adapter drops `text.format`,
+so the probe does not assert upstream JSON-schema enforcement.
+
+If the broken reviewer prevents the repair command from being approved, perform
+the repair through a user-approved host terminal. Do not disable or work around
+approval controls from inside the agent task.
+
 Development checks:
 
 ```sh
 uv run --no-sync scripts/test_refresh_models.py
 uv run --no-sync scripts/test_cutover.py
+uv run --no-sync scripts/test_verify_review.py
 uv run --no-sync scripts/test_modal.py
 uv run --no-sync scripts/test_modal_bridge.py
 ```
@@ -308,4 +354,5 @@ Grace, use the existing locked installation explicitly:
 uv run --no-sync --project /home/agent/.local/share/litellm scripts/test_modal.py
 uv run --no-sync --project /home/agent/.local/share/litellm scripts/test_modal_bridge.py
 uv run --no-sync --project /home/agent/.local/share/litellm scripts/test_refresh_models.py
+uv run --no-sync --project /home/agent/.local/share/litellm scripts/test_verify_review.py
 ```
