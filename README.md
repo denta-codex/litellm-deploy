@@ -1,6 +1,7 @@
 # Grace LiteLLM deployment
 
-Stock LiteLLM 1.102.1, uv, and systemd on Grace, for stock Codex through a named
+LiteLLM 1.102.1 with a small repository-owned ChatGPT request customization,
+uv, and systemd on Grace, for stock Codex through a named
 `litellm` Responses provider. Default model: `chatgpt/gpt-6-astra`. Discover subscription models with
 the explicit refresh command below. This is a private, single-host deployment.
 
@@ -20,12 +21,55 @@ ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
 The proxy listens on `127.0.0.1:4000`. It runs with a locked uv environment and
 no runtime dependency downloads. No database or Redis server is configured;
 stock upstream may include their client libraries among its dependencies.
-No virtual-key administration, middleware, or source patches.
+No virtual-key administration, middleware, or installed dependency source edits.
 Codex uses a locally discovered model catalog to enable hosted Responses search;
 see the compatibility note below.
 Application files live under `~/.local/share/litellm`, configuration under
 `~/.config/litellm`, and mutable state under `~/.local/state/litellm`.
 The root-owned unit is `/etc/systemd/system/litellm.service`.
+
+### ChatGPT Responses customization
+
+`scripts/chatgpt_responses.py` subclasses the pinned upstream adapter and changes
+only request instructions and field preservation. Explicit client instructions,
+including an empty string, survive unchanged; absent instructions use upstream's
+fallback. It restores `text` (`format` and `verbosity`), `parallel_tool_calls`,
+and `prompt_cache_key` after upstream transformation. Authentication, token refresh,
+headers, HTTP transport, streaming, response parsing, and errors remain upstream.
+Upstream still forces `store=false`, streaming, and encrypted reasoning inclusion.
+
+`scripts/start-litellm` runs `scripts/serve.py` through the existing locked uv
+environment. Before invoking the upstream CLI, it replaces the
+`litellm.ChatGPTResponsesAPIConfig` export used by `ProviderConfigManager`.
+The server runs in the same process with one worker; reload and alternate worker
+launchers are not exposed. Running the stock `litellm` command directly bypasses
+this customization. Ansible installs these three runtime files and treats changes
+to them as restart-requiring; utility-only updates still do not restart inference.
+The launcher's optional fourth argument selects a port for isolated tests; the
+systemd invocation continues to use port 4000.
+
+The override fails startup unless LiteLLM is exactly 1.102.1. Any upstream upgrade
+must revalidate dispatch, transformation, and launcher tests, then revisit or
+remove the override. There is no copied adapter or separate deployed service.
+
+Isolated live subscription probes on September 27, 2026 used this checkout's
+launcher with an access-only snapshot of the existing login, no refresh token,
+and no live installation/configuration changes. Additional format/cache controls
+called the backend directly with the same transformer and upstream header helper,
+reading the existing access token without invoking login or refresh. Observations:
+
+| Field | Subscription-backend evidence and limits |
+| --- | --- |
+| `text.format: json_schema` | Both `gpt-6-astra` and `codex-auto-review` returned the schema-required enum despite conflicting non-JSON instructions. Both rejected invalid schemas with HTTP 400 / `invalid_json_schema`. This tests schema processing, beyond merely prompting for JSON; it is not an exhaustive schema-keyword guarantee. |
+| `text.format: text` | Accepted on `gpt-6-astra`. |
+| `text.format: json_object` | Accepted on `gpt-6-astra` when input explicitly mentioned JSON; input without that keyword was rejected. JSON-object mode is not schema enforcement. |
+| `text.verbosity` | `low` was accepted and echoed; an invalid value was rejected, listing `low`, `medium`, and `high`. Output-length effects were not measured. |
+| `parallel_tool_calls` | `false` and `true` were echoed and produced one and two calls respectively when asked for two tools. Streamed tool-result continuation passed. |
+| `prompt_cache_key` | Preserved on the outgoing wire, but the backend ignored the body value, even an invalid object. A supplied `session_id` header became the response cache key; without it the backend generated a key. Body-key control and cache-hit benefits are not supported by this evidence. Upstream session headers are unchanged. |
+
+These are account/model-specific observations, not guarantees for every model.
+The reserved reviewer also completed the existing probe's streaming JSON payload.
+That probe alone does not establish schema enforcement or Codex approval decisions.
 
 Complete a separate ChatGPT device login using the same subscription account:
 
@@ -248,8 +292,9 @@ catalog change. Then exercise one authorized, read-only command that requires
 automatic approval, such as a host service-status check, and confirm an actual
 review decision and command result. `verify_review.py` checks only route access,
 streaming completion, and a JSON response; it does not prove Codex's native
-approval lifecycle. Stock LiteLLM 1.102.1's ChatGPT adapter drops `text.format`,
-so the probe does not assert upstream JSON-schema enforcement.
+approval lifecycle. The repository customization forwards `text.format`, but this
+probe also explicitly prompts for JSON and does not itself assert schema enforcement;
+see the separate subscription-backend evidence above.
 
 If the broken reviewer prevents the repair command from being approved, perform
 the repair through a user-approved host terminal. Do not disable or work around
@@ -258,7 +303,13 @@ approval controls from inside the agent task.
 Development checks:
 
 ```sh
-uv run --no-sync scripts/test_refresh_models.py
-uv run --no-sync scripts/test_cutover.py
-uv run --no-sync scripts/test_verify_review.py
+uv sync --locked
+LITELLM_LOCAL_MODEL_COST_MAP=True uv run --no-sync -m unittest discover -s scripts -p 'test_*.py'
 ```
+
+These checks are offline. The startup test runs the actual shell/uv launcher and
+proxy on a temporary loopback port against a local SSE fixture with synthetic
+credentials. It exercises outgoing fields, exact/absent instructions, ordinary
+requests, tools/continuation, backend errors, and the reserved reviewer verifier.
+Existing tests also retain the reviewer routing, hidden metadata, and refresh
+checks. They neither contact the subscription backend nor restart live services.
