@@ -1,10 +1,12 @@
 """Narrow request customization for the pinned subscription adapter."""
 from importlib.metadata import version
+import hashlib
 import json
 import os
 from pathlib import Path
 import stat
 import time
+import uuid
 
 import litellm
 from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
@@ -31,7 +33,14 @@ def observe_tier(request):
         tier = request.get('service_tier')
         # A strict allowlist prevents arbitrary request contents entering logs.
         tier = tier if tier in (None, 'priority', 'default', 'auto') else 'other'
-        os.write(fd, (json.dumps({'time': time.time(), 'requested_tier': tier}) + '\n').encode())
+        # Correlate desktop turns without recording prompts or raw task IDs.
+        try:
+            session = str(uuid.UUID(request.get('prompt_cache_key', '')))
+            session = hashlib.sha256(session.encode()).hexdigest()[:16]
+        except (ValueError, TypeError, AttributeError):
+            session = None
+        os.write(fd, (json.dumps({'time': time.time(), 'requested_tier': tier,
+                                 'session': session}) + '\n').encode())
     except OSError:
         pass
     finally:

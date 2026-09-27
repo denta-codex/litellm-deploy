@@ -249,7 +249,8 @@ for a supported subscription model, then send an on turn and an off turn. Check
 follow-up turns, persistence across a second connection restart, and an existing
 task. To observe outgoing adapter metadata temporarily, create the empty file
 `~/.local/state/litellm/fast-observation.jsonl` with mode `0600`. The adapter appends
-only a timestamp and an allowlisted requested tier, stops at 256 KiB, and never
+only a timestamp, an allowlisted requested tier, and a hashed task UUID for
+correlation with concurrent traffic. It stops at 256 KiB and never
 creates the file itself. Delete it immediately after acceptance or failure.
 The expected observations are `priority` on and omitted (`null`) or `default` off.
 
