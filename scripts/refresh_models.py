@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
 
 PREFIX = 'chatgpt/'
+REVIEW_MODEL = 'codex-auto-review'
 
 
 def encode(value):
@@ -67,9 +68,11 @@ def validate_source(source):
 def generate(source, config, catalog, selected):
     validate_source(source)
     rows = source['models']
+    if not any(row['slug'] == REVIEW_MODEL for row in rows):
+        raise ValueError('Subscription catalog is missing codex-auto-review; refusing to remove or substitute the native reviewer')
     aliases = []
     for row in rows:
-        if row['visibility'] == 'list':
+        if row['visibility'] == 'list' and row['slug'] != REVIEW_MODEL:
             alias = copy.deepcopy(row)
             alias['slug'] = PREFIX + row['slug']
             alias['use_responses_lite'] = False
@@ -81,6 +84,7 @@ def generate(source, config, catalog, selected):
     # Keep native metadata for existing tasks, including retired native IDs.
     # Only their routed aliases are listed. Unrelated provider entries survive.
     native = {m['slug']: dict(m, visibility='hide') for m in rows}
+    native[REVIEW_MODEL]['use_responses_lite'] = False
     preserved = []
     for slug, row in previous.items():
         if slug.startswith(PREFIX):
@@ -91,7 +95,8 @@ def generate(source, config, catalog, selected):
     result_catalog = dict(catalog, models=[*preserved, *native.values(), *aliases])
     result_config = copy.deepcopy(config)
     old_routes = {m['model_name']: m for m in config.get('model_list', [])}
-    other_routes = [m for m in config.get('model_list', []) if not m['model_name'].startswith(PREFIX)]
+    other_routes = [m for m in config.get('model_list', [])
+                    if not m['model_name'].startswith(PREFIX) and m['model_name'] != REVIEW_MODEL]
     routes = []
     for row in aliases:
         name = row['slug']
@@ -100,6 +105,15 @@ def generate(source, config, catalog, selected):
         route.setdefault('model_info', {})['mode'] = 'responses'
         route.setdefault('litellm_params', {})['model'] = name
         routes.append(route)
+    # Codex requests this reserved name verbatim, even though it is hidden from
+    # the picker. Forward it to the subscription's native approval reviewer.
+    reviewer = copy.deepcopy(old_routes.get(REVIEW_MODEL, {}))
+    reviewer['model_name'] = REVIEW_MODEL
+    reviewer.setdefault('model_info', {})['mode'] = 'responses'
+    reviewer.setdefault('litellm_params', {})['model'] = PREFIX + REVIEW_MODEL
+    routes.append(reviewer)
+    reviewer_changed = (old_routes.get(REVIEW_MODEL) != reviewer
+                        or previous.get(REVIEW_MODEL) != native[REVIEW_MODEL])
     result_config['model_list'] = [*other_routes, *routes]
     before = {name: row for name, row in previous.items() if name.startswith(PREFIX) and row.get('visibility') == 'list'}
     after = {row['slug']: row for row in aliases}
@@ -112,6 +126,7 @@ def generate(source, config, catalog, selected):
         'added': added, 'removed': sorted(before.keys() - after.keys()),
         'changed': changed, 'changed_fields': changed_fields,
         'test_models': sorted(set(added) | set(changed)),
+        'reviewer_changed': reviewer_changed, 'test_reviewer': reviewer_changed,
         'before': sorted(before), 'after': sorted(after),
     }
 
@@ -166,6 +181,7 @@ class Refresh:
         summary['codex_version_changed'] = previous_snapshot.get('codex_version') != snapshot['codex_version']
         if summary['codex_version_changed']:
             summary['test_models'] = summary['after']
+            summary['test_reviewer'] = True
         candidates = {
             'config': originals['config'] if new_config == config else yaml.safe_dump(new_config, sort_keys=False),
             'catalog': originals['catalog'] if new_catalog == catalog else encode(new_catalog),
@@ -223,6 +239,13 @@ class Refresh:
         rows = {r['slug']: r for r in json.loads(journal['candidates']['catalog'])['models']}
         log = self.transaction / 'validation.log'
         def verify(name):
+            if name == REVIEW_MODEL:
+                command = [self.uv, 'run', '--no-sync', '--project', str(self.root),
+                           str(Path(__file__).with_name('verify_review.py'))]
+                result = subprocess.run(command, capture_output=True, text=True, timeout=240)
+                if result.returncode:
+                    raise ValueError(f'{name}: validation failed\n{result.stdout[-1500:]}\n{result.stderr[-2000:]}')
+                return name
             commands = [
                 [self.uv, 'run', '--no-sync', '--project', str(self.root), str(Path(__file__).with_name('verify.py')), '--model', name],
                 [self.uv, 'run', '--no-sync', '--project', str(self.root), str(Path(__file__).with_name('verify_codex.py')),
@@ -236,13 +259,15 @@ class Refresh:
                     raise ValueError(f'{name}: validation failed\n{result.stdout[-1500:]}\n{result.stderr[-2000:]}')
             return name
         # Bound subscription use and latency. Each probe owns a disposable Codex home.
+        test_models = journal['summary']['test_models'] + ([REVIEW_MODEL] if journal['summary']['test_reviewer'] else [])
         with log.open('w') as output, ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {executor.submit(verify, name): name for name in journal['summary']['test_models']}
+            futures = {executor.submit(verify, name): name for name in test_models}
             failures = []
             for future in as_completed(futures):
                 try:
                     name = future.result()
-                    output.write(f'PASS {name}: streaming, tools, context, advertised search\n')
+                    checks = 'review route, streaming, JSON output' if name == REVIEW_MODEL else 'streaming, tools, context, advertised search'
+                    output.write(f'PASS {name}: {checks}\n')
                 except Exception as exc:
                     failures.append(str(exc))
                     output.write(f'FAIL {futures[future]}\n')
@@ -250,7 +275,7 @@ class Refresh:
         if failures:
             raise ValueError('\n'.join(failures))
         atomic_write(self.transaction / 'validated', 'yes\n')
-        return {'validated': journal['summary']['test_models']}
+        return {'validated': test_models}
 
     def finish(self):
         journal = self.journal()

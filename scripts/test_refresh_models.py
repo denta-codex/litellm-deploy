@@ -1,6 +1,7 @@
 """Behavioral tests for discovery preservation and recoverable activation."""
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -8,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 import yaml
-from refresh_models import Refresh, encode, generate
+from refresh_models import REVIEW_MODEL, Refresh, encode, generate
 
 
 def model(slug, visibility='list'):
@@ -20,7 +21,7 @@ def model(slug, visibility='list'):
 
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
-        self.source = {'models': [model('astra'), model('sol'), model('review', 'hide')]}
+        self.source = {'models': [model('astra'), model('sol'), model(REVIEW_MODEL, 'hide')]}
         self.external = {'model_name': 'modal/custom', 'litellm_params': {'model': 'openai/private', 'api_key': 'os.environ/MODAL_KEY'}}
         self.config = {'model_list': [self.external], 'general_settings': {'master_key': 'os.environ/LITELLM_MASTER_KEY'}}
         self.catalog = {'models': [model('modal/custom'), model('retired-native', 'hide')]}
@@ -40,17 +41,85 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(again_config, config)
         self.assertEqual(again_catalog, catalog)
         self.assertEqual(again['test_models'], [])
+        self.assertFalse(again['test_reviewer'])
+
+    def test_native_reviewer_routes_without_appearing_in_picker(self):
+        config, catalog, summary = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
+        reviewer = next(r for r in config['model_list'] if r['model_name'] == REVIEW_MODEL)
+        self.assertEqual(reviewer['litellm_params']['model'], 'chatgpt/codex-auto-review')
+        self.assertEqual(reviewer['model_info']['mode'], 'responses')
+        metadata = next(r for r in catalog['models'] if r['slug'] == REVIEW_MODEL)
+        self.assertEqual(metadata['visibility'], 'hide')
+        self.assertFalse(metadata['use_responses_lite'])
+        self.assertNotIn('chatgpt/codex-auto-review', [r['slug'] for r in catalog['models']])
+        self.assertTrue(summary['test_reviewer'])
+        self.assertNotIn(REVIEW_MODEL, summary['test_models'])
+
+    def test_missing_native_reviewer_rejects_refresh(self):
+        source = {'models': [model('astra'), model('sol')]}
+        with self.assertRaisesRegex(ValueError, 'missing codex-auto-review'):
+            generate(source, self.config, self.catalog, 'chatgpt/astra')
+
+    def test_stock_litellm_resolves_bootstrap_and_discovered_reviewer(self):
+        with patch.dict(os.environ, {'LITELLM_LOCAL_MODEL_COST_MAP': 'True'}):
+            from litellm import Router, get_llm_provider
+            from litellm.llms.chatgpt.authenticator import Authenticator
+        from jinja2 import Environment, FileSystemLoader, StrictUndefined
+        templates = Path(__file__).resolve().parent.parent / 'deploy/templates'
+        template = Environment(loader=FileSystemLoader(templates), undefined=StrictUndefined).get_template('config.yaml.j2')
+        bootstrap = yaml.safe_load(template.render(litellm_model='chatgpt/gpt-6-astra'))
+        discovered, _, _ = generate(self.source, {'model_list': []}, {'models': []}, 'chatgpt/astra')
+        # Exercise real router/provider selection without reading credentials,
+        # starting device login, or making subscription requests.
+        with patch.object(Authenticator, '_ensure_token_dir'), \
+                patch.object(Authenticator, 'get_access_token', return_value='offline-test-token'):
+            for config in (bootstrap, discovered):
+                router = Router(model_list=config['model_list'])
+                route = router.get_available_deployment(model=REVIEW_MODEL, messages=[])
+                model_name, provider, _, _ = get_llm_provider(route['litellm_params']['model'])
+                self.assertEqual((model_name, provider), (REVIEW_MODEL, 'chatgpt'))
+
+    def test_reviewer_stays_hidden_if_upstream_marks_it_selectable(self):
+        self.source['models'][-1]['visibility'] = 'list'
+        config, catalog, summary = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
+        self.assertEqual(sum(r['model_name'] == REVIEW_MODEL for r in config['model_list']), 1)
+        self.assertNotIn('chatgpt/codex-auto-review', summary['after'])
+        self.assertEqual(next(r['visibility'] for r in catalog['models'] if r['slug'] == REVIEW_MODEL), 'hide')
+
+    def test_missing_route_repaired_without_revalidating_unchanged_chat_models(self):
+        config, catalog, _ = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
+        config['model_list'] = [r for r in config['model_list'] if r['model_name'] != REVIEW_MODEL]
+        repaired, _, summary = generate(self.source, config, catalog, 'chatgpt/astra')
+        self.assertEqual(sum(r['model_name'] == REVIEW_MODEL for r in repaired['model_list']), 1)
+        self.assertTrue(summary['test_reviewer'])
+        self.assertEqual(summary['test_models'], [])
+
+    def test_reviewer_route_and_metadata_changes_require_validation(self):
+        config, catalog, _ = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
+        for change in ('route', 'metadata'):
+            with self.subTest(change=change):
+                changed_config, changed_source = copy.deepcopy(config), copy.deepcopy(self.source)
+                if change == 'route':
+                    route = next(r for r in changed_config['model_list'] if r['model_name'] == REVIEW_MODEL)
+                    route['litellm_params']['model'] = 'chatgpt/astra'
+                else:
+                    changed_source['models'][-1]['context_window'] = 1000000
+                repaired, _, summary = generate(changed_source, changed_config, catalog, 'chatgpt/astra')
+                self.assertTrue(summary['test_reviewer'])
+                self.assertEqual(summary['test_models'], [])
+                self.assertEqual(next(r['litellm_params']['model'] for r in repaired['model_list']
+                                      if r['model_name'] == REVIEW_MODEL), 'chatgpt/codex-auto-review')
 
     def test_reject_empty_duplicate_missing_fields_and_selected_removal(self):
         for source in ({'models': []}, {'models': [model('astra'), model('astra')]},
                        {'models': [{'slug': 'astra', 'visibility': 'list'}]},
-                       {'models': [model('sol')]}):
+                       {'models': [model('sol'), model(REVIEW_MODEL, 'hide')]}):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 generate(source, self.config, self.catalog, 'chatgpt/astra')
 
     def test_removed_models_leave_picker_and_routes(self):
         config, catalog, _ = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
-        source = {'models': [model('astra')]}
+        source = {'models': [model('astra'), model(REVIEW_MODEL, 'hide')]}
         new_config, new_catalog, diff = generate(source, config, catalog, 'chatgpt/astra')
         self.assertEqual(diff['removed'], ['chatgpt/sol'])
         self.assertNotIn('chatgpt/sol', [m['model_name'] for m in new_config['model_list']])
@@ -119,6 +188,36 @@ class ActivationTests(unittest.TestCase):
             result = self.refresh.prepare()
         self.assertFalse(result['any_changes'])
         run.assert_not_called()
+
+    def test_reviewer_failure_blocks_publication_and_rolls_back(self):
+        self.prepare()
+        self.refresh.activate()
+        commands = []
+        def probe(command, **kwargs):
+            commands.append(command)
+            failed = any(arg.endswith('verify_review.py') for arg in command)
+            return subprocess.CompletedProcess(command, int(failed), '', 'review route failed' if failed else '')
+        with patch('refresh_models.subprocess.run', side_effect=probe):
+            with self.assertRaisesRegex(ValueError, 'codex-auto-review: validation failed'):
+                self.refresh.validate()
+        self.assertTrue(any(any(arg.endswith('verify_review.py') for arg in command) for command in commands))
+        self.assertFalse((self.refresh.transaction / 'validated').exists())
+        with self.assertRaisesRegex(ValueError, 'not passed'):
+            self.refresh.finish()
+        self.refresh.rollback()
+        self.assertEqual(self.refresh.originals(), self.originals)
+
+    def test_codex_version_change_revalidates_reviewer(self):
+        self.prepare()
+        self.refresh.activate()
+        with patch('refresh_models.subprocess.run', return_value=subprocess.CompletedProcess([], 0, 'PASS', '')):
+            self.refresh.validate()
+        self.refresh.finish()
+        updated = self.snapshot | {'codex_version': 'next'}
+        summary = self.refresh.candidate(updated)['summary']
+        self.assertFalse(summary['reviewer_changed'])
+        self.assertTrue(summary['test_reviewer'])
+        self.assertEqual(summary['test_models'], summary['after'])
 
     def test_concurrent_edit_is_not_overwritten(self):
         self.prepare()
