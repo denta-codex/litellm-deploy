@@ -3,6 +3,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -17,6 +18,11 @@ def model(slug, visibility='list'):
             'display_name': slug, 'use_responses_lite': True, 'supports_search_tool': True,
             'context_window': 272000, 'supported_reasoning_levels': [{'effort': 'high'}],
             'future_capability': {'keep': True}}
+
+
+def upgrade(target):
+    return {'model': target, 'migration_markdown': 'Switch to the replacement model.',
+            'retirement_at': '2026-10-14T19:00:00Z', 'future_metadata': {'keep': True}}
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -134,9 +140,134 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(diff['changed_fields']['chatgpt/sol'], ['context_window'])
 
 
+class UpgradeTests(unittest.TestCase):
+    def setUp(self):
+        DiscoveryTests.setUp(self)
+        self.source = {'models': [model('gpt-5.5'), model('gpt-5.6-sol'), model(REVIEW_MODEL, 'hide')]}
+        self.source['models'][0]['upgrade'] = upgrade('gpt-5.6-sol')
+        self.source['models'][1]['upgrade'] = None
+        self.catalog['models'][0]['upgrade'] = upgrade('modal/replacement')
+        self.catalog['models'][1]['upgrade'] = upgrade('retired-replacement')
+        self.catalog['future_setting'] = {'keep': True}
+
+    def assert_routable_upgrades(self, config, catalog):
+        routes = {r['model_name']: r for r in config['model_list']}
+        selectable = {r['slug'] for r in catalog['models'] if r['visibility'] == 'list'}
+        for row in catalog['models']:
+            if row['slug'].startswith('chatgpt/') and row.get('upgrade') is not None:
+                target = row['upgrade']['model']
+                self.assertIn(target, selectable)
+                self.assertIn(target, routes)
+                self.assertEqual(routes[target]['litellm_params']['model'], target)
+
+    def test_rewrite_preserves_metadata_native_external_and_inputs(self):
+        originals = copy.deepcopy((self.source, self.config, self.catalog))
+        config, catalog, summary = generate(self.source, self.config, self.catalog, 'chatgpt/gpt-5.5')
+        rows = {r['slug']: r for r in catalog['models']}
+        expected = copy.deepcopy(self.source['models'][0])
+        expected.update(slug='chatgpt/gpt-5.5', use_responses_lite=False)
+        expected['upgrade']['model'] = 'chatgpt/gpt-5.6-sol'
+        self.assertEqual(rows['chatgpt/gpt-5.5'], expected)
+        for row in self.source['models']:
+            native = row | {'visibility': 'hide'}
+            if row['slug'] == REVIEW_MODEL:
+                native['use_responses_lite'] = False
+            self.assertEqual(rows[row['slug']], native)
+        for row in self.catalog['models']:
+            self.assertEqual(rows[row['slug']], row)
+        self.assertEqual(catalog['future_setting'], self.catalog['future_setting'])
+        self.assertEqual(config['model_list'][0], self.external)
+        self.assertEqual(config['general_settings'], self.config['general_settings'])
+        self.assertEqual(len(rows), len(catalog['models']))
+        self.assertEqual(len({r['model_name'] for r in config['model_list']}), len(config['model_list']))
+        self.assertEqual((self.source, self.config, self.catalog), originals)
+        self.assertEqual(summary['disabled_upgrades'], [])
+        self.assert_routable_upgrades(config, catalog)
+
+    def test_unavailable_targets_clear_only_routed_upgrade_and_report(self):
+        for target, visibility in (('gpt-5.6-sol', None), ('gpt-5.6-sol', 'hide'),
+                                   ('gpt-5.6-sol', 'none'), (REVIEW_MODEL, 'hide'),
+                                   (REVIEW_MODEL, 'list'), ('modal/custom', None)):
+            with self.subTest(target=target, visibility=visibility):
+                source = copy.deepcopy(self.source)
+                source['models'][0]['upgrade'] = upgrade(target)
+                if target == 'gpt-5.6-sol':
+                    if visibility is None:
+                        del source['models'][1]
+                    else:
+                        source['models'][1]['visibility'] = visibility
+                elif target == REVIEW_MODEL:
+                    source['models'][-1]['visibility'] = visibility
+                # A stale installed route/catalog entry is not an available target.
+                config, catalog, _ = generate(self.source, self.config, self.catalog, 'chatgpt/gpt-5.5')
+                config, catalog, summary = generate(source, config, catalog, 'chatgpt/gpt-5.5')
+                rows = {r['slug']: r for r in catalog['models']}
+                self.assertEqual(rows['chatgpt/gpt-5.5'], source['models'][0] | {
+                    'slug': 'chatgpt/gpt-5.5', 'use_responses_lite': False, 'upgrade': None})
+                self.assertEqual(rows['gpt-5.5']['upgrade'], upgrade(target))
+                self.assertEqual(source['models'][0]['upgrade'], upgrade(target))
+                self.assertEqual(summary['disabled_upgrades'], [{
+                    'model': 'chatgpt/gpt-5.5', 'target': target, 'reason': 'No selectable chatgpt route'}])
+                self.assert_routable_upgrades(config, catalog)
+                again_config, again_catalog, again = generate(source, config, catalog, 'chatgpt/gpt-5.5')
+                self.assertEqual((again_config, again_catalog), (config, catalog))
+                self.assertEqual(again['test_models'], [])
+                self.assertFalse(again['test_reviewer'])
+                self.assertEqual(again['disabled_upgrades'], summary['disabled_upgrades'])
+
+    def test_repairs_existing_upgrade_without_changing_routes_and_converges(self):
+        config, catalog, _ = generate(self.source, self.config, self.catalog, 'chatgpt/gpt-5.5')
+        rows = {r['slug']: r for r in catalog['models']}
+        rows['chatgpt/gpt-5.5']['upgrade']['model'] = 'gpt-5.6-sol'
+        repaired_config, repaired_catalog, summary = generate(self.source, config, catalog, 'chatgpt/gpt-5.5')
+        self.assertEqual(repaired_config, config)
+        self.assertEqual(summary['changed_fields'], {'chatgpt/gpt-5.5': ['upgrade']})
+        self.assertEqual(summary['test_models'], ['chatgpt/gpt-5.5'])
+        self.assertFalse(summary['test_reviewer'])
+        again_config, again_catalog, again = generate(self.source, repaired_config, repaired_catalog, 'chatgpt/gpt-5.5')
+        self.assertEqual((again_config, again_catalog), (repaired_config, repaired_catalog))
+        self.assertEqual(again['test_models'], [])
+        self.assertFalse(again['test_reviewer'])
+        self.assert_routable_upgrades(repaired_config, repaired_catalog)
+
+    @unittest.skipUnless(shutil.which('codex'), 'Stock Codex is not installed')
+    def test_stock_codex_parses_routed_and_disabled_upgrades(self):
+        for available in (True, False):
+            with self.subTest(available=available), tempfile.TemporaryDirectory() as temporary:
+                source = copy.deepcopy(self.source)
+                if not available:
+                    source['models'][1]['visibility'] = 'hide'
+                config, catalog, _ = generate(source, self.config, self.catalog, 'chatgpt/gpt-5.5')
+                # Supply the remaining required stock fields without copying native prompts.
+                for row in catalog['models']:
+                    row.update(description='Offline fixture', default_reasoning_level='high',
+                               supported_reasoning_levels=[{'effort': 'high', 'description': 'High'}],
+                               shell_type='shell_command', supported_in_api=True, priority=1,
+                               supports_reasoning_summaries=True, support_verbosity=True,
+                               default_verbosity='low', experimental_supported_tools=[],
+                               truncation_policy={'mode': 'tokens', 'limit': 10000})
+                path = Path(temporary) / 'catalog.json'
+                path.write_text(encode(catalog))
+                result = subprocess.run(['codex', 'debug', 'models', '-c', 'model_catalog_json=' + json.dumps(str(path))],
+                                        env=os.environ | {'CODEX_HOME': temporary}, capture_output=True, text=True, timeout=60)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                parsed = json.loads(result.stdout)
+                rows = {r['slug']: r for r in parsed['models']}
+                expected = 'chatgpt/gpt-5.6-sol' if available else None
+                actual = rows['chatgpt/gpt-5.5'].get('upgrade')
+                self.assertEqual(actual['model'] if actual else None, expected)
+                if available:
+                    self.assertEqual(actual['migration_markdown'], upgrade('gpt-5.6-sol')['migration_markdown'])
+                    self.assertEqual(actual['retirement_at'], upgrade('gpt-5.6-sol')['retirement_at'])
+                self.assertEqual(rows['gpt-5.5']['upgrade']['model'], 'gpt-5.6-sol')
+                self.assertEqual(rows[REVIEW_MODEL]['visibility'], 'hide')
+                self.assert_routable_upgrades(config, parsed)
+
+
 class ActivationTests(unittest.TestCase):
     def setUp(self):
         DiscoveryTests.setUp(self)
+        self.source['models'][0]['upgrade'] = upgrade('sol')
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
@@ -157,9 +288,12 @@ class ActivationTests(unittest.TestCase):
             return self.refresh.prepare()
 
     def test_preview_does_not_write_or_run_model_validation(self):
+        self.source['models'][1]['visibility'] = 'hide'
         with patch.object(self.refresh, 'discover', return_value=self.snapshot), patch('refresh_models.subprocess.run') as run:
             summary = self.refresh.prepare(preview=True)
         self.assertTrue(summary['any_changes'])
+        self.assertEqual(summary['disabled_upgrades'], [{
+            'model': 'chatgpt/astra', 'target': 'sol', 'reason': 'No selectable chatgpt route'}])
         self.assertEqual(self.refresh.originals(), self.originals)
         self.assertFalse(self.refresh.transaction.exists())
         run.assert_not_called()
