@@ -240,6 +240,10 @@ retain metadata for existing tasks. Other provider routes, their settings, and
 catalog entries are preserved. The selected default is not changed; removing it
 from the discovered list aborts the refresh rather than substituting another model.
 Old tasks can retain their native model selection; no task history is rewritten.
+Upgrade actions on routed entries point to the corresponding selectable
+`chatgpt/` route, preserving the upstream explanation and retirement date.
+If that target is unavailable, the routed upgrade action is cleared and reported
+in `disabled_upgrades` in the refresh/preview output; native metadata is retained.
 
 Codex sends approval-review requests using the exact name `codex-auto-review`.
 Refresh routes that name to `chatgpt/codex-auto-review`, the subscription's native

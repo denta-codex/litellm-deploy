@@ -78,6 +78,19 @@ def generate(source, config, catalog, selected):
             alias['use_responses_lite'] = False
             aliases.append(alias)
     names = {m['slug'] for m in aliases}
+    disabled_upgrades = []
+    # Upgrade actions must use the same selectable namespace as the picker.
+    for alias in aliases:
+        upgrade = alias.get('upgrade')
+        if upgrade is None:
+            continue
+        target = PREFIX + upgrade['model']
+        if target in names:
+            upgrade['model'] = target
+        else:
+            disabled_upgrades.append({'model': alias['slug'], 'target': upgrade['model'],
+                                      'reason': 'No selectable chatgpt route'})
+            alias['upgrade'] = None
     if selected.startswith(PREFIX) and selected not in names:
         raise ValueError(f'Selected model {selected} disappeared; select another model before refreshing')
     previous = {m['slug']: m for m in catalog.get('models', [])}
@@ -128,6 +141,7 @@ def generate(source, config, catalog, selected):
         'test_models': sorted(set(added) | set(changed)),
         'reviewer_changed': reviewer_changed, 'test_reviewer': reviewer_changed,
         'before': sorted(before), 'after': sorted(after),
+        'disabled_upgrades': disabled_upgrades,
     }
 
 
