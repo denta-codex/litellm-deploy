@@ -167,9 +167,13 @@ uv run --no-sync scripts/verify_codex.py --service-tier priority
 
 The API probes require the backend to report the requested tier on streaming,
 function-call, and tool-result responses. A successful text response alone is
-not evidence that fast mode worked. The Codex probe exercises an explicit tier
-with native search and resumed tool execution. Also check the desktop Fast toggle
-in a new task before declaring the rollout verified.
+not evidence that fast mode worked. The backend can still return `default` for
+an explicitly forwarded `priority` request; the priority probe deliberately fails
+in that case. Do not treat a forwarding fix as proof of backend priority service.
+The Codex probe enables its fast-mode feature and exercises an explicit tier
+with native search and resumed tool execution. Both probes accept `--base-url`
+to test an isolated proxy without changing the live listener. Also check the
+desktop Fast toggle in a new task before declaring the rollout verified.
 
 Rollback requires restoring the installed adapter as well as reverting the
 deployment change; deploying an earlier checkout alone does not undo a package

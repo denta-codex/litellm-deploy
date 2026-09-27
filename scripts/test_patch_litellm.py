@@ -1,5 +1,6 @@
 """Offline regression tests against the installed, locked upstream adapter."""
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -9,6 +10,9 @@ from unittest.mock import patch
 os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
 
 from litellm.llms.chatgpt.responses import transformation
+from litellm.llms.custom_httpx.http_handler import HTTPHandler
+import httpx
+import litellm
 from patch_litellm import VERSION, apply_patch, patched_source
 
 
@@ -55,6 +59,42 @@ class ServiceTierTests(unittest.TestCase):
         self.assertEqual(result['input'], items)
         self.assertEqual(result['service_tier'], 'priority')
         self.assertEqual(result['previous_response_id'], 'resp_probe')
+
+    def test_responses_sends_tier_to_http_transport(self):
+        adapter = self.adapter(patched_source(self.source))
+        adapter.authenticator.get_access_token.return_value = 'test-token'
+        adapter.authenticator.get_account_id.return_value = None
+        adapter.authenticator.get_api_base.return_value = 'https://subscription.invalid'
+
+        def probe():
+            for tier in (None, 'priority', 'default'):
+                sent = []
+
+                def backend(request):
+                    sent.append(json.loads(request.content))
+                    event = {'type': 'response.completed', 'sequence_number': 0, 'response': {
+                        'id': 'resp_probe', 'created_at': 0, 'object': 'response', 'output': [],
+                        'model': 'gpt-6-astra', 'status': 'completed', 'service_tier': tier or 'default'}}
+                    return httpx.Response(200, headers={'content-type': 'text/event-stream'},
+                                          content='data: ' + json.dumps(event) + '\n\n')
+
+                with httpx.Client(transport=httpx.MockTransport(backend)) as client:
+                    handler = HTTPHandler(client=client)
+                    options = {} if tier is None else {'service_tier': tier}
+                    with patch('litellm.utils.ProviderConfigManager.get_provider_responses_api_config', return_value=adapter):
+                        stream = litellm.responses(model='chatgpt/gpt-6-astra', input='probe',
+                                                         stream=True, client=handler, timeout=5, num_retries=0, **options)
+                        events = list(stream)
+                self.assertEqual(len(sent), 1)
+                self.assertEqual(sent[0]['model'], 'gpt-6-astra')
+                if tier is None:
+                    self.assertNotIn('service_tier', sent[0])
+                else:
+                    self.assertEqual(sent[0]['service_tier'], tier)
+                self.assertEqual(events[-1].type, 'response.completed')
+
+        with patch('litellm.llms.chatgpt.chat.transformation.Authenticator', return_value=adapter.authenticator):
+            probe()
 
     def test_preview_idempotence_and_permissions(self):
         self.path.chmod(0o640)

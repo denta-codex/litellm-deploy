@@ -7,6 +7,7 @@ import urllib.request
 
 p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
+p.add_argument('--base-url', default='http://127.0.0.1:4000', help='Proxy origin, including an isolated test port')
 p.add_argument('--credential', default='/home/agent/.config/litellm/proxy-key.cred')
 p.add_argument('--service-tier', choices=['priority', 'default'],
                help='Request and verify this tier on every response, including tool continuation')
@@ -15,7 +16,7 @@ key = subprocess.check_output([
     '/usr/bin/systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
     args.credential, '-',
 ], text=True).strip()
-base = 'http://127.0.0.1:4000'
+base = args.base_url.rstrip('/')
 
 def verify_tier(response):
     if args.service_tier:
