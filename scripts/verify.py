@@ -8,6 +8,8 @@ import urllib.request
 p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
 p.add_argument('--credential', default='/home/agent/.config/litellm/proxy-key.cred')
+p.add_argument('--service-tier', choices=['priority', 'default'],
+               help='Request and verify this tier on every response, including tool continuation')
 args = p.parse_args()
 key = subprocess.check_output([
     '/usr/bin/systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
@@ -15,10 +17,17 @@ key = subprocess.check_output([
 ], text=True).strip()
 base = 'http://127.0.0.1:4000'
 
+def verify_tier(response):
+    if args.service_tier:
+        assert response.get('service_tier') == args.service_tier, (
+            f'Requested {args.service_tier} tier; backend returned {response.get("service_tier")!r}')
+
 def request(path, payload=None, authenticated=True):
     headers = {'Content-Type': 'application/json'}
     if authenticated:
         headers['Authorization'] = f'Bearer {key}'
+    if payload is not None and args.service_tier:
+        payload = dict(payload, service_tier=args.service_tier)
     data = None if payload is None else json.dumps(payload).encode()
     return urllib.request.urlopen(urllib.request.Request(base + path, data=data, headers=headers), timeout=180)
 
@@ -39,6 +48,7 @@ with request('/v1/responses', payload) as response:
             event = json.loads(line[6:])
             events.append(event)
 assert any(e.get('type') == 'response.completed' for e in events), 'stream did not complete'
+verify_tier(next(e['response'] for e in events if e.get('type') == 'response.completed'))
 text = ''.join(e.get('delta', '') for e in events if e.get('type') == 'response.output_text.delta')
 assert 'LITELLM_STREAM_OK' in text, 'unexpected streaming reply'
 print('PASS authentication, catalog, subscription streaming', flush=True)
@@ -54,6 +64,7 @@ def completed_response(payload):
                     items[event['output_index']] = event['item']
                 if event.get('type') == 'response.completed':
                     result = event['response']
+                    verify_tier(result)
                     result['output'] = [items[i] for i in sorted(items)]
                     return result
     raise RuntimeError('Response stream ended without completion')
@@ -78,3 +89,5 @@ reply = ''.join(part.get('text', '') for item in second['output'] if item.get('t
                 for part in item.get('content', []) if part.get('type') == 'output_text')
 assert 'DEPLOYMENT_TOOL_OK' in reply, 'Tool result was not used in the continuation'
 print('PASS function call and tool-result continuation', flush=True)
+if args.service_tier:
+    print(f'PASS backend service_tier={args.service_tier} on all three responses', flush=True)

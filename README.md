@@ -1,8 +1,9 @@
 # Grace LiteLLM deployment
 
-Stock LiteLLM 1.102.1, uv, and systemd on Grace, for stock Codex through a named
-`litellm` Responses provider. Default model: `chatgpt/gpt-6-astra`. Discover subscription models with
-the explicit refresh command below. This is a private, single-host deployment.
+LiteLLM 1.102.1 with a guarded service-tier fix, uv, and systemd on Grace, for stock
+Codex through a named `litellm` Responses provider. Default model:
+`chatgpt/gpt-6-astra`. Discover subscription models with the explicit refresh
+command below. This is a private, single-host deployment.
 
 ## Deploy
 
@@ -20,7 +21,8 @@ ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
 The proxy listens on `127.0.0.1:4000`. It runs with a locked uv environment and
 no runtime dependency downloads. No database or Redis server is configured;
 stock upstream may include their client libraries among its dependencies.
-No virtual-key administration, middleware, or source patches.
+No virtual-key administration or middleware. One version- and checksum-guarded
+source patch preserves ChatGPT service tiers; see Fast mode below.
 Codex uses a locally discovered model catalog to enable hosted Responses search;
 see the compatibility note below.
 Application files live under `~/.local/share/litellm`, configuration under
@@ -137,6 +139,52 @@ The locked `prisma==0.15.0` client dependency is included solely because stock
 LiteLLM's database-free authentication error handler imports it unconditionally
 (upstream issue https://github.com/BerriAI/litellm/issues/38978). No Prisma engine,
 schema generation, database connection, or database server is configured.
+
+## Fast mode
+
+LiteLLM 1.102.1 accepts `service_tier` on Responses requests but removes it in
+the ChatGPT adapter's outgoing allowlist. A request for `priority` therefore
+silently uses the backend's default tier. `deploy.yml` runs
+`scripts/patch_litellm.py` after environment synchronization to add just
+`service_tier` to that allowlist. It does not force priority on ordinary requests
+or change model discovery, authentication, or other providers.
+
+The patch checks both the installed version and the complete adapter SHA-256,
+accepts only the original or already-patched source, and writes atomically without
+modifying uv's cached package. Unexpected versions or edits fail deployment.
+Check mode reports whether a patch is needed without changing the environment.
+An actual patch triggers the existing service restart handler; repeat deployments
+are unchanged. No catalog refresh or desktop restart is required for this fix.
+
+After deploying from a clean committed checkout, verify both tiers and the real
+Codex search/tool flow. These probes consume subscription usage:
+
+```sh
+uv run --no-sync scripts/verify.py --service-tier priority
+uv run --no-sync scripts/verify.py --service-tier default
+uv run --no-sync scripts/verify_codex.py --service-tier priority
+```
+
+The API probes require the backend to report the requested tier on streaming,
+function-call, and tool-result responses. A successful text response alone is
+not evidence that fast mode worked. The Codex probe exercises an explicit tier
+with native search and resumed tool execution. Also check the desktop Fast toggle
+in a new task before declaring the rollout verified.
+
+Rollback requires restoring the installed adapter as well as reverting the
+deployment change; deploying an earlier checkout alone does not undo a package
+edit. Before deploying that checkout, use the installed utility and restart:
+
+```sh
+uv run --no-sync --project "$HOME/.local/share/litellm" \
+  "$HOME/.local/share/litellm/scripts/patch_litellm.py" --restore
+sudo systemctl restart litellm.service
+```
+
+This restores only the verified upstream source and leaves no recovery copies.
+Retire the patch and its deployment task when a locked upstream release preserves
+`service_tier` and passes the same tier probes. Dependency upgrades deliberately
+require reviewing this exception rather than carrying it forward silently.
 
 ## Refresh subscription models explicitly
 
@@ -258,6 +306,7 @@ approval controls from inside the agent task.
 Development checks:
 
 ```sh
+uv run --no-sync scripts/test_patch_litellm.py
 uv run --no-sync scripts/test_refresh_models.py
 uv run --no-sync scripts/test_cutover.py
 uv run --no-sync scripts/test_verify_review.py

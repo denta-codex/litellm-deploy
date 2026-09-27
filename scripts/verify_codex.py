@@ -12,6 +12,7 @@ p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
 p.add_argument('--catalog', type=Path, default=Path.home() / '.config/litellm/codex-models.json')
 p.add_argument('--skip-search', action='store_true', help='Validate tools/context without advertising unsupported search')
+p.add_argument('--service-tier', choices=['priority', 'default'], help='Exercise Codex with an explicit service tier')
 args = p.parse_args()
 metadata = next(m for m in json.loads(args.catalog.read_text())['models'] if m['slug'] == args.model)
 efforts = [r['effort'] for r in metadata.get('supported_reasoning_levels', [])]
@@ -36,6 +37,8 @@ with tempfile.TemporaryDirectory(prefix='codex-probe-', dir=state) as temporary:
                      'refresh_interval_ms': 0},
         }},
     }
+    if args.service_tier:
+        doc['service_tier'] = args.service_tier
     (home / 'config.toml').write_text(tomlkit.dumps(doc))
     env = os.environ | {'CODEX_HOME': str(home)}
 
