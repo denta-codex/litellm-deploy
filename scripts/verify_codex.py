@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 
 import tomlkit
-from fast_toggle import migrate
+from codex_runtime import migrate_config
 
 p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
@@ -15,7 +15,7 @@ p.add_argument('--base-url', default='http://127.0.0.1:4000', help='Proxy origin
 p.add_argument('--catalog', type=Path, default=Path.home() / '.config/litellm/codex-models.json')
 p.add_argument('--skip-search', action='store_true', help='Validate tools/context without advertising unsupported search')
 p.add_argument('--service-tier', choices=['priority', 'default'], help='Exercise Codex with an explicit service tier')
-p.add_argument('--launcher', type=Path, default=Path(__file__).with_name('codex-launcher'))
+p.add_argument('--launcher', type=Path, default=Path.home() / '.local/bin/codex')
 args = p.parse_args()
 metadata = next(m for m in json.loads(args.catalog.read_text())['models'] if m['slug'] == args.model)
 efforts = [r['effort'] for r in metadata.get('supported_reasoning_levels', [])]
@@ -46,7 +46,7 @@ with tempfile.TemporaryDirectory(prefix='codex-probe-', dir=state) as temporary:
                      'refresh_interval_ms': 0},
         }},
     }
-    doc = tomlkit.parse(migrate(tomlkit.dumps(doc)))
+    doc = tomlkit.parse(migrate_config(tomlkit.dumps(doc)))
     doc['model_providers']['litellm']['base_url'] = args.base_url.rstrip('/') + '/v1'
     if args.service_tier:
         doc['service_tier'] = args.service_tier

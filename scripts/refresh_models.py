@@ -152,6 +152,7 @@ class Refresh:
 
     def __init__(self, home, root, uv):
         self.home, self.root, self.uv = home, root, uv
+        self.codex = home / '.local/bin/codex'
         self.state = home / '.local/state/litellm'
         self.transaction = self.state / 'model-refresh'
         self.paths = {
@@ -164,7 +165,7 @@ class Refresh:
         return {name: read_optional(path) for name, path in self.paths.items()}
 
     def discover(self):
-        version = subprocess.check_output(['codex', '--version'], text=True).strip().removeprefix('codex-cli ')
+        version = subprocess.check_output([self.codex, '--version'], text=True).strip().removeprefix('codex-cli ')
         if not re.fullmatch(r'[A-Za-z0-9.+_-]+', version):
             raise ValueError('Cannot determine installed Codex version')
         auth = json.loads((self.state / 'chatgpt/auth.json').read_text())
@@ -232,7 +233,7 @@ class Refresh:
             atomic_write(self.transaction / 'journal.json', encode(journal))
             atomic_write(self.transaction / 'catalog.json', journal['candidates']['catalog'])
             with tempfile.TemporaryDirectory(prefix='catalog-probe-', dir=self.state) as temporary:
-                result = subprocess.run(['codex', 'debug', 'models', '-c',
+                result = subprocess.run([self.codex, 'debug', 'models', '-c',
                                          'model_catalog_json=' + json.dumps(str(self.transaction / 'catalog.json'))],
                                         env=os.environ | {'CODEX_HOME': temporary}, capture_output=True, text=True, timeout=60)
                 if result.returncode:

@@ -93,7 +93,7 @@ class ModalSetup(Refresh):
         self.paths['snapshot'] = self.state / 'modal-models.json'
 
     def discover(self):
-        version = subprocess.check_output(['codex', '--version'], text=True).strip().removeprefix('codex-cli ')
+        version = subprocess.check_output([self.codex, '--version'], text=True).strip().removeprefix('codex-cli ')
         if not re.fullmatch(r'[A-Za-z0-9.+_-]+', version):
             raise ValueError('Cannot determine installed Codex version')
         return {'version': 1, 'codex_version': version, 'catalog': json.loads(MANIFEST.read_text())}

@@ -13,7 +13,7 @@ import tempfile
 
 from aiohttp import ClientSession, ClientTimeout, web
 import tomlkit
-from fast_toggle import migrate
+from codex_runtime import migrate_config
 
 
 async def verify(args, home):
@@ -67,7 +67,7 @@ async def verify(args, home):
                 'requires_openai_auth': True, 'env_key': 'LITELLM_PROXY_KEY',
             }},
         }
-        doc = tomlkit.parse(migrate(tomlkit.dumps(doc)))
+        doc = tomlkit.parse(migrate_config(tomlkit.dumps(doc)))
         doc['model_providers']['litellm']['base_url'] = f'http://127.0.0.1:{port}/v1'
         (home / 'config.toml').write_text(tomlkit.dumps(doc))
         process = await asyncio.create_subprocess_exec(str(args.launcher), '-c', 'features.code_mode_host=true', 'app-server',
@@ -91,7 +91,7 @@ async def verify(args, home):
                         raise RuntimeError(f'{method} failed with RPC code {result["error"].get("code")}')
                     return result['result']
         try:
-            await rpc('initialize', {'clientInfo': {'name': 'fast_toggle_probe', 'version': '1'},
+            await rpc('initialize', {'clientInfo': {'name': 'codex_runtime_probe', 'version': '1'},
                                      'capabilities': {'experimentalApi': True}})
             process.stdin.write(b'{"method":"initialized"}\n')
             account = await rpc('account/read', {'refreshToken': False})
@@ -139,7 +139,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', default='chatgpt/gpt-6-astra')
     parser.add_argument('--base-url', default='http://127.0.0.1:4000')
-    parser.add_argument('--launcher', type=Path, default=Path(__file__).with_name('codex-launcher'))
+    parser.add_argument('--launcher', type=Path, default=Path.home() / '.local/bin/codex')
     args = parser.parse_args()
     os.umask(0o077)
     state = Path.home() / '.local/state/litellm'
