@@ -82,6 +82,19 @@ class RequestTests(unittest.TestCase):
                 install()
             self.assertIs(litellm.ChatGPTResponsesAPIConfig, ChatGPTResponsesAPIConfig)
 
+    def test_service_tiers_survive_mapping_without_enabling_priority_by_default(self):
+        self.assertNotIn('service_tier', self.transform({}))
+        for tier in ('priority', 'default', 'auto'):
+            with self.subTest(tier=tier):
+                params = {'service_tier': tier}
+                mapped = self.config.map_openai_params(params, 'gpt-6-astra', False)
+                outgoing = self.transform(mapped)
+                self.assertEqual(outgoing['service_tier'], tier)
+                self.assertEqual(params, {'service_tier': tier})
+                self.assertFalse(outgoing['store'])
+                self.assertTrue(outgoing['stream'])
+                self.assertIn('reasoning.encrypted_content', outgoing['include'])
+
 
 if __name__ == '__main__':
     unittest.main()

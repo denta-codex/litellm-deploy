@@ -15,7 +15,7 @@ class SubscriptionResponsesConfig(ChatGPTResponsesAPIConfig):
         )
         # Upstream owns all normalization and transport constraints. Undo only
         # its instruction prepend and these entries missing from its allowlist.
-        for name in ('instructions', 'text', 'parallel_tool_calls', 'prompt_cache_key'):
+        for name in ('instructions', 'text', 'parallel_tool_calls', 'prompt_cache_key', 'service_tier'):
             if name in params:
                 request[name] = params[name]
         return request

@@ -50,7 +50,9 @@ class Backend(BaseHTTPRequestHandler):
             item = {'type': 'message', 'id': 'msg_probe', 'role': 'assistant', 'status': 'completed',
                     'content': [{'type': 'output_text', 'text': text, 'annotations': []}]}
         response = {'id': 'resp_probe', 'object': 'response', 'created_at': 1, 'model': payload['model'],
-                    'status': 'in_progress', 'output': [], 'error': None, 'incomplete_details': None}
+                    'status': 'in_progress', 'output': [], 'error': None, 'incomplete_details': None,
+                    'service_tier': ('default' if payload.get('prompt_cache_key') == 'downgrade-priority'
+                                     else payload.get('service_tier', 'default'))}
         events = [{'type': 'response.created', 'response': response},
                   {'type': 'response.output_item.added', 'output_index': 0, 'item': item}]
         if item['type'] == 'function_call':
@@ -166,7 +168,7 @@ class StartupTests(unittest.TestCase):
         self.assertTrue(any(e['type'] == 'response.output_text.delta' for e in events))
         outgoing = self.backend.requests[-1][2]
         self.assertEqual(outgoing['instructions'], get_chatgpt_default_instructions())
-        for name in ('text', 'parallel_tool_calls', 'prompt_cache_key'):
+        for name in ('text', 'parallel_tool_calls', 'prompt_cache_key', 'service_tier'):
             self.assertNotIn(name, outgoing)
         result = self.request(self.payload(stream=False))
         # The pinned ChatGPT provider forces streaming even for stream=False.
@@ -174,6 +176,7 @@ class StartupTests(unittest.TestCase):
 
     def test_streamed_tool_and_continuation(self):
         events = self.request(self.payload(
+            service_tier='priority',
             parallel_tool_calls=False,
             tools=[{'type': 'function', 'name': 'deployment_probe', 'parameters': {
                 'type': 'object', 'properties': {}, 'required': [], 'additionalProperties': False}}],
@@ -182,13 +185,25 @@ class StartupTests(unittest.TestCase):
         self.assertTrue(any(e['type'] == 'response.function_call_arguments.delta' for e in events))
         calls = [e['item'] for e in events if e['type'] == 'response.output_item.done']
         self.assertEqual(calls[0]['name'], 'deployment_probe')
-        continuation = self.payload(input=[{'role': 'user', 'content': 'Use the tool result.'}] + calls + [{
+        self.assertEqual(self.backend.requests[-1][2]['service_tier'], 'priority')
+        continuation = self.payload(service_tier='priority', input=[{'role': 'user', 'content': 'Use the tool result.'}] + calls + [{
             'type': 'function_call_output', 'call_id': calls[0]['call_id'], 'output': 'TOOL_CONTINUATION_OK'}])
         events = self.request(continuation)
         self.assertIn('TOOL_CONTINUATION_OK', ''.join(e.get('delta', '') for e in events
                                                      if e['type'] == 'response.output_text.delta'))
         outgoing = self.backend.requests[-1][2]
         self.assertEqual(outgoing['input'][-1]['call_id'], calls[0]['call_id'])
+        self.assertEqual(outgoing['service_tier'], 'priority')
+
+    def test_tiers_reach_backend_and_returned_tier_is_not_rewritten(self):
+        for tier, cache_key, expected in (('priority', 'accept-priority', 'priority'),
+                                          ('default', 'accept-default', 'default'),
+                                          ('priority', 'downgrade-priority', 'default')):
+            with self.subTest(requested=tier, returned=expected):
+                events = self.request(self.payload(service_tier=tier, prompt_cache_key=cache_key))
+                self.assertEqual(self.backend.requests[-1][2]['service_tier'], tier)
+                completed = next(e['response'] for e in events if e['type'] == 'response.completed')
+                self.assertEqual(completed['service_tier'], expected)
 
     def test_reserved_reviewer_with_existing_verifier(self):
         original_open = urllib.request.urlopen

@@ -34,7 +34,7 @@ The root-owned unit is `/etc/systemd/system/litellm.service`.
 only request instructions and field preservation. Explicit client instructions,
 including an empty string, survive unchanged; absent instructions use upstream's
 fallback. It restores `text` (`format` and `verbosity`), `parallel_tool_calls`,
-and `prompt_cache_key` after upstream transformation. Authentication, token refresh,
+`prompt_cache_key`, and `service_tier` after upstream transformation. Authentication, token refresh,
 headers, HTTP transport, streaming, response parsing, and errors remain upstream.
 Upstream still forces `store=false`, streaming, and encrypted reasoning inclusion.
 
@@ -181,6 +181,41 @@ The locked `prisma==0.15.0` client dependency is included solely because stock
 LiteLLM's database-free authentication error handler imports it unconditionally
 (upstream issue https://github.com/BerriAI/litellm/issues/38978). No Prisma engine,
 schema generation, database connection, or database server is configured.
+
+## Fast mode
+
+The shared `scripts/chatgpt_responses.py` override preserves an explicitly supplied
+`service_tier`, which LiteLLM 1.102.1 otherwise drops from ChatGPT requests.
+Ordinary requests do not gain a tier or enable priority by default. This uses the
+same version-checked launcher as the other request fixes; it does not edit the
+installed LiteLLM package. Changes to the module trigger the existing Ansible
+restart handler. No catalog refresh or desktop restart is required for forwarding.
+
+After deployment, verify both tiers and the real Codex search/tool flow.
+These probes consume subscription usage:
+
+```sh
+uv run --no-sync scripts/verify.py --service-tier priority
+uv run --no-sync scripts/verify.py --service-tier default
+uv run --no-sync scripts/verify_codex.py --service-tier priority
+```
+
+The API probes require the backend to report the requested tier on streaming,
+function-call, and tool-result responses. Successful text alone is not proof of
+priority service. On September 27, 2026, isolated and direct backend probes
+reported `default` for explicit `priority` requests. A native Codex ChatGPT control
+using the built-in provider, with LiteLLM bypassed, also completed with `priority`
+on the wire and `default` in the response. The isolated shared adapter preserved
+priority on every observed Codex search/tool/resume request. Forwarding is verified;
+backend priority delivery remains unverified, and the strict probe deliberately
+fails on a mismatch. The adapter does not relabel the returned tier.
+
+The Codex probe enables its fast-mode feature and exercises an explicit tier with
+native search and resumed tool execution. Both probes accept `--base-url` for an
+isolated proxy. Check the desktop Fast toggle before declaring fast mode verified.
+Rollback uses the previous committed adapter and ordinary deployment; there is no
+installed-package edit to restore. Remove this forwarding override when a pinned
+upstream release preserves the tier and passes the same checks.
 
 ## Refresh subscription models explicitly
 
