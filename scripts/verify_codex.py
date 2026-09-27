@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 
 import tomlkit
+from fast_toggle import migrate
 
 p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
@@ -14,6 +15,7 @@ p.add_argument('--base-url', default='http://127.0.0.1:4000', help='Proxy origin
 p.add_argument('--catalog', type=Path, default=Path.home() / '.config/litellm/codex-models.json')
 p.add_argument('--skip-search', action='store_true', help='Validate tools/context without advertising unsupported search')
 p.add_argument('--service-tier', choices=['priority', 'default'], help='Exercise Codex with an explicit service tier')
+p.add_argument('--launcher', type=Path, default=Path(__file__).with_name('codex-launcher'))
 args = p.parse_args()
 metadata = next(m for m in json.loads(args.catalog.read_text())['models'] if m['slug'] == args.model)
 efforts = [r['effort'] for r in metadata.get('supported_reasoning_levels', [])]
@@ -24,13 +26,19 @@ state.mkdir(parents=True, exist_ok=True, mode=0o700)
 # out of the desktop's history and is removed even on failed verification.
 with tempfile.TemporaryDirectory(prefix='codex-probe-', dir=state) as temporary:
     home = Path(temporary)
+    native = json.loads((Path.home() / '.codex/auth.json').read_text())
+    native['tokens']['refresh_token'] = ''
+    native['OPENAI_API_KEY'] = None
+    auth = home / 'auth.json'
+    auth.touch(mode=0o600)
+    auth.write_text(json.dumps(native))
     doc = {
         'model_provider': 'litellm', 'model': args.model,
         'model_catalog_json': str(args.catalog.resolve()),
         'model_reasoning_effort': effort, 'approval_policy': 'never',
         'sandbox_mode': 'read-only', 'web_search': 'disabled' if args.skip_search else 'live',
         'model_providers': {'litellm': {
-            'name': 'LiteLLM', 'base_url': args.base_url.rstrip('/') + '/v1',
+            'name': 'LiteLLM', 'base_url': 'http://127.0.0.1:4000/v1',
             'wire_api': 'responses', 'supports_websockets': False,
             'auth': {'command': '/usr/bin/systemd-creds',
                      'args': ['decrypt', '--user', '--name=litellm-proxy-key',
@@ -38,14 +46,16 @@ with tempfile.TemporaryDirectory(prefix='codex-probe-', dir=state) as temporary:
                      'refresh_interval_ms': 0},
         }},
     }
+    doc = tomlkit.parse(migrate(tomlkit.dumps(doc)))
+    doc['model_providers']['litellm']['base_url'] = args.base_url.rstrip('/') + '/v1'
     if args.service_tier:
         doc['service_tier'] = args.service_tier
-        doc['features'] = {'fast_mode': True}
+        doc['features']['fast_mode'] = True
     (home / 'config.toml').write_text(tomlkit.dumps(doc))
     env = os.environ | {'CODEX_HOME': str(home)}
 
     def run(arguments):
-        result = subprocess.run(['codex', 'exec', *arguments], env=env,
+        result = subprocess.run([str(args.launcher), 'exec', *arguments], env=env,
                                 capture_output=True, text=True, timeout=240)
         if result.returncode:
             raise RuntimeError(f'Codex probe failed ({result.returncode}): {result.stderr[-2000:]}')

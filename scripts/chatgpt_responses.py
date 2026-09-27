@@ -1,8 +1,41 @@
 """Narrow request customization for the pinned subscription adapter."""
 from importlib.metadata import version
+import json
+import os
+from pathlib import Path
+import stat
+import time
 
 import litellm
 from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
+
+
+OBSERVATION = Path('/home/agent/.local/state/litellm/fast-observation.jsonl')
+
+
+def observe_tier(request):
+    """Opt-in, bounded, metadata-only desktop acceptance observation.
+
+    Never create the file; deleting it immediately disables observation.
+    Refuse symlinks, nonregular files, and permissions other than owner-only.
+    Observation failures must never interrupt inference.
+    """
+    try:
+        fd = os.open(OBSERVATION, os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o777 != 0o600 or info.st_uid != os.getuid() or info.st_size > 262144:
+            return
+        tier = request.get('service_tier')
+        # A strict allowlist prevents arbitrary request contents entering logs.
+        tier = tier if tier in (None, 'priority', 'default', 'auto') else 'other'
+        os.write(fd, (json.dumps({'time': time.time(), 'requested_tier': tier}) + '\n').encode())
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 class SubscriptionResponsesConfig(ChatGPTResponsesAPIConfig):
@@ -18,6 +51,7 @@ class SubscriptionResponsesConfig(ChatGPTResponsesAPIConfig):
         for name in ('instructions', 'text', 'parallel_tool_calls', 'prompt_cache_key', 'service_tier'):
             if name in params:
                 request[name] = params[name]
+        observe_tier(request)
         return request
 
 
