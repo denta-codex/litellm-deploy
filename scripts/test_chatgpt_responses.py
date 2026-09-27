@@ -107,10 +107,15 @@ class RequestTests(unittest.TestCase):
                 observe_tier({'service_tier': 'priority', 'input': 'PRIVATE', 'authorization': 'SECRET'})
                 observe_tier({'service_tier': 'PRIVATE'})
                 entries = [json.loads(line) for line in target.read_text().splitlines()]
-                self.assertEqual(set(entries[0]), {'time', 'requested_tier'})
+                self.assertEqual(set(entries[0]), {'time', 'requested_tier', 'session'})
+                self.assertIsNone(entries[0]['session'])
                 self.assertEqual(entries[0]['requested_tier'], 'priority')
                 self.assertEqual(entries[1]['requested_tier'], 'other')
                 self.assertNotIn('PRIVATE', target.read_text())
+                observe_tier({'prompt_cache_key': '00000000-0000-0000-0000-000000000001'})
+                last = json.loads(target.read_text().splitlines()[-1])
+                self.assertEqual(len(last['session']), 16)
+                self.assertNotIn('00000000-0000', target.read_text())
                 target.unlink()
                 other = Path(directory) / 'other'
                 other.touch(mode=0o600)
