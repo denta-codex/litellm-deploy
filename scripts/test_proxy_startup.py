@@ -89,6 +89,7 @@ class StartupTests(unittest.TestCase):
         cls.addClassCleanup(cls.backend.server_close)
         cls.addClassCleanup(cls.backend.shutdown)
         (root / 'litellm-proxy-key').write_text('sk-isolated-proxy-key')
+        (root / 'modal-inference-token').write_text('WK_SECRET=wk-isolated\nWS_SECRET=ws-isolated\n')
         (root / 'auth.json').write_text(json.dumps({
             'access_token': 'isolated-backend-token', 'account_id': 'isolated-account',
             'expires_at': time.time() + 3600,

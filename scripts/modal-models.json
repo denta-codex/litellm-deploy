@@ -1,0 +1,25 @@
+{
+  "models": [
+    {
+      "endpoint": "andrew-61005--ep-codex-tasks-shared-deepseek-server.us-west.modal.direct",
+      "display_name": "Modal DeepSeek V4.1 Flash",
+      "context_window": 1048576,
+      "reasoning_levels": ["none", "low", "high", "xhigh", "max"],
+      "default_reasoning_level": "high"
+    },
+    {
+      "endpoint": "andrew-61005--ep-codex-tasks-shared-glm-server.us-west.modal.direct",
+      "display_name": "Modal GLM 5.3 Flash",
+      "context_window": 1048576,
+      "reasoning_levels": ["low", "high", "max"],
+      "default_reasoning_level": "high"
+    },
+    {
+      "endpoint": "andrew-61005--ep-codex-tasks-shared-kimi-server.us-west.modal.direct",
+      "display_name": "Modal Kimi K3",
+      "context_window": 1048576,
+      "reasoning_levels": ["low", "high", "max"],
+      "default_reasoning_level": "high"
+    }
+  ]
+}

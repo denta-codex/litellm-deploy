@@ -303,7 +303,91 @@ are rejected rather than filling them with invented defaults.
 The supported `model_catalog_json` setting still points to
 `~/.config/litellm/codex-models.json`. This snapshot is loaded at Codex startup;
 run refresh explicitly after model availability or Codex version changes.
-Native-search support is not inferred for future Modal inference endpoints.
+Modal entries do not advertise native search; see the Modal setup below.
+
+## Modal inference
+
+Modal uses stock LiteLLM's Responses-to-Chat-Completions bridge, configured with
+`use_chat_completions_api: true` on each OpenAI-compatible route. No Modal SDK,
+custom inference adapter, source patch, or additional server is installed.
+The upstream is `https://inference.us-west.modal.direct/v1/chat/completions`.
+
+`scripts/modal-models.json` owns the three existing endpoints and their picker
+metadata: Modal DeepSeek V4.1 Flash, Modal GLM 5.3 Flash, and Modal Kimi K3.
+Their `modal/<endpoint-id>` names, reasoning choices, image inputs, and 1,048,576
+token context limits come from the frozen gateway's Modal model definitions.
+These are explicit configuration, not fresh provider discovery. Change the
+manifest and rerun Modal configuration when the endpoints change.
+
+The unit reuses `/etc/credstore.encrypted/codex-gateway-modal` under its original
+credential name, `modal-inference-token`. Deployment requires this existing
+root-owned mode-0600 encrypted file before changing the installation. Systemd
+decrypts it into the private service credential directory. `scripts/launch.py`
+parses a combined `wk-....ws-...` token, `MODAL_PROXY_TOKEN`, or the retained
+`WK_SECRET`/`WS_SECRET` pair without evaluating shell code, then exports only the
+combined token as `MODAL_API_KEY` to LiteLLM. It never prints the key or writes a
+plaintext copy. The encrypted file is neither renamed nor re-encrypted, so its
+embedded credential name and the documented gateway recovery remain valid.
+After loading credentials, the launcher runs `scripts/serve.py`, preserving the
+subscription request customization, fast-mode forwarding, and reviewer behavior.
+
+### Deploy and activate later
+
+From a clean committed checkout on Grace, first update the launcher and service,
+then preview and activate the Modal routes:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --syntax-check
+ansible-playbook -i deploy/inventory.yml deploy/modal.yml --syntax-check
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+ansible-playbook -i deploy/inventory.yml deploy/modal.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/modal.yml
+```
+
+The preview reads the checked-in manifest and installed Codex version. It does
+not decrypt credentials, contact Modal, write configuration, or restart services.
+Live activation checks the candidate catalog with stock Codex, installs routes,
+restarts LiteLLM if needed, and tests every new or changed model for Responses
+streaming, function-call continuation, and stock Codex shell execution and resumed
+context. Those live tests consume Modal inference. The picker is published only
+after validation succeeds. Restart Grace's connection through the owning desktop
+after a picker change, then try a fresh Modal task. The selected default and all
+subscription routes, metadata, and saved discovery stay intact.
+
+Modal setup owns `modal/`; subscription refresh owns `chatgpt/`. Both reuse the
+same activation lock and recovery directory to prevent concurrent changes.
+Successful Modal activation saves `~/.local/state/litellm/modal-models.json`;
+ordinary deployment checks and preserves both providers' saved snapshots.
+Unchanged activation performs no inference or restart. A failed activation restores
+the previous routes and picker. To recover an interrupted Modal activation:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/modal.yml -e refresh_action=rollback
+```
+
+Recovery refuses concurrent file edits and retains
+`~/.local/state/litellm/model-refresh` only until recovery succeeds. Use the
+playbook that started the transaction; rollback rejects a different namespace.
+
+### Capability boundaries
+
+Modal models use the existing named `litellm` provider with HTTP Responses and
+full tool history. No WebSocket support or native hosted search is advertised.
+The old gateway's ChatGPT-backed search bridge is not part of this setup; adding
+search requires a separately configured search backend. Subscription search is
+unchanged. Existing gateway tasks are not relabeled or migrated, and encrypted
+OpenAI compaction state is not converted for Modal. Begin with a fresh task under
+the `litellm` provider. Local compaction, subagents, and long-running task behavior
+still require deployment-time acceptance testing.
+
+The offline tests below check the pinned LiteLLM async router with an in-memory
+HTTP transport and synthetic credentials, including text streaming, reasoning
+effort, namespaced functions, freeform tools, and tool-result continuation. They
+also check stock Codex catalog parsing, preview, rollback, credential formats,
+and preservation of subscription refresh. They do not establish live endpoint
+availability or validate the retained secret. Installing and activating this
+change is a separate operation.
 
 ### Repair installations missing the approval reviewer
 
@@ -344,6 +428,15 @@ Development checks:
 ```sh
 uv sync --locked
 LITELLM_LOCAL_MODEL_COST_MAP=True uv run --no-sync -m unittest discover -s scripts -p 'test_*.py'
+```
+
+To run these checks without creating or synchronizing a worktree environment on
+Grace, use the existing locked installation explicitly:
+
+```sh
+UV_PROJECT_ENVIRONMENT=/home/agent/.local/share/litellm/.venv \
+  LITELLM_LOCAL_MODEL_COST_MAP=True \
+  uv run --no-sync -m unittest discover -s scripts -p 'test_*.py'
 ```
 
 These checks are offline. The startup test runs the actual shell/uv launcher and
