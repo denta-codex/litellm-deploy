@@ -203,8 +203,11 @@ uv run --no-sync scripts/verify_codex.py --service-tier priority
 The API probes require the backend to report the requested tier on streaming,
 function-call, and tool-result responses. Successful text alone is not proof of
 priority service. On September 27, 2026, isolated and direct backend probes
-reported `default` for explicit `priority` requests. Forwarding is verified;
-backend priority acceptance remains unverified, and the strict probe deliberately
+reported `default` for explicit `priority` requests. A native Codex ChatGPT control
+using the built-in provider, with LiteLLM bypassed, also completed with `priority`
+on the wire and `default` in the response. The isolated shared adapter preserved
+priority on every observed Codex search/tool/resume request. Forwarding is verified;
+backend priority delivery remains unverified, and the strict probe deliberately
 fails on a mismatch. The adapter does not relabel the returned tier.
 
 The Codex probe enables its fast-mode feature and exercises an explicit tier with
