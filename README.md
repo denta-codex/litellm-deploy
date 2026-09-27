@@ -214,7 +214,7 @@ isolated proxy. Check the desktop Fast toggle before declaring fast mode verifie
 Remove the forwarding override when a pinned upstream release preserves the tier
 and passes the same checks.
 
-### Restore the desktop control
+### Grace Codex runtime
 
 The desktop's Fast controls require the host's genuine ChatGPT identity. The
 LiteLLM provider uses `requires_openai_auth = true` and
@@ -222,53 +222,67 @@ LiteLLM provider uses `requires_openai_auth = true` and
 table. The native ChatGPT login, endpoint, catalog, model, and standard-speed
 default remain in place. No desktop or installed package is patched.
 
-The repository-owned `scripts/codex-launcher` is installed at the desktop's existing
-`~/.local/bin/codex` entry point. It decrypts the existing credential into the
-process environment, rejects empty/invalid credentials, and executes the Mise
-`codex/latest/bin/codex` binary with arguments unchanged. Explicit environment
-exclusion keeps the key out of shell tools. **Shell snapshots are disabled**:
+The dedicated runtime deployment owns Grace's full `codex-app-server.service`,
+the existing Desktop attach setting, the credential-loading launcher, its
+`~/.local/bin/codex` entry point, and the relevant Codex provider settings. The
+launcher decrypts the existing credential into the process environment,
+rejects empty/invalid credentials, and executes a committed exact Codex version
+with arguments unchanged. Explicit environment exclusion keeps the key out of
+shell tools. **Shell snapshots are disabled**:
 the live stock-Codex probe found that snapshots could restore the startup key
 after exclusion. Disabling them also prevents persisting that startup environment.
 No key is written to TOML, logs, or shell startup files.
 
-After merging and ordinary deployment, use the dedicated Ansible playbook:
+The inventory pins Codex `0.155.1`. Ordinary LiteLLM deployment does not install,
+select, or restart Codex. An explicit runtime update installs its committed
+version alongside existing Mise versions, validates the current catalog with
+that exact binary, and stages the runtime without interrupting active tasks.
+Desktop's Restart action activates it. The repository does not change Mise's
+global `latest` selection, patch Codex, update the desktop application, or run a
+scheduled upgrade.
+
+The runtime playbook has five explicit actions:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/fast-toggle.yml
-uv run --no-sync scripts/verify_fast_app_server.py
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=apply
+# Restart Grace through the owning desktop.
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=verify
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=finish -e codex_desktop_validated=true
 ```
 
-The isolated app-server verifier uses an access-only copy of the existing login
-with an empty refresh token. It runs real priority/standard turns and shell tools,
-checks proxy-key authentication through an in-memory relay, and removes its
-private temporary home on exit. It reports no prompts or credentials. Native
-search and resume are covered by `verify_codex.py` using the same migration.
+The default action is read-only preview. `apply` installs the exact binary if
+needed and stages the launcher, configuration, unit, and attach setting. It also
+removes the temporary emergency drop-in after recording it for rollback. `verify`
+requires a replaced app-server socket, checks the live systemd process uses the
+pinned executable and proxy credential, and runs a real shell turn proving the
+key is absent from tools. It then checks subscription streaming, tool
+continuation, native search/resume, and the reserved reviewer route. `finish`
+records the accepted version and managed-file digests.
 
-Restart Grace through the owning desktop. Confirm `/fast` and Fast are available
-for a supported subscription model, then send an on turn and an off turn. Check
-follow-up turns, persistence across a second connection restart, and an existing
-task. To observe outgoing adapter metadata temporarily, create the empty file
-`~/.local/state/litellm/fast-observation.jsonl` with mode `0600`. The adapter appends
-only a timestamp, an allowlisted requested tier, and a hashed task UUID for
-correlation with concurrent traffic. It stops at 256 KiB and never
-creates the file itself. Delete it immediately after acceptance or failure.
-The expected observations are `priority` on and omitted (`null`) or `default` off.
+One private transaction at `~/.local/state/litellm/codex-runtime.json` contains
+only the affected files, prior version selection, and pre-restart socket identity.
+Rollback refuses current files that differ from the staged revision, restores
+the previous runtime together, and then requires Desktop Restart:
 
-The one private recovery record is
-`~/.local/state/litellm/fast-toggle.json`. It retains the previous launcher target
-and configuration until actual desktop acceptance. Rollback refuses to overwrite
-intervening launcher/configuration edits and can recover interrupted preparation.
-
-```sh
-# On acceptance failure, then restart Grace again from the desktop:
-ansible-playbook -i deploy/inventory.yml deploy/fast-toggle.yml -e fast_toggle_action=rollback
-# Only after the actual desktop and request checks pass:
-ansible-playbook -i deploy/inventory.yml deploy/fast-toggle.yml -e fast_toggle_action=finish -e fast_desktop_validated=true
+```console
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=rollback
 ```
 
-Do not close the task based only on CLI probes or account discovery. Completion
-means working desktop controls and verified on/off requests; a throughput
-benchmark and returned-tier equality are not required.
+After acceptance, the persistent installed manifest is the comparison baseline
+for later version changes. A later update aborts on any intervening managed-file
+edit instead of overwriting it. Candidate binaries and the previous binary remain
+installed; rollback changes selection rather than deleting shared Mise state.
+
+Desktop acceptance passed on September 27, 2026: the user's Fast-on turn sent
+`priority`, a follow-up after a desktop connection restart still sent `priority`,
+and the Fast-off turn omitted the field. These were correlated to this existing
+task at the outgoing adapter boundary. Shell execution also confirmed that the
+proxy key was absent from tool environments after restart. The earlier isolated
+checks covered streaming, tool continuation, native search/resume, the reserved
+reviewer route, and unchanged returned-tier metadata. Repeat those desktop checks
+after each explicit runtime update. Returned `default` is not a subscription Fast
+failure, and throughput benchmarking is outside runtime acceptance.
 
 ## Refresh subscription models explicitly
 

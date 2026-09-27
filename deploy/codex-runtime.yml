@@ -1,0 +1,157 @@
+- name: Preview, apply, verify, roll back, or finish Grace's Codex runtime
+  hosts: grace
+  gather_facts: true
+  vars:
+    codex_runtime_action: preview
+    source_root: "{{ playbook_dir }}/.."
+    runtime_script: "{{ litellm_root }}/scripts/codex_runtime.py"
+  tasks:
+    - name: Check target and requested action
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.hostname == 'grace'
+          - ansible_facts.user_id == litellm_user
+          - litellm_home == '/home/agent'
+          - codex_runtime_action in ['preview', 'apply', 'verify', 'rollback', 'finish']
+          - codex_runtime_action != 'finish' or (codex_desktop_validated | default(false) | bool)
+
+    - name: Inspect deployment source
+      ansible.builtin.command: git status --porcelain
+      args:
+        chdir: "{{ source_root }}"
+      register: runtime_source
+      changed_when: false
+      check_mode: false
+      when: codex_runtime_action == 'apply'
+
+    - name: Require committed deployment source for apply
+      ansible.builtin.assert:
+        that: runtime_source.stdout == ''
+      when: codex_runtime_action == 'apply'
+
+    - name: Preview the runtime transaction without installing or editing
+      ansible.builtin.command:
+        argv:
+          - "{{ litellm_uv }}"
+          - run
+          - --no-sync
+          - --project
+          - "{{ source_root }}"
+          - "{{ source_root }}/scripts/codex_runtime.py"
+          - preview
+          - --version
+          - "{{ codex_version }}"
+      register: runtime_preview
+      changed_when: false
+      check_mode: false
+      when: codex_runtime_action == 'preview'
+
+    - name: Report runtime preview
+      ansible.builtin.debug:
+        msg: "{{ runtime_preview.stdout | from_json }}"
+      when: codex_runtime_action == 'preview'
+
+    - name: Inspect the exact Codex installation
+      ansible.builtin.stat:
+        path: "/home/agent/.local/share/mise/installs/codex/{{ codex_version }}/bin/codex"
+      register: exact_codex
+      when: codex_runtime_action == 'apply'
+
+    - name: Install the exact Codex version alongside existing versions
+      ansible.builtin.command:
+        argv: ["{{ codex_mise }}", install, "codex@{{ codex_version }}"]
+      environment:
+        HOME: "{{ litellm_home }}"
+      when: codex_runtime_action == 'apply' and not exact_codex.stat.exists
+
+    - name: Install runtime management and verification utilities
+      ansible.builtin.copy:
+        src: "{{ source_root }}/scripts/{{ item }}"
+        dest: "{{ litellm_root }}/scripts/{{ item }}"
+        mode: '0700'
+      loop:
+        - codex_runtime.py
+        - verify_codex_runtime.py
+        - verify_fast_app_server.py
+        - verify_codex.py
+        - verify.py
+        - verify_review.py
+      when: codex_runtime_action == 'apply'
+
+    - name: Apply, inspect, restore, or accept the runtime transaction
+      ansible.builtin.command:
+        argv:
+          - "{{ litellm_root }}/.venv/bin/python"
+          - "{{ runtime_script }}"
+          - "{{ codex_runtime_action }}"
+          - --version
+          - "{{ codex_version }}"
+      become: true
+      register: runtime_result
+      changed_when: "(runtime_result.stdout | from_json).changed | default(false)"
+      when: codex_runtime_action != 'preview'
+
+    - name: Remove retired Fast-only migration utilities after adoption
+      ansible.builtin.file:
+        path: "{{ litellm_root }}/scripts/{{ item }}"
+        state: absent
+      loop: [fast_toggle.py, test_fast_toggle.py]
+      when: codex_runtime_action == 'apply'
+
+    - name: Reload the app-server unit without interrupting active tasks
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      become: true
+      when: codex_runtime_action in ['apply', 'rollback'] and not ansible_check_mode
+
+    - name: Validate the staged binary, identity, proxy authentication, tiers, and shell isolation
+      ansible.builtin.command:
+        argv:
+          - "{{ litellm_uv }}"
+          - run
+          - --no-sync
+          - --project
+          - "{{ litellm_root }}"
+          - "{{ litellm_root }}/scripts/verify_fast_app_server.py"
+          - --launcher
+          - /home/agent/.local/bin/codex
+      changed_when: false
+      when: codex_runtime_action == 'apply' and not ansible_check_mode
+
+    - name: Verify the restarted systemd-owned app server
+      ansible.builtin.command:
+        argv:
+          - "{{ litellm_root }}/.venv/bin/python"
+          - "{{ litellm_root }}/scripts/verify_codex_runtime.py"
+          - --version
+          - "{{ codex_version }}"
+      become: true
+      changed_when: false
+      when: codex_runtime_action == 'verify' and not ansible_check_mode
+
+    - name: Verify subscription streaming and tool continuation
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}",
+               "{{ litellm_root }}/scripts/verify.py", --model, "{{ litellm_model }}", --service-tier, priority]
+      changed_when: false
+      when: codex_runtime_action == 'verify' and not ansible_check_mode
+
+    - name: Verify native search, resume, and shell continuation
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}",
+               "{{ litellm_root }}/scripts/verify_codex.py", --model, "{{ litellm_model }}",
+               --service-tier, priority, --launcher, /home/agent/.local/bin/codex]
+      changed_when: false
+      when: codex_runtime_action == 'verify' and not ansible_check_mode
+
+    - name: Verify reserved automatic-review routing
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}",
+               "{{ litellm_root }}/scripts/verify_review.py"]
+      changed_when: false
+      when: codex_runtime_action == 'verify' and not ansible_check_mode
+
+    - name: Report runtime action
+      ansible.builtin.debug:
+        msg: "{{ runtime_result.stdout | from_json }}"
+      when: codex_runtime_action != 'preview'
