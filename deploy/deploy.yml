@@ -48,11 +48,12 @@
       loop: [pyproject.toml, uv.lock]
       register: project_files
       notify: Restart LiteLLM
-    - name: Install service launcher
+    - name: Install service launcher and request customization
       ansible.builtin.copy:
-        src: "{{ source_root }}/scripts/start-litellm"
-        dest: "{{ litellm_root }}/scripts/start-litellm"
+        src: "{{ source_root }}/scripts/{{ item }}"
+        dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
+      loop: [start-litellm, serve.py, chatgpt_responses.py]
       notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
@@ -60,7 +61,7 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename != 'start-litellm'
+      when: item | basename not in ['start-litellm', 'serve.py', 'chatgpt_responses.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"
@@ -71,14 +72,6 @@
       environment:
         UV_PYTHON_DOWNLOADS: never
       when: project_files.changed or not installed_cli.stat.exists
-      notify: Restart LiteLLM
-    - name: Preserve ChatGPT service tier in the pinned adapter
-      ansible.builtin.command:
-        argv: "{{ [litellm_uv, 'run', '--no-sync', '--project', litellm_root, source_root + '/scripts/patch_litellm.py'] + (['--check'] if ansible_check_mode else []) }}"
-      register: service_tier_patch
-      changed_when: (service_tier_patch.stdout | from_json).changed
-      check_mode: false
-      when: installed_cli.stat.exists or not ansible_check_mode
       notify: Restart LiteLLM
     - name: Create encrypted credential pair without exposing the key
       ansible.builtin.command:

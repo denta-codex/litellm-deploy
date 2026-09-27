@@ -1,9 +1,9 @@
 # Grace LiteLLM deployment
 
-LiteLLM 1.102.1 with a guarded service-tier fix, uv, and systemd on Grace, for stock
-Codex through a named `litellm` Responses provider. Default model:
-`chatgpt/gpt-6-astra`. Discover subscription models with the explicit refresh
-command below. This is a private, single-host deployment.
+LiteLLM 1.102.1 with a small repository-owned ChatGPT request customization,
+uv, and systemd on Grace, for stock Codex through a named
+`litellm` Responses provider. Default model: `chatgpt/gpt-6-astra`. Discover subscription models with
+the explicit refresh command below. This is a private, single-host deployment.
 
 ## Deploy
 
@@ -21,13 +21,55 @@ ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
 The proxy listens on `127.0.0.1:4000`. It runs with a locked uv environment and
 no runtime dependency downloads. No database or Redis server is configured;
 stock upstream may include their client libraries among its dependencies.
-No virtual-key administration or middleware. One version- and checksum-guarded
-source patch preserves ChatGPT service tiers; see Fast mode below.
+No virtual-key administration, middleware, or installed dependency source edits.
 Codex uses a locally discovered model catalog to enable hosted Responses search;
 see the compatibility note below.
 Application files live under `~/.local/share/litellm`, configuration under
 `~/.config/litellm`, and mutable state under `~/.local/state/litellm`.
 The root-owned unit is `/etc/systemd/system/litellm.service`.
+
+### ChatGPT Responses customization
+
+`scripts/chatgpt_responses.py` subclasses the pinned upstream adapter and changes
+only request instructions and field preservation. Explicit client instructions,
+including an empty string, survive unchanged; absent instructions use upstream's
+fallback. It restores `text` (`format` and `verbosity`), `parallel_tool_calls`,
+`prompt_cache_key`, and `service_tier` after upstream transformation. Authentication, token refresh,
+headers, HTTP transport, streaming, response parsing, and errors remain upstream.
+Upstream still forces `store=false`, streaming, and encrypted reasoning inclusion.
+
+`scripts/start-litellm` runs `scripts/serve.py` through the existing locked uv
+environment. Before invoking the upstream CLI, it replaces the
+`litellm.ChatGPTResponsesAPIConfig` export used by `ProviderConfigManager`.
+The server runs in the same process with one worker; reload and alternate worker
+launchers are not exposed. Running the stock `litellm` command directly bypasses
+this customization. Ansible installs these three runtime files and treats changes
+to them as restart-requiring; utility-only updates still do not restart inference.
+The launcher's optional fourth argument selects a port for isolated tests; the
+systemd invocation continues to use port 4000.
+
+The override fails startup unless LiteLLM is exactly 1.102.1. Any upstream upgrade
+must revalidate dispatch, transformation, and launcher tests, then revisit or
+remove the override. There is no copied adapter or separate deployed service.
+
+Isolated live subscription probes on September 27, 2026 used this checkout's
+launcher with an access-only snapshot of the existing login, no refresh token,
+and no live installation/configuration changes. Additional format/cache controls
+called the backend directly with the same transformer and upstream header helper,
+reading the existing access token without invoking login or refresh. Observations:
+
+| Field | Subscription-backend evidence and limits |
+| --- | --- |
+| `text.format: json_schema` | Both `gpt-6-astra` and `codex-auto-review` returned the schema-required enum despite conflicting non-JSON instructions. Both rejected invalid schemas with HTTP 400 / `invalid_json_schema`. This tests schema processing, beyond merely prompting for JSON; it is not an exhaustive schema-keyword guarantee. |
+| `text.format: text` | Accepted on `gpt-6-astra`. |
+| `text.format: json_object` | Accepted on `gpt-6-astra` when input explicitly mentioned JSON; input without that keyword was rejected. JSON-object mode is not schema enforcement. |
+| `text.verbosity` | `low` was accepted and echoed; an invalid value was rejected, listing `low`, `medium`, and `high`. Output-length effects were not measured. |
+| `parallel_tool_calls` | `false` and `true` were echoed and produced one and two calls respectively when asked for two tools. Streamed tool-result continuation passed. |
+| `prompt_cache_key` | Preserved on the outgoing wire, but the backend ignored the body value, even an invalid object. A supplied `session_id` header became the response cache key; without it the backend generated a key. Body-key control and cache-hit benefits are not supported by this evidence. Upstream session headers are unchanged. |
+
+These are account/model-specific observations, not guarantees for every model.
+The reserved reviewer also completed the existing probe's streaming JSON payload.
+That probe alone does not establish schema enforcement or Codex approval decisions.
 
 Complete a separate ChatGPT device login using the same subscription account:
 
@@ -142,22 +184,15 @@ schema generation, database connection, or database server is configured.
 
 ## Fast mode
 
-LiteLLM 1.102.1 accepts `service_tier` on Responses requests but removes it in
-the ChatGPT adapter's outgoing allowlist. A request for `priority` therefore
-silently uses the backend's default tier. `deploy.yml` runs
-`scripts/patch_litellm.py` after environment synchronization to add just
-`service_tier` to that allowlist. It does not force priority on ordinary requests
-or change model discovery, authentication, or other providers.
+The shared `scripts/chatgpt_responses.py` override preserves an explicitly supplied
+`service_tier`, which LiteLLM 1.102.1 otherwise drops from ChatGPT requests.
+Ordinary requests do not gain a tier or enable priority by default. This uses the
+same version-checked launcher as the other request fixes; it does not edit the
+installed LiteLLM package. Changes to the module trigger the existing Ansible
+restart handler. No catalog refresh or desktop restart is required for forwarding.
 
-The patch checks both the installed version and the complete adapter SHA-256,
-accepts only the original or already-patched source, and writes atomically without
-modifying uv's cached package. Unexpected versions or edits fail deployment.
-Check mode reports whether a patch is needed without changing the environment.
-An actual patch triggers the existing service restart handler; repeat deployments
-are unchanged. No catalog refresh or desktop restart is required for this fix.
-
-After deploying from a clean committed checkout, verify both tiers and the real
-Codex search/tool flow. These probes consume subscription usage:
+After deployment, verify both tiers and the real Codex search/tool flow.
+These probes consume subscription usage:
 
 ```sh
 uv run --no-sync scripts/verify.py --service-tier priority
@@ -166,29 +201,18 @@ uv run --no-sync scripts/verify_codex.py --service-tier priority
 ```
 
 The API probes require the backend to report the requested tier on streaming,
-function-call, and tool-result responses. A successful text response alone is
-not evidence that fast mode worked. The backend can still return `default` for
-an explicitly forwarded `priority` request; the priority probe deliberately fails
-in that case. Do not treat a forwarding fix as proof of backend priority service.
-The Codex probe enables its fast-mode feature and exercises an explicit tier
-with native search and resumed tool execution. Both probes accept `--base-url`
-to test an isolated proxy without changing the live listener. Also check the
-desktop Fast toggle in a new task before declaring the rollout verified.
+function-call, and tool-result responses. Successful text alone is not proof of
+priority service. On September 27, 2026, isolated and direct backend probes
+reported `default` for explicit `priority` requests. Forwarding is verified;
+backend priority acceptance remains unverified, and the strict probe deliberately
+fails on a mismatch. The adapter does not relabel the returned tier.
 
-Rollback requires restoring the installed adapter as well as reverting the
-deployment change; deploying an earlier checkout alone does not undo a package
-edit. Before deploying that checkout, use the installed utility and restart:
-
-```sh
-uv run --no-sync --project "$HOME/.local/share/litellm" \
-  "$HOME/.local/share/litellm/scripts/patch_litellm.py" --restore
-sudo systemctl restart litellm.service
-```
-
-This restores only the verified upstream source and leaves no recovery copies.
-Retire the patch and its deployment task when a locked upstream release preserves
-`service_tier` and passes the same tier probes. Dependency upgrades deliberately
-require reviewing this exception rather than carrying it forward silently.
+The Codex probe enables its fast-mode feature and exercises an explicit tier with
+native search and resumed tool execution. Both probes accept `--base-url` for an
+isolated proxy. Check the desktop Fast toggle before declaring fast mode verified.
+Rollback uses the previous committed adapter and ordinary deployment; there is no
+installed-package edit to restore. Remove this forwarding override when a pinned
+upstream release preserves the tier and passes the same checks.
 
 ## Refresh subscription models explicitly
 
@@ -300,8 +324,9 @@ catalog change. Then exercise one authorized, read-only command that requires
 automatic approval, such as a host service-status check, and confirm an actual
 review decision and command result. `verify_review.py` checks only route access,
 streaming completion, and a JSON response; it does not prove Codex's native
-approval lifecycle. Stock LiteLLM 1.102.1's ChatGPT adapter drops `text.format`,
-so the probe does not assert upstream JSON-schema enforcement.
+approval lifecycle. The repository customization forwards `text.format`, but this
+probe also explicitly prompts for JSON and does not itself assert schema enforcement;
+see the separate subscription-backend evidence above.
 
 If the broken reviewer prevents the repair command from being approved, perform
 the repair through a user-approved host terminal. Do not disable or work around
@@ -310,8 +335,13 @@ approval controls from inside the agent task.
 Development checks:
 
 ```sh
-uv run --no-sync scripts/test_patch_litellm.py
-uv run --no-sync scripts/test_refresh_models.py
-uv run --no-sync scripts/test_cutover.py
-uv run --no-sync scripts/test_verify_review.py
+uv sync --locked
+LITELLM_LOCAL_MODEL_COST_MAP=True uv run --no-sync -m unittest discover -s scripts -p 'test_*.py'
 ```
+
+These checks are offline. The startup test runs the actual shell/uv launcher and
+proxy on a temporary loopback port against a local SSE fixture with synthetic
+credentials. It exercises outgoing fields, exact/absent instructions, ordinary
+requests, tools/continuation, backend errors, and the reserved reviewer verifier.
+Existing tests also retain the reviewer routing, hidden metadata, and refresh
+checks. They neither contact the subscription backend nor restart live services.
