@@ -117,6 +117,10 @@ def generate(source, config, catalog, selected):
 
 
 class Refresh:
+    prefix = PREFIX
+    playbook = 'refresh-models.yml'
+    generate = staticmethod(generate)
+
     def __init__(self, home, root, uv):
         self.home, self.root, self.uv = home, root, uv
         self.state = home / '.local/state/litellm'
@@ -161,7 +165,13 @@ class Refresh:
         catalog = json.loads(originals['catalog']) if originals['catalog'] else {'models': []}
         current = tomllib.loads((self.home / '.codex/config.toml').read_text())
         selected = current.get('model', '') if current.get('model_provider') == 'litellm' else ''
-        new_config, new_catalog, summary = generate(snapshot['catalog'], config, catalog, selected)
+        new_config, new_catalog, summary = self.generate(snapshot['catalog'], config, catalog, selected)
+        # Namespace owners may group their rows differently. Row order alone must
+        # not trigger a restart or make another provider's snapshot inconsistent.
+        for generated, current, field, key in ((new_config, config, 'model_list', 'model_name'),
+                                                (new_catalog, catalog, 'models', 'slug')):
+            if sorted(generated.get(field, []), key=lambda r: r[key]) == sorted(current.get(field, []), key=lambda r: r[key]):
+                generated[field] = current.get(field, [])
         previous_snapshot = json.loads(originals['snapshot']) if originals['snapshot'] else {}
         summary['codex_version_changed'] = previous_snapshot.get('codex_version') != snapshot['codex_version']
         if summary['codex_version_changed']:
@@ -174,12 +184,13 @@ class Refresh:
         summary.update(routing_changed=new_config != config, catalog_changed=new_catalog != catalog,
                        snapshot_changed=originals['snapshot'] != candidates['snapshot'])
         summary['any_changes'] = any(originals[k] != candidates[k] for k in originals)
-        return {'originals': originals, 'candidates': candidates, 'summary': summary,
+        return {'originals': originals, 'candidates': candidates, 'summary': summary, 'prefix': self.prefix,
                 'codex_config_sha256': hashlib.sha256((self.home / '.codex/config.toml').read_bytes()).hexdigest()}
 
     def prepare(self, preview=False):
         if self.transaction.exists():
-            raise ValueError('Unfinished refresh exists. Run refresh-models.yml -e refresh_action=rollback first')
+            self.journal()
+            raise ValueError(f'Unfinished refresh exists. Run {self.playbook} -e refresh_action=rollback first')
         journal = self.candidate(self.discover())
         if preview or not journal['summary']['any_changes']:
             return journal['summary']
@@ -197,7 +208,7 @@ class Refresh:
                     raise ValueError('Stock Codex rejected the candidate catalog: ' + result.stderr[-1500:])
                 parsed = json.loads(result.stdout)
                 expected = set(journal['summary']['after'])
-                actual = {r['slug'] for r in parsed['models'] if r.get('visibility') == 'list' and r['slug'].startswith(PREFIX)}
+                actual = {r['slug'] for r in parsed['models'] if r.get('visibility') == 'list' and r['slug'].startswith(self.prefix)}
                 if expected != actual:
                     raise ValueError('Stock Codex did not load the expected selectable models')
         except BaseException:
@@ -206,7 +217,12 @@ class Refresh:
         return journal['summary']
 
     def journal(self):
-        return json.loads((self.transaction / 'journal.json').read_text())
+        journal = json.loads((self.transaction / 'journal.json').read_text())
+        owner = journal.get('prefix', PREFIX)
+        if owner != self.prefix:
+            playbook = 'modal.yml' if owner == 'modal/' else 'refresh-models.yml'
+            raise ValueError(f'Pending transaction belongs to {owner}; recover with {playbook} -e refresh_action=rollback')
+        return journal
 
     def activate(self):
         journal = self.journal()
@@ -287,11 +303,11 @@ class Refresh:
             return {'snapshot_present': False}
         candidate = self.candidate(json.loads(self.paths['snapshot'].read_text()))
         if candidate['summary']['routing_changed'] or candidate['summary']['catalog_changed']:
-            raise ValueError('Installed model files differ from saved discovery; run refresh-models.yml to reconcile')
+            raise ValueError(f'Installed model files differ from saved discovery; run {self.playbook} to reconcile')
         return {'snapshot_present': True, 'models': candidate['summary']['after']}
 
 
-def main():
+def main(refresh_type=Refresh):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('action', choices=['preview', 'prepare', 'activate', 'validate', 'finish', 'rollback', 'cleanup-rollback', 'check-snapshot'])
     p.add_argument('--home', type=Path, default=Path.home())
@@ -299,7 +315,7 @@ def main():
     p.add_argument('--uv', default=shutil.which('uv'))
     args = p.parse_args()
     os.umask(0o077)
-    refresh = Refresh(args.home, args.root, args.uv)
+    refresh = refresh_type(args.home, args.root, args.uv)
     if args.action in ('preview', 'prepare'):
         result = refresh.prepare(preview=args.action == 'preview')
     elif args.action == 'cleanup-rollback':

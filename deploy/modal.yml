@@ -1,0 +1,4 @@
+- name: Configure Modal using the shared model activation and recovery workflow
+  ansible.builtin.import_playbook: refresh-models.yml
+  vars:
+    refresh_script: configure_modal.py

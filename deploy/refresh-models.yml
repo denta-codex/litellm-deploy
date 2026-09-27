@@ -1,10 +1,11 @@
-- name: Explicitly refresh Grace subscription models
+- name: Explicitly configure Grace model routes and picker
   hosts: grace
   gather_facts: true
   vars:
     source_root: "{{ playbook_dir }}/.."
     refresh_action: refresh
-    refresh_command: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/refresh_models.py"]
+    refresh_script: refresh_models.py
+    refresh_command: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/{{ refresh_script }}"]
   tasks:
     - name: Check target and operation
       ansible.builtin.assert:
@@ -28,7 +29,7 @@
       changed_when: false
       check_mode: false
       when: refresh_action == 'refresh'
-    - name: Discover subscription models and prepare or preview changes
+    - name: Prepare or preview model changes
       ansible.builtin.command:
         argv: "{{ refresh_command + [('preview' if ansible_check_mode else 'prepare')] }}"
       register: discovery
@@ -62,7 +63,7 @@
           until: health.status == 200
           retries: 30
           delay: 2
-        - name: Validate changed models with subscription streaming and stock Codex
+        - name: Validate changed models with streaming and stock Codex
           ansible.builtin.command:
             argv: "{{ refresh_command + ['validate'] }}"
           changed_when: false
