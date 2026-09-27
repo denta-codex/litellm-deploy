@@ -23,8 +23,8 @@ def verify(credential):
         'stream': True,
         'store': False,
         'reasoning': {'effort': 'medium'},
-        # The pinned ChatGPT adapter drops text.format. Check the returned JSON
-        # without claiming server-side schema enforcement.
+        # The repository adapter forwards this schema. This prompt also asks
+        # for JSON, so this transport check alone cannot prove schema enforcement.
         'text': {'format': {
             'type': 'json_schema', 'name': 'review_route_probe', 'strict': True,
             'schema': {'type': 'object', 'properties': {'status': {'type': 'string', 'enum': ['REVIEW_ROUTE_OK']}},

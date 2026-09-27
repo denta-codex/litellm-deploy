@@ -1,4 +1,4 @@
-"""Load systemd credentials into the stock LiteLLM process without a disk copy."""
+"""Load systemd credentials before starting the configured LiteLLM server."""
 import os
 from pathlib import Path
 import re
@@ -42,8 +42,9 @@ def main():
         sys.exit('Cannot load LiteLLM systemd credentials; check the encrypted credential files.')
     os.environ['LITELLM_MASTER_KEY'] = key
     os.environ['MODAL_API_KEY'] = token
-    executable = Path(sys.executable).with_name('litellm')
-    os.execv(str(executable), [str(executable), '--config', sys.argv[1], '--host', '127.0.0.1', '--port', '4000'])
+    server = Path(__file__).with_name('serve.py')
+    port = sys.argv[2] if len(sys.argv) > 2 else '4000'
+    os.execv(sys.executable, [sys.executable, str(server), '--config', sys.argv[1], '--port', port])
 
 
 if __name__ == '__main__':

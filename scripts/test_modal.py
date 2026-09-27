@@ -26,9 +26,9 @@ class CredentialTests(unittest.TestCase):
                 launch()
                 self.assertEqual(os.environ['LITELLM_MASTER_KEY'], 'sk-test-proxy')
                 self.assertEqual(os.environ['MODAL_API_KEY'], 'wk-test.ws-test')
-                executable = str(Path(sys.executable).with_name('litellm'))
-                execute.assert_called_once_with(executable, [executable, '--config', '/fixture/config.yaml',
-                                                            '--host', '127.0.0.1', '--port', '4000'])
+                server = str(Path(__file__).with_name('serve.py'))
+                execute.assert_called_once_with(sys.executable, [sys.executable, server, '--config', '/fixture/config.yaml',
+                                                                '--port', '4000'])
             self.assertEqual(sorted(p.name for p in directory.iterdir()), ['litellm-proxy-key', 'modal-inference-token'])
 
     def test_missing_credential_fails_before_starting_proxy(self):

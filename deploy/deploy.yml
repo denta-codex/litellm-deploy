@@ -1,4 +1,4 @@
-- name: Deploy stock LiteLLM on Grace
+- name: Deploy LiteLLM on Grace
   hosts: grace
   gather_facts: true
   vars:
@@ -63,11 +63,12 @@
       loop: [pyproject.toml, uv.lock]
       register: project_files
       notify: Restart LiteLLM
-    - name: Install service launcher
+    - name: Install service launcher and request customization
       ansible.builtin.copy:
-        src: "{{ source_root }}/scripts/start-litellm"
-        dest: "{{ litellm_root }}/scripts/start-litellm"
+        src: "{{ source_root }}/scripts/{{ item }}"
+        dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
+      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py]
       notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
@@ -75,13 +76,7 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py']
-    - name: Install credential launcher
-      ansible.builtin.copy:
-        src: "{{ source_root }}/scripts/launch.py"
-        dest: "{{ litellm_root }}/scripts/launch.py"
-        mode: '0700'
-      notify: Restart LiteLLM
+      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"
