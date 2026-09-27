@@ -275,13 +275,15 @@ class Runtime:
         desired = {name: self.fingerprint(entry) for name, entry in self.desired().items()}
         current = self.current_fingerprints()
         installed = self.load(self.installed) if self.installed.exists() else None
+        pending = self.load(self.transaction) if self.transaction.exists() else None
+        changes = [name for name in MANAGED_PATHS if current[name] != desired[name]]
         return {
             'action': 'preview', 'target_version': self.version,
             'binary_installed': self.binary().is_file(),
-            'pending': self.transaction.exists(),
+            'pending': pending is not None,
             'accepted_version': installed.get('version') if installed else None,
-            'changes': [name for name in MANAGED_PATHS if current[name] != desired[name]],
-            'restart_required': bool([name for name in MANAGED_PATHS if current[name] != desired[name]]),
+            'changes': changes,
+            'restart_required': (self.socket_identity() == pending['socket_before']) if pending else bool(changes),
         }
 
     def apply(self):
