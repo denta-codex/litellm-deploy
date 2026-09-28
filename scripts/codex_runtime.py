@@ -16,9 +16,10 @@ import time
 import tomlkit
 
 
-SCHEMA = 1
+SCHEMA = 2
+LEGACY_SCHEMA = 1
+CONFIG_PATH = '/home/agent/.codex/config.toml'
 MANAGED_PATHS = (
-    '/home/agent/.codex/config.toml',
     '/home/agent/.local/share/litellm/scripts/codex-launcher',
     '/home/agent/.local/bin/codex',
     '/etc/systemd/system/codex-app-server.service',
@@ -89,35 +90,45 @@ fi
 '''
 
 
-def migrate_config(original):
-    doc = tomlkit.parse(original)
+def config_errors(doc):
+    errors = []
     if doc.get('model_provider') != 'litellm':
-        raise RuntimeError('Expected the existing LiteLLM provider')
-    provider = doc['model_providers']['litellm']
+        errors.append('Set model_provider = "litellm".')
+    providers = doc.get('model_providers', {})
+    provider = providers.get('litellm', {}) if hasattr(providers, 'get') else {}
     if provider.get('base_url') != 'http://127.0.0.1:4000/v1':
-        raise RuntimeError('Unexpected LiteLLM endpoint')
-    if provider.get('experimental_bearer_token') or provider.get('env_key') not in (None, 'LITELLM_PROXY_KEY'):
-        raise RuntimeError('Unexpected provider credential configuration')
-    provider.pop('auth', None)
-    provider['requires_openai_auth'] = True
-    provider['env_key'] = 'LITELLM_PROXY_KEY'
-    doc.setdefault('features', tomlkit.table())['shell_snapshot'] = False
+        errors.append('Set model_providers.litellm.base_url = "http://127.0.0.1:4000/v1".')
+    if provider.get('wire_api') != 'responses':
+        errors.append('Set model_providers.litellm.wire_api = "responses".')
+    if provider.get('requires_openai_auth') is not True:
+        errors.append('Set model_providers.litellm.requires_openai_auth = true.')
+    if provider.get('env_key') != 'LITELLM_PROXY_KEY':
+        errors.append('Set model_providers.litellm.env_key = "LITELLM_PROXY_KEY".')
+    if 'auth' in provider:
+        errors.append('Remove the model_providers.litellm.auth table.')
+    if 'experimental_bearer_token' in provider:
+        errors.append('Remove model_providers.litellm.experimental_bearer_token.')
     if doc.get('service_tier') not in (None, 'default'):
-        raise RuntimeError('Expected a standard-speed default before runtime migration')
-    policy = doc.setdefault('shell_environment_policy', tomlkit.table())
-    if 'filters' in policy:
-        filters = policy['filters']
-        for key in list(filters):
-            if key.upper() == 'LITELLM_PROXY_KEY':
-                del filters[key]
-        filters['LITELLM_PROXY_KEY'] = 'exclude'
-    else:
-        exclusions = policy.setdefault('exclude', [])
-        if 'LITELLM_PROXY_KEY' not in exclusions:
-            exclusions.append('LITELLM_PROXY_KEY')
-    if any(key.upper() == 'LITELLM_PROXY_KEY' for key in policy.get('set', {})):
-        raise RuntimeError('Remove the explicit proxy-key shell assignment first')
-    return tomlkit.dumps(doc)
+        errors.append('Set service_tier = "default" or remove it.')
+    features = doc.get('features', {})
+    if not hasattr(features, 'get') or features.get('shell_snapshot') is not False:
+        errors.append('Set features.shell_snapshot = false.')
+    policy = doc.get('shell_environment_policy', {})
+    policy = policy if hasattr(policy, 'get') else {}
+    assigned = policy.get('set', {})
+    assigned = assigned if hasattr(assigned, 'keys') else {}
+    if any(str(key).upper() == 'LITELLM_PROXY_KEY' for key in assigned):
+        errors.append('Remove LITELLM_PROXY_KEY from shell_environment_policy.set.')
+    filters = policy.get('filters', {})
+    filters = filters if hasattr(filters, 'items') else {}
+    filtered = any(str(key).upper() == 'LITELLM_PROXY_KEY' and value == 'exclude'
+                   for key, value in filters.items())
+    exclusions = policy.get('exclude', [])
+    excluded = (not isinstance(exclusions, (str, bytes, dict)) and
+                any(str(value) == 'LITELLM_PROXY_KEY' for value in exclusions))
+    if not (filtered or excluded):
+        errors.append('Exclude LITELLM_PROXY_KEY through shell_environment_policy.exclude or filters.')
+    return errors
 
 
 class Runtime:
@@ -143,9 +154,7 @@ class Runtime:
         return self.path(f'/home/agent/.local/share/mise/installs/codex/{self.version}/bin/codex')
 
     def desired(self):
-        config = self.path('/home/agent/.codex/config.toml')
         return {
-            '/home/agent/.codex/config.toml': self.file(migrate_config(config.read_text()), 0o600, self.uid, self.gid),
             '/home/agent/.local/share/litellm/scripts/codex-launcher': self.file(render_launcher(self.version), 0o700, self.uid, self.gid),
             '/home/agent/.local/bin/codex': {'kind': 'symlink', 'target': '/home/agent/.local/share/litellm/scripts/codex-launcher'},
             '/etc/systemd/system/codex-app-server.service': self.file(render_service(), 0o644, 0 if self.root == Path('/') else self.uid, 0 if self.root == Path('/') else self.gid),
@@ -231,7 +240,25 @@ class Runtime:
         if result.returncode or result.stdout.strip() != f'codex-cli {self.version}':
             raise RuntimeError(f'Managed binary did not report codex-cli {self.version}')
 
-    def validate_catalog(self):
+    def validate_config(self):
+        config = self.path(CONFIG_PATH)
+        if config.is_symlink() or not config.exists():
+            raise RuntimeError(f'Grace\'s user-managed Codex config must be a regular file at {CONFIG_PATH}.')
+        info = config.stat()
+        if not stat.S_ISREG(info.st_mode):
+            raise RuntimeError(f'Grace\'s user-managed Codex config must be a regular file at {CONFIG_PATH}.')
+        errors = []
+        if info.st_uid != self.uid or info.st_gid != self.gid:
+            errors.append(f'Run chown agent:agent {CONFIG_PATH}.')
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            errors.append(f'Run chmod 600 {CONFIG_PATH}.')
+        doc = tomlkit.parse(config.read_text())
+        errors.extend(config_errors(doc))
+        if errors:
+            raise RuntimeError('Grace\'s user-managed Codex config is incompatible:\n- ' + '\n- '.join(errors))
+        return doc
+
+    def validate_catalog(self, config):
         catalog = self.path('/home/agent/.config/litellm/codex-models.json')
         if not catalog.is_file():
             raise RuntimeError('Existing Codex model catalog is missing')
@@ -245,7 +272,6 @@ class Runtime:
             raise RuntimeError('Pinned Codex rejected the existing catalog: ' + result.stderr[-1200:])
         try:
             models = json.loads(result.stdout)['models']
-            config = tomlkit.parse(self.path('/home/agent/.codex/config.toml').read_text())
             selected = config['model']
             if not any(model.get('slug') == selected for model in models):
                 raise RuntimeError(f'Existing catalog does not contain selected model {selected}')
@@ -271,43 +297,84 @@ class Runtime:
     def load(self, path):
         return json.loads(path.read_text())
 
+    def load_installed(self):
+        installed = self.load(self.installed)
+        if installed.get('schema') != SCHEMA:
+            raise RuntimeError('Unsupported accepted Codex runtime state; expected schema 2')
+        return installed
+
+    def cutover_pending(self, write, require_version=False):
+        transaction = self.load(self.transaction)
+        if require_version and transaction.get('target_version') != self.version:
+            raise RuntimeError('A different Codex runtime transaction is pending')
+        if transaction.get('schema') == SCHEMA:
+            return transaction, False
+        legacy_paths = set(MANAGED_PATHS) | {CONFIG_PATH}
+        required = {'before', 'before_fingerprints', 'after'}
+        if transaction.get('schema') != LEGACY_SCHEMA or not required.issubset(transaction):
+            raise RuntimeError('Unsupported pending Codex runtime state; expected the known schema-1 transaction')
+        if any(set(transaction[name]) != legacy_paths for name in required):
+            raise RuntimeError('Pending schema-1 transaction does not match Grace\'s known runtime state')
+        converted = dict(transaction)
+        converted['schema'] = SCHEMA
+        for name in required:
+            converted[name] = {path: entry for path, entry in transaction[name].items()
+                               if path != CONFIG_PATH}
+        actual = self.current_fingerprints()
+        mismatches = [name for name in MANAGED_PATHS if actual[name] != converted['after'][name]]
+        if mismatches:
+            raise RuntimeError('Pending schema-1 runtime is not fully staged at: ' + ', '.join(mismatches))
+        if write:
+            self.write_json(self.transaction, converted)
+        return converted, True
+
+    def load_pending(self):
+        transaction = self.load(self.transaction)
+        if transaction.get('schema') != SCHEMA:
+            raise RuntimeError('Run the runtime apply action once to release config.toml from the pending transaction')
+        return transaction
+
     def summary(self):
+        self.validate_config()
         desired = {name: self.fingerprint(entry) for name, entry in self.desired().items()}
         current = self.current_fingerprints()
-        installed = self.load(self.installed) if self.installed.exists() else None
-        pending = self.load(self.transaction) if self.transaction.exists() else None
+        installed = self.load_installed() if self.installed.exists() else None
+        pending, pending_cutover = self.cutover_pending(write=False) if self.transaction.exists() else (None, False)
         changes = [name for name in MANAGED_PATHS if current[name] != desired[name]]
         return {
             'action': 'preview', 'target_version': self.version,
             'binary_installed': self.binary().is_file(),
             'pending': pending is not None,
+            'pending_config_release': pending_cutover,
+            'config': 'valid and user-managed',
             'accepted_version': installed.get('version') if installed else None,
             'changes': changes,
             'restart_required': (self.socket_identity() == pending['socket_before']) if pending else bool(changes),
         }
 
     def apply(self):
+        config = self.validate_config()
         self.validate_binary()
-        self.validate_catalog()
+        self.validate_catalog(config)
         desired = self.desired()
         desired_fingerprints = {name: self.fingerprint(entry) for name, entry in desired.items()}
         if self.transaction.exists():
-            transaction = self.load(self.transaction)
-            if transaction['target_version'] != self.version:
-                raise RuntimeError('A different Codex runtime transaction is pending')
+            transaction, cutover = self.cutover_pending(write=True, require_version=True)
             actual = self.current_fingerprints()
             for name in MANAGED_PATHS:
                 if actual[name] not in (transaction['before_fingerprints'][name], transaction['after'][name]):
                     raise RuntimeError(f'Intervening edit at {name}; refusing to continue')
             if actual == transaction['after']:
-                return {'action': 'apply', 'changed': False, 'target_version': self.version,
+                return {'action': 'apply', 'changed': cutover, 'target_version': self.version,
+                        'config': 'valid and user-managed',
                         'restart_required': self.socket_identity() == transaction['socket_before']}
         else:
             if self.installed.exists():
-                accepted = self.load(self.installed)
+                accepted = self.load_installed()
                 self.assert_matches(accepted['managed'], 'Previously accepted Codex runtime')
                 if accepted['version'] == self.version and self.current_fingerprints() == desired_fingerprints:
                     return {'action': 'apply', 'changed': False, 'target_version': self.version,
+                            'config': 'valid and user-managed',
                             'restart_required': False}
             before = {name: self.snapshot(name) for name in MANAGED_PATHS}
             transaction = {
@@ -322,25 +389,28 @@ class Runtime:
             self.install_entry(name, desired[name])
         self.assert_matches(desired_fingerprints, 'Prepared Codex runtime')
         return {'action': 'apply', 'changed': True, 'target_version': self.version,
+                'config': 'valid and user-managed',
                 'restart_required': self.socket_identity() == transaction['socket_before']}
 
     def verify(self):
-        source = self.load(self.transaction) if self.transaction.exists() else self.load(self.installed)
+        config = self.validate_config()
+        source = self.load_pending() if self.transaction.exists() else self.load_installed()
         managed_version = source['target_version'] if 'target_version' in source else source['version']
         if managed_version != self.version:
             raise RuntimeError('Requested version differs from managed runtime state')
         expected = source['after'] if 'after' in source else source['managed']
         self.assert_matches(expected, 'Managed Codex runtime')
         self.validate_binary()
-        self.validate_catalog()
+        self.validate_catalog(config)
         if self.transaction.exists() and self.socket_identity() == source['socket_before']:
             raise RuntimeError('Desktop has not restarted the systemd-owned app server')
-        return {'action': 'verify', 'version': self.version, 'files': 'accepted', 'socket_replaced': True}
+        return {'action': 'verify', 'version': self.version, 'files': 'accepted',
+                'config': 'valid and user-managed', 'socket_replaced': True}
 
     def rollback(self):
         if not self.transaction.exists():
             return {'action': 'rollback', 'changed': False, 'message': 'no pending transaction'}
-        transaction = self.load(self.transaction)
+        transaction, _ = self.cutover_pending(write=True)
         self.assert_matches(transaction['after'], 'Prepared Codex runtime')
         for name in MANAGED_PATHS:
             self.install_entry(name, transaction['before'][name])
@@ -352,7 +422,8 @@ class Runtime:
     def finish(self):
         if not self.transaction.exists():
             return {'action': 'finish', 'changed': False, 'message': 'no pending transaction'}
-        transaction = self.load(self.transaction)
+        self.validate_config()
+        transaction = self.load_pending()
         self.assert_matches(transaction['after'], 'Prepared Codex runtime')
         manifest = {'schema': SCHEMA, 'version': transaction['target_version'],
                     'accepted_at': time.time(), 'managed': transaction['after']}
