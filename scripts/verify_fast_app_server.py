@@ -13,7 +13,6 @@ import tempfile
 
 from aiohttp import ClientSession, ClientTimeout, web
 import tomlkit
-from codex_runtime import migrate_config
 
 
 async def verify(args, home):
@@ -58,16 +57,17 @@ async def verify(args, home):
         port = site._server.sockets[0].getsockname()[1]
         doc = {
             'model_provider': 'litellm', 'model': args.model, 'model_reasoning_effort': 'low',
+            'service_tier': 'default',
             'model_catalog_json': str(Path.home() / '.config/litellm/codex-models.json'),
             'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'disabled',
-            'features': {'fast_mode': True},
+            'features': {'fast_mode': True, 'shell_snapshot': False},
+            'shell_environment_policy': {'exclude': ['LITELLM_PROXY_KEY']},
             'model_providers': {'litellm': {
                 'name': 'LiteLLM', 'wire_api': 'responses', 'supports_websockets': False,
                 'base_url': 'http://127.0.0.1:4000/v1',
                 'requires_openai_auth': True, 'env_key': 'LITELLM_PROXY_KEY',
             }},
         }
-        doc = tomlkit.parse(migrate_config(tomlkit.dumps(doc)))
         doc['model_providers']['litellm']['base_url'] = f'http://127.0.0.1:{port}/v1'
         (home / 'config.toml').write_text(tomlkit.dumps(doc))
         process = await asyncio.create_subprocess_exec(str(args.launcher), '-c', 'features.code_mode_host=true', 'app-server',

@@ -216,15 +216,19 @@ and passes the same checks.
 
 ### Grace Codex runtime
 
-The desktop's Fast controls require the host's genuine ChatGPT identity. The
-LiteLLM provider uses `requires_openai_auth = true` and
-`env_key = "LITELLM_PROXY_KEY"`, replacing its incompatible credential-command
-table. The native ChatGPT login, endpoint, catalog, model, and standard-speed
-default remain in place. No desktop or installed package is patched.
+The desktop's Fast controls require the host's genuine ChatGPT identity.
+Grace's `~/.codex/config.toml` is user-managed. The runtime deployment validates
+that its LiteLLM provider uses `requires_openai_auth = true`,
+`env_key = "LITELLM_PROXY_KEY"`, the local endpoint, standard speed, disabled
+shell snapshots, and proxy-key exclusion. It reports exact corrections when
+those prerequisites are missing, but never rewrites, snapshots, digest-locks,
+or restores the file. The native ChatGPT login, catalog, model, plugins, and
+other preferences remain under Grace's control. No desktop or installed package
+is patched.
 
 The dedicated runtime deployment owns Grace's full `codex-app-server.service`,
 the existing Desktop attach setting, the credential-loading launcher, its
-`~/.local/bin/codex` entry point, and the relevant Codex provider settings. The
+`~/.local/bin/codex` entry point, and the pinned Codex binary selection. The
 launcher decrypts the existing credential into the process environment,
 rejects empty/invalid credentials, and executes a committed exact Codex version
 with arguments unchanged. Explicit environment exclusion keeps the key out of
@@ -251,9 +255,10 @@ ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runti
 ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=finish -e codex_desktop_validated=true
 ```
 
-The default action is read-only preview. `apply` installs the exact binary if
-needed and stages the launcher, configuration, unit, and attach setting. It also
-removes the temporary emergency drop-in after recording it for rollback. `verify`
+The default action is read-only preview. `apply` validates the user-managed
+configuration, installs the exact binary if needed, and stages the launcher,
+unit, and attach setting. It also removes the temporary emergency drop-in after
+recording it for rollback. `verify`
 requires a replaced app-server socket, checks the live systemd process uses the
 pinned executable and proxy credential, and runs a real shell turn proving the
 key is absent from tools. It then checks subscription streaming, tool
@@ -261,9 +266,10 @@ continuation, native search/resume, and the reserved reviewer route. `finish`
 records the accepted version and managed-file digests.
 
 One private transaction at `~/.local/state/litellm/codex-runtime.json` contains
-only the affected files, prior version selection, and pre-restart socket identity.
-Rollback refuses current files that differ from the staged revision, restores
-the previous runtime together, and then requires Desktop Restart:
+only the repository-owned runtime files, prior version selection, and pre-restart
+socket identity. It never contains `config.toml`. Rollback refuses managed files
+that differ from the staged revision, restores the previous runtime together,
+leaves Grace's configuration untouched, and then requires Desktop Restart:
 
 ```console
 ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=rollback

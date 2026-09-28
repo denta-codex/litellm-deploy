@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 
 import tomlkit
-from codex_runtime import migrate_config
 
 p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
@@ -34,19 +33,18 @@ with tempfile.TemporaryDirectory(prefix='codex-probe-', dir=state) as temporary:
     auth.write_text(json.dumps(native))
     doc = {
         'model_provider': 'litellm', 'model': args.model,
+        'service_tier': 'default',
         'model_catalog_json': str(args.catalog.resolve()),
         'model_reasoning_effort': effort, 'approval_policy': 'never',
         'sandbox_mode': 'read-only', 'web_search': 'disabled' if args.skip_search else 'live',
+        'features': {'shell_snapshot': False},
+        'shell_environment_policy': {'exclude': ['LITELLM_PROXY_KEY']},
         'model_providers': {'litellm': {
             'name': 'LiteLLM', 'base_url': 'http://127.0.0.1:4000/v1',
             'wire_api': 'responses', 'supports_websockets': False,
-            'auth': {'command': '/usr/bin/systemd-creds',
-                     'args': ['decrypt', '--user', '--name=litellm-proxy-key',
-                              str(Path.home() / '.config/litellm/proxy-key.cred'), '-'],
-                     'refresh_interval_ms': 0},
+            'requires_openai_auth': True, 'env_key': 'LITELLM_PROXY_KEY',
         }},
     }
-    doc = tomlkit.parse(migrate_config(tomlkit.dumps(doc)))
     doc['model_providers']['litellm']['base_url'] = args.base_url.rstrip('/') + '/v1'
     if args.service_tier:
         doc['service_tier'] = args.service_tier
