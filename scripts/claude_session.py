@@ -124,7 +124,7 @@ def configuration(messages, params):
     names = []
     for definition in definitions:
         if definition.get('type') != 'function':
-            raise ValueError('Claude accepts client function tools only; hosted search is deferred')
+            raise ValueError('Claude accepts function tools; hosted search must pass through the shared Responses interceptor')
         function = definition['function']
         names.append(function['name'])
         schema = function.get('parameters', {'type': 'object', 'properties': {}})

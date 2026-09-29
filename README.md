@@ -188,7 +188,7 @@ namespaced functions and freeform patches. It does not fetch image URLs. Samplin
 token-budget, verbosity, priority-tier and server-side Responses retrieval controls
 are rejected. Codex metadata and cache hints are accepted as transport metadata;
 they do not force a Claude cache policy. Opaque encrypted reasoning is not exported.
-Search is disabled pending the separate shared-search task.
+Hosted search uses the shared ChatGPT-backed interceptor described below.
 
 Direct clients must send `thread-id` or `x-claude-chat-id` on authenticated requests
 and supply full conversation history. Session identity also includes the caller,
@@ -460,7 +460,62 @@ are rejected rather than filling them with invented defaults.
 The supported `model_catalog_json` setting still points to
 `~/.config/litellm/codex-models.json`. This snapshot is loaded at Codex startup;
 run refresh explicitly after model availability or Codex version changes.
-Modal entries do not advertise native search; see the Modal setup below.
+Claude and Modal entries advertise hosted search after their activation checks pass.
+
+### Shared search for Claude and Modal
+
+`shared_search.py` extends LiteLLM 1.102.1's `WebSearchInterceptionLogger`.
+LiteLLM's existing agentic loop performs model continuations; the local extension
+supplies the subscription backend, preserves mixed client/search tool batches,
+and presents standard Responses search events to stock Codex. No additional
+gateway or Codex patch is required. Native ChatGPT search keeps its existing path.
+
+The helper is the configured `chatgpt/gpt-6-luna` route at low effort. Set
+`SHARED_SEARCH_MODEL` in the service environment to select another configured
+ChatGPT helper explicitly. Authentication and refresh remain in the existing
+ChatGPT provider; its credentials never enter Claude workers or Modal requests.
+The backend accepts a query and search settings and returns normalized text and
+source records, so a future Exa backend can use the same interceptor and Codex
+presentation. Exa is not enabled or configured by this release.
+
+Search-enabled model iterations are buffered. Search progress is emitted while
+the helper runs, then model text/reasoning and client tool calls are returned in
+batches. Ordinary requests without shared search/history keep the stock path.
+The limit is three helper queries per Responses request and 60 seconds per query,
+including retries. A client-tool continuation starts a new request. Results keep
+up to 4,000 answer characters and eight sources per query. Failed/empty searches
+remain explicit, and no alternate provider is silently substituted. Client tool
+execution and approvals remain with Codex, including mixed and parallel batches.
+
+Private journals in `~/.local/state/litellm/search` contain search calls, findings,
+sources, helper usage, and completed response replays. They are scoped to the
+authenticated caller and use atomic owner-only files. Completed records are
+pruned after 30 days or at a 100 MiB per-caller budget; pending client-tool
+continuations are protected. Missing required records fail explicitly. Treat the
+journals as conversation data. `SHARED_SEARCH_STATE` overrides the directory for
+disposable testing. Active helper cancellation follows the owning request;
+broader Claude worker cleanup remains a separate task.
+
+Validate and activate with the existing model refresh transactions:
+
+```sh
+uv run --no-sync scripts/test_shared_search.py
+uv run --no-sync scripts/verify_shared_search.py --isolated --all-efforts
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+ansible-playbook -i deploy/inventory.yml deploy/modal.yml
+ansible-playbook -i deploy/inventory.yml deploy/claude.yml
+```
+
+Deployment validates installed discovery with the installed generators before
+replacing them. Provider activation then validates and publishes new capabilities.
+Retain the prior changed runtime files and model files until both activations
+pass; on release failure restore that runtime and its matching catalog together.
+The isolated acceptance starts disposable proxy/Codex homes, verifies successful
+helper output with sources, native Codex activity, external tools and follow-up
+context, and removes successful test state. Failed evidence is retained at the
+printed path only until diagnosis completes. Restart Grace's desktop connection
+after publication to load the new catalog.
 
 ## Modal inference
 
@@ -530,10 +585,10 @@ playbook that started the transaction; rollback rejects a different namespace.
 ### Capability boundaries
 
 Modal models use the existing named `litellm` provider with HTTP Responses and
-full tool history. No WebSocket support or native hosted search is advertised.
-The old gateway's ChatGPT-backed search bridge is not part of this setup; adding
-search requires a separately configured search backend. Subscription search is
-unchanged. Existing gateway tasks are not relabeled or migrated, and encrypted
+full tool history and shared hosted search. No WebSocket support is advertised.
+The old gateway's search behavior is adapted through LiteLLM's existing search
+interception hooks. Subscription search is unchanged. Existing gateway tasks are
+not relabeled or migrated, and encrypted
 OpenAI compaction state is not converted for Modal. Begin with a fresh task under
 the `litellm` provider. Local compaction, subagents, and long-running task behavior
 still require deployment-time acceptance testing.

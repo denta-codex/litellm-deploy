@@ -29,6 +29,17 @@
       ansible.builtin.assert:
         that: not pending_refresh.stat.exists
         fail_msg: Recover the pending transaction with its original playbook (claude.yml, modal.yml or refresh-models.yml) -e refresh_action=rollback before deploying.
+    - name: Inspect existing model refresh utility
+      ansible.builtin.stat:
+        path: "{{ litellm_root }}/scripts/refresh_models.py"
+      register: installed_refresh
+    - name: Verify saved discovery with the currently installed generators
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/{{ item }}", check-snapshot]
+      loop: [refresh_models.py, configure_modal.py, configure_claude.py]
+      changed_when: false
+      check_mode: false
+      when: installed_refresh.stat.exists
     - name: Inspect retained encrypted Modal inference credential
       ansible.builtin.stat:
         path: "{{ litellm_modal_credential }}"
@@ -69,7 +80,7 @@
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py]
+      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py, shared_search.py]
       notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
@@ -77,7 +88,7 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py']
+      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"
@@ -96,13 +107,6 @@
       register: credentials
       changed_when: "'created' in credentials.stdout"
       no_log: true
-    - name: Verify saved discovery is still installed
-      ansible.builtin.command:
-        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/{{ item }}", check-snapshot]
-      loop: [refresh_models.py, configure_modal.py, configure_claude.py]
-      changed_when: false
-      check_mode: false
-      when: installed_cli.stat.exists or not ansible_check_mode
     - name: Bootstrap LiteLLM configuration without overwriting discovered routes
       ansible.builtin.template:
         src: config.yaml.j2

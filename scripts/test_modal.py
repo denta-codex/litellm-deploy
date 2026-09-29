@@ -82,7 +82,8 @@ class ModalTests(unittest.TestCase):
             self.assertTrue(params['use_chat_completions_api'])
             self.assertEqual(route['model_info']['mode'], 'chat')
         for entry in catalog['models'][3:]:
-            self.assertFalse(entry['supports_search_tool'])
+            self.assertTrue(entry['supports_search_tool'])
+            self.assertEqual(entry['web_search_tool_type'], 'text_and_image')
             self.assertFalse(entry['prefer_websockets'])
             self.assertFalse(entry['use_responses_lite'])
         again_config, again_catalog, again = generate(self.source, config, catalog, 'chatgpt/astra')
@@ -150,7 +151,7 @@ class ActivationTests(ModalTests):
         self.assertEqual(run.call_count, 6)
         codex_calls = [c.args[0] for c in run.call_args_list if any('verify_codex.py' in a for a in c.args[0])]
         self.assertEqual(len(codex_calls), 3)
-        self.assertTrue(all('--skip-search' in c for c in codex_calls))
+        self.assertTrue(all('--skip-search' not in c for c in codex_calls))
         self.refresh.finish()
         self.assertEqual(self.subscription_snapshot.read_bytes(), subscription_before)
         self.assertTrue(self.refresh.check_snapshot()['snapshot_present'])

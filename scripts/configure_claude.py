@@ -32,13 +32,14 @@ def generate(source, config, catalog, selected):
         'truncation_policy': {'mode': 'tokens', 'limit': 10000}, 'input_modalities': ['text', 'image'],
         'supported_reasoning_levels': [{'effort': effort, 'description': effort} for effort in spec['reasoning_levels']],
         'default_reasoning_level': spec['default_reasoning_level'], 'default_reasoning_summary': 'auto',
-        'supports_parallel_tool_calls': True, 'supports_reasoning_summaries': True, 'supports_search_tool': False,
+        'supports_parallel_tool_calls': True, 'supports_reasoning_summaries': True, 'supports_search_tool': True,
+        'web_search_tool_type': 'text_and_image',
         'supports_reasoning_summary_parameter': False, 'supports_reasoning_effort_updates': True,
         'supports_image_detail_original': False, 'support_verbosity': False,
         'use_responses_lite': False, 'prefer_websockets': False,
         'tool_mode': 'code_mode_only', 'shell_type': 'shell_command', 'apply_patch_tool_type': 'freeform',
         'experimental_supported_tools': [], 'service_tiers': [], 'additional_speed_tiers': [],
-        'availability_nux': None, 'available_access_programs': {}, 'priority': 95,
+        'availability_nux': None, 'available_access_programs': {}, 'priority': 80,
     }
     before = {m['slug']: m for m in catalog.get('models', []) if m['slug'].startswith(PREFIX)}
     old_routes = {r['model_name']: r for r in config.get('model_list', []) if r['model_name'].startswith(PREFIX)}
@@ -74,6 +75,11 @@ class ClaudeSetup(Refresh):
                    '--catalog', str(self.transaction / 'catalog.json')]
         with (self.transaction / 'validation.log').open('w') as log:
             result = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=1800)
+            if result.returncode == 0:
+                result = subprocess.run([self.uv, 'run', '--no-sync', '--project', str(self.root),
+                    str(Path(__file__).with_name('verify_shared_search.py')), '--model', 'claude/opus-5.5',
+                    '--catalog', str(self.transaction / 'catalog.json')],
+                    stdout=log, stderr=subprocess.STDOUT, timeout=900)
         if result.returncode:
             raise ValueError('Claude validation failed; see private model-refresh/validation.log')
         atomic_write(self.transaction / 'validated', 'yes\n')

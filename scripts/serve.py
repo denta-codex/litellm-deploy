@@ -13,6 +13,8 @@ def main():
     from claude_provider import install as install_claude
     from litellm.proxy.proxy_server import app
     install_claude(app)
+    from shared_search import install as install_search
+    install_search()
     from litellm.proxy.proxy_cli import run_server
 
     # Multiple workers/reload would import upstream in fresh processes and lose
