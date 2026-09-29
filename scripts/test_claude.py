@@ -71,7 +71,7 @@ class ContractTests(unittest.TestCase):
         row = new['models'][1]
         self.assertEqual(row['display_name'], 'Claude Opus 5.5')
         self.assertEqual([e['effort'] for e in row['supported_reasoning_levels']], list(EFFORTS))
-        self.assertFalse(row['supports_search_tool'])
+        self.assertTrue(row['supports_search_tool'])
         self.assertNotIn('experimental', row['description'].lower())
         self.assertEqual(generate(json.loads(MANIFEST.read_text()), config, new, '')[2]['test_models'], [])
 
@@ -335,8 +335,10 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(self.refresh.paths['catalog'].read_text(), self.originals['catalog'])
         with patch('configure_claude.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
             self.refresh.validate()
-            self.assertIn('verify_claude.py', ' '.join(run.call_args.args[0]))
-            self.assertNotIn('--api-only', run.call_args.args[0])
+            commands = [c.args[0] for c in run.call_args_list]
+            self.assertIn('verify_claude.py', ' '.join(commands[0]))
+            self.assertNotIn('--api-only', commands[0])
+            self.assertIn('verify_shared_search.py', ' '.join(commands[1]))
         self.refresh.finish()
         self.assertTrue(self.refresh.check_snapshot()['snapshot_present'])
         with patch.object(self.refresh, 'discover', return_value=self.snapshot):
