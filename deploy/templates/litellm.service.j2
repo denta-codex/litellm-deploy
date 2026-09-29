@@ -10,6 +10,7 @@ Group={{ litellm_user }}
 WorkingDirectory={{ litellm_root }}
 Environment=HOME={{ litellm_home }}
 Environment=CHATGPT_TOKEN_DIR={{ litellm_state }}/chatgpt
+Environment=CLAUDE_ADAPTER_STATE={{ litellm_state }}/claude
 Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
 Environment=LITELLM_TELEMETRY=False
 Environment=UV_OFFLINE=1

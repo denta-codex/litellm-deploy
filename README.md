@@ -21,7 +21,7 @@ ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
 The proxy listens on `127.0.0.1:4000`. It runs with a locked uv environment and
 no runtime dependency downloads. No database or Redis server is configured;
 stock upstream may include their client libraries among its dependencies.
-No virtual-key administration, middleware, or installed dependency source edits.
+No virtual-key administration or installed dependency source edits.
 Codex uses a locally discovered model catalog to enable hosted Responses search;
 see the compatibility note below.
 Application files live under `~/.local/share/litellm`, configuration under
@@ -164,6 +164,90 @@ It is independent of the uninstalled gateway service; do not copy it into
 1Password or delete it during this migration.
 
 ## Validation
+
+### Claude subscription adapter
+
+`claude/opus-5.5` is an opt-in route to the exact `claude-opus-5-5` model through
+Claude Agent SDK 0.2.161. Its picker name is **Claude Opus 5.5**. It offers low,
+medium, high, xhigh, and max effort, defaults to high, and advertises a conservative
+200,000-token context window. The default model remains `chatgpt/gpt-6-astra`.
+There is no model fallback or API-key fallback.
+
+The adapter uses the agent account's existing `claude auth login`. To renew login,
+run that command as `agent`, then retry the request. No Claude token belongs in
+LiteLLM YAML, systemd environment variables, or Git. The repository's `claude-cli`
+wrapper starts the SDK-bundled binary with a minimal environment; unrelated proxy,
+Modal, and OpenAI credentials are excluded. Workers use an empty private working
+directory, no settings sources, and only the declared MCP server. The sole native
+tool allowed for schema output is the SDK's local `StructuredOutput` formatter.
+Every client command or file edit still runs through Codex and its approvals.
+
+The adapter supports streaming/nonstreaming Responses, inline PNG/JPEG/GIF/WebP
+images, JSON schema output, summarized reasoning, and client tools including
+namespaced functions and freeform patches. It does not fetch image URLs. Sampling,
+token-budget, verbosity, priority-tier and server-side Responses retrieval controls
+are rejected. Codex metadata and cache hints are accepted as transport metadata;
+they do not force a Claude cache policy. Opaque encrypted reasoning is not exported.
+Search is disabled pending the separate shared-search task.
+
+Direct clients must send `thread-id` or `x-claude-chat-id` on authenticated requests
+and supply full conversation history. Session identity also includes the caller,
+model, and Codex context window. Concurrent requests for one session serialize;
+different chats run independently. Partial tool-result batches return outstanding
+calls with their original IDs. Repeated results must agree. Completed request
+retries are replayable from the last 16 saved responses per worker generation.
+
+Forks, compaction, configuration changes and lost workers use readable completed
+history. This preserves useful context, not native role structure or hidden model
+state. Unknown tool execution is never blindly replayed. Private atomic journals
+under `~/.local/state/litellm/claude/journals` contain tool arguments/results and
+recent responses; treat them as conversation data. SDK-owned session data remains
+in the normal Claude configuration directory. Usage excludes the SDK's list-price
+cost estimate and avoids recounting earlier tool boundaries as new inference.
+
+Stop during an outstanding client tool still lacks an immediate adapter signal
+after the HTTP response has ended. The next request reconciles the aborted tool
+and new prompt, interrupting and closing the superseded worker. Explicit close,
+active-request failure, and service shutdown clean up owned workers. Idle eviction,
+disconnected-tool deadlines and sustained resource testing remain in the deferred
+cancellation task; ordinary idle sessions currently stay available in memory.
+
+Validate in isolation, commit the implementation, deploy it, and activate the route:
+
+```sh
+uv sync --locked
+uv run --no-sync scripts/verify_claude.py --isolated
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+ansible-playbook -i deploy/inventory.yml deploy/claude.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/claude.yml
+```
+
+The isolated check starts a disposable loopback proxy and Codex home. It uses the
+existing subscription logins, writes only synthetic fixtures, and removes its
+temporary state on success. Failed checks retain a printed diagnostic directory;
+remove it once the failure is resolved. Nothing is installed globally. Tests include
+all efforts, images, schema output, summaries, tool continuations, native execution
+and patches, forks, compaction, switching to ChatGPT and back, cancellation follow-up,
+and proxy crash recovery. Existing offline tests cover error mapping, retries,
+configuration preservation and rollback without deliberately exhausting a quota.
+
+Activation publishes the picker only after the live acceptance suite passes;
+failure restores the previous configuration. Recover an interrupted transaction
+with `deploy/claude.yml -e refresh_action=rollback`. Activation changes no Codex
+default. Restart Grace's connection through the owning desktop to load the picker.
+The official SDK remains an agent runtime; this adapter is not full raw-inference
+API equivalence. Packaging for public distribution is a later decision.
+
+On September 29, 2026, the isolated full suite passed 21 live checks with Opus 5.5,
+SDK 0.2.161 and Codex 0.155.1; all 93 offline regression tests passed. The live
+parallel-call test verified two distinct SDK calls in one response, partial result
+delivery, and reversed result order. The SDK can make ancillary helper-model
+requests internally; the adapter verifies that conversational answers use Opus
+5.5. Reported inference usage comes from the SDK's response usage, not an invented
+subscription bill or a guarantee of accounting for every internal helper request.
+
+### Existing provider checks
 
 ```sh
 uv run --no-sync scripts/test_cutover.py

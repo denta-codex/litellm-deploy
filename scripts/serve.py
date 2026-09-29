@@ -10,6 +10,9 @@ def main():
     parser.add_argument('--port', type=int, default=4000)
     args = parser.parse_args()
     install()
+    from claude_provider import install as install_claude
+    from litellm.proxy.proxy_server import app
+    install_claude(app)
     from litellm.proxy.proxy_cli import run_server
 
     # Multiple workers/reload would import upstream in fresh processes and lose

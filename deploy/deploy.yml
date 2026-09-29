@@ -28,7 +28,7 @@
     - name: Require completed model refresh or recovery
       ansible.builtin.assert:
         that: not pending_refresh.stat.exists
-        fail_msg: Recover the pending transaction with its original playbook (modal.yml or refresh-models.yml) -e refresh_action=rollback before deploying.
+        fail_msg: Recover the pending transaction with its original playbook (claude.yml, modal.yml or refresh-models.yml) -e refresh_action=rollback before deploying.
     - name: Inspect retained encrypted Modal inference credential
       ansible.builtin.stat:
         path: "{{ litellm_modal_credential }}"
@@ -55,6 +55,7 @@
         - "{{ litellm_config }}"
         - "{{ litellm_state }}"
         - "{{ litellm_state }}/chatgpt"
+        - "{{ litellm_state }}/claude"
     - name: Install locked project
       ansible.builtin.copy:
         src: "{{ source_root }}/{{ item }}"
@@ -68,7 +69,7 @@
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py]
+      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py]
       notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
@@ -76,7 +77,7 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py']
+      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"
@@ -98,7 +99,7 @@
     - name: Verify saved discovery is still installed
       ansible.builtin.command:
         argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/{{ item }}", check-snapshot]
-      loop: [refresh_models.py, configure_modal.py]
+      loop: [refresh_models.py, configure_modal.py, configure_claude.py]
       changed_when: false
       check_mode: false
       when: installed_cli.stat.exists or not ansible_check_mode
