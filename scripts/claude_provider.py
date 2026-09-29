@@ -1,6 +1,7 @@
 """Subscription-backed Claude CustomLLM provider for the pinned LiteLLM router."""
 import asyncio
 from contextlib import asynccontextmanager
+import contextvars
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,10 @@ from litellm.llms.custom_llm import CustomLLMError
 
 from claude_context import CaptureRequest, identity, validate_request
 from claude_session import MODEL, Session, configuration, content_blocks, digest, history_prompt, unresolved_calls
+
+# Each idle worker is a Claude CLI process (~110 MiB). Evict the least recently
+# used idle worker beyond this; busy workers are never evicted.
+MAX_WORKERS = 20
 
 
 def chunk(text='', *, tools=None, reasoning=None, finish=None, usage=None):
@@ -40,13 +45,43 @@ class ClaudeProvider(CustomLLM):
         super().__init__()
         self.state = Path(state or os.environ.get('CLAUDE_ADAPTER_STATE', Path.home() / '.local/state/litellm/claude'))
         self.session_factory = session_factory
-        self.sessions = {}
+        self.sessions = {}  # Least recently used first.
         self.locks = {}
+        self.cleanups = {}
 
     async def close(self):
-        await asyncio.gather(*(s.close() for s in self.sessions.values()), return_exceptions=True)
+        for key, session in list(self.sessions.items()):
+            self.retire(key, session)
+        await asyncio.gather(*list(self.cleanups.values()), return_exceptions=True)
         self.sessions.clear()
         self.locks.clear()
+
+    def retire(self, key, session):
+        """Unregister now; close in a task the request's cancellation cannot interrupt."""
+        if self.sessions.get(key) is session:
+            del self.sessions[key]
+            lock = self.locks.get(key)
+            if lock and not lock.locked():
+                del self.locks[key]
+        task = self.cleanups.get(session)
+        if task is None:
+            task = asyncio.create_task(session.close(), context=contextvars.Context())
+            self.cleanups[session] = task
+
+            def forget(done):
+                self.cleanups.pop(session, None)
+                if not done.cancelled():
+                    done.exception()  # Mark retrieved; nobody awaits evictions.
+            task.add_done_callback(forget)
+        return task
+
+    def make_room(self, key):
+        for other in list(self.sessions):
+            if len(self.sessions) - (key in self.sessions) < MAX_WORKERS:
+                break
+            lock = self.locks.get(other)
+            if other != key and not (lock and lock.locked()):
+                self.retire(other, self.sessions[other])
 
     async def reconcile(self, key, messages, config):
         session = self.sessions.get(key)
@@ -59,11 +94,12 @@ class ClaudeProvider(CustomLLM):
             if replace:
                 if unresolved_calls(messages):
                     raise CustomLLMError(409, 'Claude cannot replace a session with unresolved tool execution; submit results or explicit aborts')
-                await session.close()
+                await asyncio.shield(self.retire(key, session))
                 session = None
         if session is None:
             if unresolved_calls(messages):
                 raise CustomLLMError(409, 'Claude session unavailable with unresolved tool execution; refusing to replay tools')
+            self.make_room(key)
             session = self.session_factory(key, config, self.state)
             self.sessions[key] = session
             session.history = messages
@@ -105,6 +141,8 @@ class ClaudeProvider(CustomLLM):
         lock = self.locks.setdefault(key, asyncio.Lock())
         async with lock:
             session = self.sessions.get(key)
+            if session:
+                self.sessions[key] = self.sessions.pop(key)  # Mark most recently used.
             if session and request_id in session.response_cache:
                 for item in session.response_cache[request_id]:
                     yield item
@@ -162,8 +200,8 @@ class ClaudeProvider(CustomLLM):
                 raise CustomLLMError(400, str(exc)) from None
             finally:
                 if session is not None and not normal_boundary:
-                    await session.close()
-                    self.sessions.pop(key, None)
+                    # Stop or failure: the next request must get a fresh worker.
+                    await asyncio.shield(self.retire(key, session))
 
     async def astreaming(self, model, messages, **kwargs):
         async for item in self._chunks(model, messages, **kwargs):

@@ -205,12 +205,17 @@ recent responses; treat them as conversation data. SDK-owned session data remain
 in the normal Claude configuration directory. Usage excludes the SDK's list-price
 cost estimate and avoids recounting earlier tool boundaries as new inference.
 
-Stop during an outstanding client tool still lacks an immediate adapter signal
-after the HTTP response has ended. The next request reconciles the aborted tool
-and new prompt, interrupting and closing the superseded worker. Explicit close,
-active-request failure, and service shutdown clean up owned workers. Idle eviction,
-disconnected-tool deadlines and sustained resource testing remain in the deferred
-cancellation task; ordinary idle sessions currently stay available in memory.
+Stopping or losing an active response unregisters its session immediately and
+closes the worker in a task that repeated request cancellation cannot interrupt;
+the next message gets a fresh worker built from history. Stop during an outstanding
+client tool still lacks an immediate adapter signal after the HTTP response has
+ended. The next request reconciles the aborted tool and new prompt, interrupting
+and closing the superseded worker. At most 20 workers (`MAX_WORKERS`, roughly
+110 MiB each) stay alive: creating another closes the least recently used worker
+without an in-flight request. Only busy workers can push the count past 20.
+Returning to an evicted chat rebuilds a worker from history; a late tool result
+still continues, and unresolved calls still fail closed. There is no time-based
+expiry; idle workers otherwise last until eviction, restart or deploy.
 
 Validate in isolation, commit the implementation, deploy it, and activate the route:
 
@@ -494,7 +499,7 @@ pruned after 30 days or at a 100 MiB per-caller budget; pending client-tool
 continuations are protected. Missing required records fail explicitly. Treat the
 journals as conversation data. `SHARED_SEARCH_STATE` overrides the directory for
 disposable testing. Active helper cancellation follows the owning request;
-broader Claude worker cleanup remains a separate task.
+idle Claude workers are bounded by the worker cap above.
 
 Validate and activate with the existing model refresh transactions:
 

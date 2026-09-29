@@ -17,8 +17,9 @@ import litellm
 import yaml
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, StreamEvent, SystemMessage, ToolUseBlock
 from claude_context import REQUEST, validate_request
+import claude_provider
 from claude_provider import ClaudeProvider, usage_counts
-from claude_session import CORRELATION, EFFORTS, MODEL, Session, configuration, content_blocks, digest
+from claude_session import CORRELATION, EFFORTS, MODEL, Session, configuration, content_blocks, digest, history_prompt
 from configure_claude import MANIFEST, ClaudeSetup, generate
 from refresh_models import Refresh
 
@@ -52,10 +53,10 @@ class FakeClient:
         yield SystemMessage('init', {'model': MODEL, 'session_id': 'fake-session'})
         script = self.__class__.scripted.pop(0) if self.__class__.scripted else ['ANSWER']
         for item in script:
-            if isinstance(item, str):
-                yield StreamEvent('event', 'fake-session', {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': item}})
-            elif item == 'wait':
+            if item == 'wait':
                 await self.interrupted.wait()
+            elif isinstance(item, str):
+                yield StreamEvent('event', 'fake-session', {'type': 'content_block_delta', 'delta': {'type': 'text_delta', 'text': item}})
             else:
                 yield item
         yield ResultMessage('success', 1, 1, False, 1, 'fake-session', usage={'input_tokens': 7, 'output_tokens': 3})
@@ -160,6 +161,33 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def response(self, messages=None, **params):
         async with asyncio.timeout(5):
             return [item async for item in self.provider.astreaming(MODEL, messages or [{'role': 'user', 'content': 'hello'}], optional_params=params)]
+
+    async def chat(self, name, messages=None, **params):
+        token = REQUEST.set({'caller': 'authenticated-test', 'headers': {'thread-id': name}})
+        try:
+            return await self.response(messages, **params)
+        finally:
+            REQUEST.reset(token)
+
+    def key(self, name):
+        return ('authenticated-test', name, 'default', MODEL, 'chat')
+
+    async def stopped_stream(self, cancels=1):
+        # Start a generation that never finishes, then cancel it like a closed HTTP stream.
+        FakeClient.scripted = [['PART', 'wait']]
+        started = asyncio.Event()
+        async def consume():
+            async for _ in self.provider.astreaming(MODEL, [{'role': 'user', 'content': 'hello'}], optional_params={}):
+                started.set()
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(started.wait(), 5)
+        old = self.provider.sessions[self.key('chat')]
+        for _ in range(cancels):
+            task.cancel()
+            await asyncio.sleep(0.02)
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        return old
 
     async def test_stream_nonstream_retry_and_restart_replay(self):
         first = await self.response()
@@ -296,6 +324,97 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         kind, calls = await session.queue.get()
         self.assertEqual((kind, len(calls)), ('tools', 2))
         self.assertEqual(session.reported_usage['output_tokens'], 15)
+
+    async def test_stop_then_new_prompt_gets_fresh_worker(self):
+        old = await self.stopped_stream()
+        self.assertNotIn(self.key('chat'), self.provider.sessions)
+        await asyncio.wait_for(asyncio.gather(*self.provider.cleanups.values()), 5)
+        self.assertTrue(old.closed)
+        self.assertTrue(FakeClient.instances[0].interrupted.is_set())
+        answer = await self.response([{'role': 'user', 'content': 'hello'}, {'role': 'user', 'content': 'NEW_REQUEST'}])
+        self.assertEqual(''.join(c['text'] for c in answer), 'ANSWER')
+        self.assertIsNot(self.provider.sessions[self.key('chat')], old)
+        self.assertIn('NEW_REQUEST', json.dumps(FakeClient.instances[-1].prompts))
+        self.assertNotIn('NEW_REQUEST', json.dumps(FakeClient.instances[0].prompts))
+
+    async def test_repeated_cancellation_cannot_interrupt_cleanup(self):
+        closing = asyncio.Event()
+        finished = []
+        class SlowClose(Session):
+            async def close(self):
+                closing.set()
+                await asyncio.sleep(0.2)
+                await super().close()
+                finished.append(self)
+        self.provider.session_factory = lambda key, config, state: SlowClose(key, config, state, FakeClient)
+        # AnyIO cancel scopes re-deliver cancellation at every await during cleanup.
+        old = await self.stopped_stream(cancels=5)
+        self.assertTrue(closing.is_set())
+        self.assertEqual(finished, [])
+        await asyncio.wait_for(asyncio.gather(*self.provider.cleanups.values()), 5)
+        self.assertEqual(finished, [old])
+        self.assertTrue(old.task.done())
+        self.assertEqual(self.provider.cleanups, {})
+
+    async def test_worker_cap_evicts_least_recently_used(self):
+        with patch.object(claude_provider, 'MAX_WORKERS', 2):
+            for name in ('a', 'b', 'c'):
+                await self.chat(name)
+            self.assertEqual(list(self.provider.sessions), [self.key('b'), self.key('c')])
+            await asyncio.wait_for(asyncio.gather(*self.provider.cleanups.values()), 5)
+            self.assertNotIn(self.key('a'), self.provider.locks)
+
+    async def test_recently_used_chat_survives_eviction(self):
+        with patch.object(claude_provider, 'MAX_WORKERS', 2):
+            first = [{'role': 'user', 'content': 'hello'}]
+            await self.chat('a', first)
+            await self.chat('b')
+            await asyncio.sleep(0)
+            await self.chat('a', first + [{'role': 'assistant', 'content': 'ANSWER'}, {'role': 'user', 'content': 'again'}])
+            await self.chat('c')
+            self.assertEqual(list(self.provider.sessions), [self.key('a'), self.key('c')])
+            self.assertEqual(len(FakeClient.instances), 3)
+
+    async def test_busy_sessions_are_never_evicted(self):
+        with patch.object(claude_provider, 'MAX_WORKERS', 2):
+            await self.chat('a')
+            await self.chat('b')
+            busy = list(self.provider.sessions.values())
+            async with self.provider.locks[self.key('a')], self.provider.locks[self.key('b')]:
+                await self.chat('c')
+                self.assertEqual(list(self.provider.sessions), [self.key('a'), self.key('b'), self.key('c')])
+                self.assertFalse(any(session.closed for session in busy))
+            await self.chat('d')
+            self.assertEqual(list(self.provider.sessions), [self.key('c'), self.key('d')])
+
+    async def test_evicted_chat_rebuilds_from_history_with_late_result(self):
+        key = self.key('chat')
+        config = configuration([], {'tools': [FUNCTION]})
+        session = Session(key, config, self.temp.name, FakeClient)
+        history = [{'role': 'user', 'content': 'read the marker'}]
+        session.history = history
+        FakeClient.scripted = [['wait']]
+        await session.start(history_prompt(history))
+        self.provider.sessions[key] = session
+        call_id = session.register('sdk-late', 'probe', {'value': 'x'})
+        calls = [{'id': call_id, 'type': 'function', 'function': {'name': 'probe', 'arguments': '{"value": "x"}'}}]
+        with patch.object(claude_provider, 'MAX_WORKERS', 1):
+            await self.chat('other')
+        self.assertNotIn(key, self.provider.sessions)
+        await asyncio.wait_for(asyncio.gather(*self.provider.cleanups.values()), 5)
+        self.assertTrue(session.closed)
+        self.assertTrue(FakeClient.instances[0].interrupted.is_set())
+        pending = history + [{'role': 'assistant', 'tool_calls': calls}]
+        with self.assertRaisesRegex(Exception, 'unresolved'):
+            await self.response(pending, tools=[FUNCTION])
+        late = pending + [{'role': 'tool', 'tool_call_id': call_id, 'content': 'LATE_RESULT'},
+                          {'role': 'user', 'content': 'NEW_REQUEST'}]
+        answer = await self.response(late, tools=[FUNCTION])
+        self.assertEqual(''.join(c['text'] for c in answer), 'ANSWER')
+        prompt = json.dumps(FakeClient.instances[-1].prompts)
+        self.assertIn('LATE_RESULT', prompt)
+        self.assertIn('NEW_REQUEST', prompt)
+        self.assertIn('read the marker', prompt)
 
 
 class ActivationTests(unittest.TestCase):
