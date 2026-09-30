@@ -39,7 +39,7 @@ def generate(source, config, catalog, selected):
         'use_responses_lite': False, 'prefer_websockets': False,
         'tool_mode': 'code_mode_only', 'shell_type': 'shell_command', 'apply_patch_tool_type': 'freeform',
         'experimental_supported_tools': [], 'service_tiers': [], 'additional_speed_tiers': [],
-        'availability_nux': None, 'available_access_programs': {}, 'priority': 80,
+        'availability_nux': None, 'available_access_programs': {'cyber': []}, 'priority': 80,
     }
     before = {m['slug']: m for m in catalog.get('models', []) if m['slug'].startswith(PREFIX)}
     old_routes = {r['model_name']: r for r in config.get('model_list', []) if r['model_name'].startswith(PREFIX)}

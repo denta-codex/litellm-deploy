@@ -414,6 +414,11 @@ and is never replaced with a general chat model. Discovery that omits the native
 reviewer is rejected before activation. Bootstrap configuration includes the same
 route; the initial refresh after login verifies its availability.
 
+Older catalogs can contain an empty `available_access_programs` object. Refresh
+preserves unknown program metadata and supplies an empty `cyber` list when that
+required field is absent, allowing current Codex catalog parsers to load the
+entry without granting an access program.
+
 Preview shows added/removed model IDs and changed metadata fields, with before/after
 lists. It performs discovery but does not install files, refresh OAuth tokens,
 restart services, validate with inference, or print credentials/model instructions.

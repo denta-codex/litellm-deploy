@@ -49,6 +49,22 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(again['test_models'], [])
         self.assertFalse(again['test_reviewer'])
 
+    def test_legacy_access_program_metadata_is_normalized_and_converges(self):
+        source = copy.deepcopy(self.source)
+        catalog = copy.deepcopy(self.catalog)
+        for row in source['models'] + catalog['models']:
+            row['available_access_programs'] = {'future_program': ['keep']}
+        config, normalized, summary = generate(source, self.config, catalog, 'chatgpt/astra')
+        rows = {row['slug']: row for row in normalized['models']}
+        for slug in ('astra', 'sol', REVIEW_MODEL, 'chatgpt/astra', 'chatgpt/sol',
+                     'modal/custom', 'retired-native'):
+            self.assertEqual(rows[slug]['available_access_programs'], {
+                'future_program': ['keep'], 'cyber': []})
+        self.assertEqual(summary['compatibility_changed'], ['modal/custom', 'retired-native'])
+        again_config, again_catalog, again = generate(source, config, normalized, 'chatgpt/astra')
+        self.assertEqual((again_config, again_catalog), (config, normalized))
+        self.assertEqual(again['compatibility_changed'], [])
+
     def test_native_reviewer_routes_without_appearing_in_picker(self):
         config, catalog, summary = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
         reviewer = next(r for r in config['model_list'] if r['model_name'] == REVIEW_MODEL)

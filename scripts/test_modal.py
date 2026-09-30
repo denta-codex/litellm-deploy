@@ -84,6 +84,7 @@ class ModalTests(unittest.TestCase):
         for entry in catalog['models'][3:]:
             self.assertTrue(entry['supports_search_tool'])
             self.assertEqual(entry['web_search_tool_type'], 'text_and_image')
+            self.assertEqual(entry['available_access_programs'], {'cyber': []})
             self.assertFalse(entry['prefer_websockets'])
             self.assertFalse(entry['use_responses_lite'])
         again_config, again_catalog, again = generate(self.source, config, catalog, 'chatgpt/astra')

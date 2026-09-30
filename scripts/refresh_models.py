@@ -46,6 +46,15 @@ def read_optional(path):
     return path.read_text() if path.exists() else None
 
 
+def compatible_model(row):
+    """Normalize legacy catalog metadata required by current stock Codex."""
+    normalized = copy.deepcopy(row)
+    programs = normalized.get('available_access_programs')
+    if isinstance(programs, dict) and 'cyber' not in programs:
+        programs['cyber'] = []
+    return normalized
+
+
 def validate_source(source):
     if not isinstance(source, dict) or not isinstance(source.get('models'), list) or not source['models']:
         raise ValueError('Discovery returned an empty or malformed catalog')
@@ -67,7 +76,7 @@ def validate_source(source):
 
 def generate(source, config, catalog, selected):
     validate_source(source)
-    rows = source['models']
+    rows = [compatible_model(row) for row in source['models']]
     if not any(row['slug'] == REVIEW_MODEL for row in rows):
         raise ValueError('Subscription catalog is missing codex-auto-review; refusing to remove or substitute the native reviewer')
     aliases = []
@@ -93,7 +102,10 @@ def generate(source, config, catalog, selected):
             alias['upgrade'] = None
     if selected.startswith(PREFIX) and selected not in names:
         raise ValueError(f'Selected model {selected} disappeared; select another model before refreshing')
-    previous = {m['slug']: m for m in catalog.get('models', [])}
+    original_previous = {m['slug']: m for m in catalog.get('models', [])}
+    previous = {slug: compatible_model(row) for slug, row in original_previous.items()}
+    compatibility_changed = sorted(slug for slug in previous
+                                   if previous[slug] != original_previous[slug])
     # Keep native metadata for existing tasks, including retired native IDs.
     # Only their routed aliases are listed. Unrelated provider entries survive.
     native = {m['slug']: dict(m, visibility='hide') for m in rows}
@@ -142,6 +154,7 @@ def generate(source, config, catalog, selected):
         'reviewer_changed': reviewer_changed, 'test_reviewer': reviewer_changed,
         'before': sorted(before), 'after': sorted(after),
         'disabled_upgrades': disabled_upgrades,
+        'compatibility_changed': compatibility_changed,
     }
 
 
