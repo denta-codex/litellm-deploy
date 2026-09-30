@@ -71,6 +71,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(new['models'][0], catalog['models'][0])
         row = new['models'][1]
         self.assertEqual(row['display_name'], 'Claude Opus 5.5')
+        self.assertEqual(row['available_access_programs'], {'cyber': []})
         self.assertEqual([e['effort'] for e in row['supported_reasoning_levels']], list(EFFORTS))
         self.assertTrue(row['supports_search_tool'])
         self.assertNotIn('experimental', row['description'].lower())

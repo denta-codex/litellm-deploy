@@ -326,7 +326,7 @@ the live stock-Codex probe found that snapshots could restore the startup key
 after exclusion. Disabling them also prevents persisting that startup environment.
 No key is written to TOML, logs, or shell startup files.
 
-The inventory pins Codex `0.155.1`. Ordinary LiteLLM deployment does not install,
+The inventory pins Codex `0.159.2`. Ordinary LiteLLM deployment does not install,
 select, or restart Codex. An explicit runtime update installs its committed
 version alongside existing Mise versions, validates the current catalog with
 that exact binary, and stages the runtime without interrupting active tasks.
@@ -413,6 +413,11 @@ hidden reviewer. It stays hidden in the picker, uses full Responses transport,
 and is never replaced with a general chat model. Discovery that omits the native
 reviewer is rejected before activation. Bootstrap configuration includes the same
 route; the initial refresh after login verifies its availability.
+
+Older catalogs can contain an empty `available_access_programs` object. Refresh
+preserves unknown program metadata and supplies an empty `cyber` list when that
+required field is absent, allowing current Codex catalog parsers to load the
+entry without granting an access program.
 
 Preview shows added/removed model IDs and changed metadata fields, with before/after
 lists. It performs discovery but does not install files, refresh OAuth tokens,

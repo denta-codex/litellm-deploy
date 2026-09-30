@@ -61,7 +61,7 @@ def generate(source, config, catalog, selected):
             'tool_mode': 'code_mode_only', 'shell_type': 'shell_command',
             'apply_patch_tool_type': 'freeform', 'experimental_supported_tools': [],
             'service_tiers': [], 'additional_speed_tiers': [], 'availability_nux': None,
-            'available_access_programs': {}, 'priority': 90,
+            'available_access_programs': {'cyber': []}, 'priority': 90,
         })
     after = {m['slug']: m for m in entries}
     if selected.startswith(PREFIX) and selected not in after:
