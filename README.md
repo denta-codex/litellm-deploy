@@ -361,7 +361,27 @@ requires a replaced app-server socket, checks the live systemd process uses the
 pinned executable and proxy credential, and runs a real shell turn proving the
 key is absent from tools. It then checks subscription streaming, tool
 continuation, native search/resume, and the reserved reviewer route. `finish`
-records the accepted version and managed-file digests.
+reruns the running-version and authenticated Remote Codex WSS checks before
+recording the accepted version and managed-file digests or deleting recovery state.
+
+Remote Codex must first deploy its checks to
+`~/.local/libexec/remote-codex-checks/`. Runtime `apply` tests the exact candidate
+with the installed forwarder under its actual systemd sandbox, using an isolated
+Codex home and synthetic credential. It also tests an isolated candidate restart.
+This happens before runtime selection changes. Both `verify` and `finish` require
+the phone-facing authenticated WSS route to initialize and list projects/tasks.
+Missing checks or a failed gate stop the operation and preserve recovery state;
+there is no automatic retry or rollback.
+
+To install updated runtime checking utilities without staging or restarting Codex,
+use the committed source and the same runtime playbook:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml \
+  -e codex_runtime_action=apply --tags runtime-checks
+```
+
+This tagged run retains host/source validation and copies only utility files.
 
 One private transaction at `~/.local/state/litellm/codex-runtime.json` contains
 only the repository-owned runtime files, prior version selection, and pre-restart

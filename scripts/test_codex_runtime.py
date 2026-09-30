@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from codex_runtime import CONFIG_PATH, MANAGED_PATHS, Runtime, render_launcher
 
@@ -31,6 +32,9 @@ enabled = true
 
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
+        self.candidate_check = self.enterContext(patch.object(Runtime, 'check_remote_candidate'))
+        self.connection_check = self.enterContext(patch.object(Runtime, 'check_remote_connection'))
+        self.running_version = self.enterContext(patch.object(Runtime, 'check_running_version'))
         self.directory = self.enterContext(tempfile.TemporaryDirectory(prefix='codex-runtime-test-'))
         self.root = Path(self.directory)
         self.version = '0.155.1'
@@ -50,6 +54,71 @@ class RuntimeTests(unittest.TestCase):
 
     def path(self, path):
         return self.root / path.removeprefix('/')
+
+    def mark_restarted(self):
+        socket = self.path('/home/agent/.codex/app-server-control/app-server-control.sock')
+        socket.parent.mkdir(parents=True, exist_ok=True)
+        socket.unlink(missing_ok=True)
+        socket.touch()
+
+    def finish_fixture(self):
+        self.mark_restarted()
+        return self.runtime.finish()
+
+    def test_failed_candidate_leaves_runtime_selection_and_state_untouched(self):
+        before = {name: self.runtime.snapshot(name) for name in MANAGED_PATHS}
+        self.candidate_check.side_effect = RuntimeError('candidate failed')
+        with self.assertRaisesRegex(RuntimeError, 'candidate failed'):
+            self.runtime.apply()
+        self.assertFalse(self.runtime.transaction.exists())
+        self.assertEqual({name: self.runtime.snapshot(name) for name in MANAGED_PATHS}, before)
+
+    def test_failed_connection_preserves_recovery_and_previous_acceptance(self):
+        self.runtime.apply()
+        self.mark_restarted()
+        transaction = self.runtime.transaction.read_bytes()
+        self.connection_check.side_effect = RuntimeError('connection failed')
+        for action in (self.runtime.verify, self.runtime.finish):
+            with self.assertRaisesRegex(RuntimeError, 'connection failed'):
+                action()
+            self.assertEqual(self.runtime.transaction.read_bytes(), transaction)
+            self.assertFalse(self.runtime.installed.exists())
+        self.connection_check.side_effect = None
+        self.runtime.finish()
+        self.assertFalse(self.runtime.transaction.exists())
+
+    def test_finish_requires_restart_and_correct_running_version(self):
+        self.runtime.apply()
+        with self.assertRaisesRegex(RuntimeError, 'has not restarted'):
+            self.runtime.finish()
+        self.mark_restarted()
+        self.running_version.side_effect = RuntimeError('wrong version')
+        with self.assertRaisesRegex(RuntimeError, 'wrong version'):
+            self.runtime.finish()
+        self.assertTrue(self.runtime.transaction.exists())
+
+    def test_failed_upgrade_keeps_previous_accepted_manifest(self):
+        self.runtime.apply()
+        self.finish_fixture()
+        accepted = self.runtime.installed.read_bytes()
+        self.install_binary('0.156.0')
+        upgraded = Runtime('0.156.0', self.root)
+        upgraded.apply()
+        self.mark_restarted()
+        self.connection_check.side_effect = RuntimeError('connection failed')
+        with self.assertRaisesRegex(RuntimeError, 'connection failed'):
+            upgraded.finish()
+        self.assertTrue(upgraded.transaction.exists())
+        self.assertEqual(upgraded.installed.read_bytes(), accepted)
+
+    def test_acceptance_runs_as_agent_and_never_echoes_helper_secrets(self):
+        self.write('/home/agent/.local/libexec/remote-codex-checks/connection-check.py', '# fixture\n', 0o700)
+        result = subprocess.CompletedProcess([], 1, 'private-value', 'private-value')
+        with patch('codex_runtime.os.geteuid', return_value=self.runtime.uid + 1), patch('codex_runtime.subprocess.run', return_value=result) as run:
+            with self.assertRaises(RuntimeError) as caught:
+                self.runtime.run_remote_check('connection-check.py')
+        self.assertNotIn('private-value', str(caught.exception))
+        self.assertEqual(run.call_args.args[0][:4], ['/usr/sbin/runuser', '-u', 'agent', '--'])
 
     def write(self, path, content, mode):
         target = self.path(path)
@@ -137,7 +206,7 @@ exit 2
     def test_finish_tracks_revision_and_allows_explicit_version_upgrade(self):
         config_before = self.config_state()
         self.runtime.apply()
-        self.runtime.finish()
+        self.finish_fixture()
         accepted = json.loads(self.runtime.installed.read_text())
         self.assertEqual(accepted['version'], self.version)
         self.assertEqual(accepted['schema'], 2)
@@ -156,7 +225,7 @@ exit 2
 
     def test_accepted_revision_refuses_drift_before_upgrade(self):
         self.runtime.apply()
-        self.runtime.finish()
+        self.finish_fixture()
         self.path('/etc/profile.d/codex-app-server.sh').write_text('# drift\n')
         self.install_binary('0.156.0')
         with self.assertRaisesRegex(RuntimeError, 'Previously accepted'):
@@ -164,7 +233,7 @@ exit 2
 
     def test_compliant_user_edits_do_not_create_runtime_drift(self):
         self.runtime.apply()
-        self.runtime.finish()
+        self.finish_fixture()
         edited = self.path(CONFIG_PATH).read_text() + '\n# Grace owns this file.\n[plugins.second]\nenabled = true\n'
         self.path(CONFIG_PATH).write_text(edited)
         self.assertFalse(self.runtime.apply()['changed'])
@@ -232,7 +301,7 @@ exit 2
         socket.parent.mkdir(parents=True, exist_ok=True)
         socket.touch()
         self.runtime.verify()
-        self.runtime.finish()
+        self.finish_fixture()
         self.assertEqual(self.config_state(), config_before)
 
     def test_config_permissions_and_owner_are_validated_without_repair(self):

@@ -7,6 +7,7 @@
     runtime_script: "{{ litellm_root }}/scripts/codex_runtime.py"
   tasks:
     - name: Check target and requested action
+      tags: [always]
       ansible.builtin.assert:
         that:
           - ansible_facts.hostname == 'grace'
@@ -16,6 +17,7 @@
           - codex_runtime_action != 'finish' or (codex_desktop_validated | default(false) | bool)
 
     - name: Inspect deployment source
+      tags: [always]
       ansible.builtin.command: git status --porcelain
       args:
         chdir: "{{ source_root }}"
@@ -25,6 +27,7 @@
       when: codex_runtime_action == 'apply'
 
     - name: Require committed deployment source for apply
+      tags: [always]
       ansible.builtin.assert:
         that: runtime_source.stdout == ''
       when: codex_runtime_action == 'apply'
@@ -61,6 +64,7 @@
       when: codex_runtime_action == 'apply' and not exact_codex.stat.exists
 
     - name: Install runtime management and verification utilities
+      tags: [runtime-checks]
       ansible.builtin.copy:
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"

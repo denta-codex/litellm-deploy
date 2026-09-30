@@ -356,6 +356,7 @@ class Runtime:
         config = self.validate_config()
         self.validate_binary()
         self.validate_catalog(config)
+        self.check_remote_candidate()
         desired = self.desired()
         desired_fingerprints = {name: self.fingerprint(entry) for name, entry in desired.items()}
         if self.transaction.exists():
@@ -392,6 +393,39 @@ class Runtime:
                 'config': 'valid and user-managed',
                 'restart_required': self.socket_identity() == transaction['socket_before']}
 
+    def run_remote_check(self, name, arguments=()):
+        checker = self.path(f'/home/agent/.local/libexec/remote-codex-checks/{name}')
+        if not checker.is_file():
+            raise RuntimeError('Deploy Remote Codex connection checks before changing or accepting the runtime')
+        argv = ['/home/agent/.local/share/mise/shims/uv', 'run', '--no-project', str(checker), *arguments]
+        if os.geteuid() != self.uid:
+            argv = ['/usr/sbin/runuser', '-u', 'agent', '--', *argv]
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+            report = json.loads(result.stdout)
+            accepted = result.returncode == 0 and isinstance(report, dict) and report.get('ok') is True
+        except (OSError, ValueError, subprocess.SubprocessError):
+            accepted = False
+        if not accepted:
+            # Never echo raw helper stdout/stderr, credentials or RPC responses.
+            raise RuntimeError('Remote Codex acceptance failed; keep recovery state and inspect the connection checks')
+
+    def check_remote_candidate(self):
+        self.run_remote_check('candidate-check.py', ['--codex-binary', str(self.binary())])
+
+    def check_remote_connection(self):
+        self.run_remote_check('connection-check.py')
+
+    def check_running_version(self):
+        result = subprocess.run(['systemctl', 'show', 'codex-app-server.service', '-p', 'MainPID', '--value'],
+                                capture_output=True, text=True, timeout=10)
+        try:
+            pid = int(result.stdout.strip())
+        except ValueError:
+            raise RuntimeError('Cannot identify the running Codex app server') from None
+        if result.returncode or pid <= 0 or Path(f'/proc/{pid}/exe').resolve() != self.binary().resolve():
+            raise RuntimeError('Running Codex app server does not use the requested pinned version')
+
     def verify(self):
         config = self.validate_config()
         source = self.load_pending() if self.transaction.exists() else self.load_installed()
@@ -404,8 +438,10 @@ class Runtime:
         self.validate_catalog(config)
         if self.transaction.exists() and self.socket_identity() == source['socket_before']:
             raise RuntimeError('Desktop has not restarted the systemd-owned app server')
+        self.check_running_version()
+        self.check_remote_connection()
         return {'action': 'verify', 'version': self.version, 'files': 'accepted',
-                'config': 'valid and user-managed', 'socket_replaced': True}
+                'config': 'valid and user-managed', 'socket_replaced': True, 'remote_connection': True}
 
     def rollback(self):
         if not self.transaction.exists():
@@ -422,7 +458,7 @@ class Runtime:
     def finish(self):
         if not self.transaction.exists():
             return {'action': 'finish', 'changed': False, 'message': 'no pending transaction'}
-        self.validate_config()
+        self.verify()
         transaction = self.load_pending()
         self.assert_matches(transaction['after'], 'Prepared Codex runtime')
         manifest = {'schema': SCHEMA, 'version': transaction['target_version'],
