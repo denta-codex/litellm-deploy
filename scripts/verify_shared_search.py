@@ -33,7 +33,8 @@ async def main(args):
         models = args.model or [m['slug'] for m in catalog['models'] if m['slug'].startswith(('claude/', 'modal/'))]
         for row in catalog['models']:
             if row['slug'] in models:
-                row.update(supports_search_tool=True, web_search_tool_type='text_and_image')
+                # supports_search_tool controls tool_search, not web search; keep each catalog's own value.
+                row.update(web_search_tool_type='text_and_image')
         catalog_path = directory / 'catalog.json'
         catalog_path.write_text(json.dumps(catalog))
         env = os.environ | {'LITELLM_LOCAL_MODEL_COST_MAP': 'True', 'LITELLM_TELEMETRY': 'False'}

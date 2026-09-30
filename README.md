@@ -182,6 +182,15 @@ directory, no settings sources, and only the declared MCP server. The sole nativ
 tool allowed for schema output is the SDK's local `StructuredOutput` formatter.
 Every client command or file edit still runs through Codex and its approvals.
 
+The Codex catalog entry gives Claude its own base instructions,
+`scripts/claude-instructions.md`, which cover Codex's context blocks, direct tool use and
+the `apply_patch` format. Claude calls Codex tools directly (`tool_mode: direct`) under
+their real names instead of writing JavaScript through code mode, because it reasons
+over each result. `supports_search_tool` is off because it enables Codex's client-side
+`tool_search`, which the adapter cannot relay; deferred tools arrive as namespaces
+instead, and hosted web search is unaffected. The adapter's prompt tells Claude to
+ignore the SDK's environment block, which describes the worker's scratch directory.
+
 The adapter supports streaming/nonstreaming Responses, inline PNG/JPEG/GIF/WebP
 images, JSON schema output, summarized reasoning, and client tools including
 namespaced functions and freeform patches. It does not fetch image URLs. Sampling,
