@@ -7,6 +7,7 @@ import subprocess
 from refresh_models import Refresh, atomic_write, main
 
 MANIFEST = Path(__file__).with_name('claude-models.json')
+INSTRUCTIONS = Path(__file__).with_name('claude-instructions.md')
 PREFIX = 'claude/'
 
 
@@ -26,18 +27,21 @@ def generate(source, config, catalog, selected):
     entry = {
         'slug': name, 'display_name': spec['display_name'],
         'description': 'Claude Opus 5.5 through your Claude subscription.',
-        'base_instructions': "You are Codex, a coding agent. Follow the user's request and use tools when needed.",
+        'base_instructions': INSTRUCTIONS.read_text(),
         'model_messages': {}, 'visibility': 'list', 'supported_in_api': True,
         'context_window': spec['context_window'], 'max_context_window': spec['context_window'],
         'truncation_policy': {'mode': 'tokens', 'limit': 10000}, 'input_modalities': ['text', 'image'],
         'supported_reasoning_levels': [{'effort': effort, 'description': effort} for effort in spec['reasoning_levels']],
         'default_reasoning_level': spec['default_reasoning_level'], 'default_reasoning_summary': 'auto',
-        'supports_parallel_tool_calls': True, 'supports_reasoning_summaries': True, 'supports_search_tool': True,
+        # supports_search_tool enables Codex's client-side tool_search (deferred tool discovery), which the
+        # adapter cannot relay; deferred tools then arrive as namespaces. Web search is unaffected.
+        'supports_parallel_tool_calls': True, 'supports_reasoning_summaries': True, 'supports_search_tool': False,
         'web_search_tool_type': 'text_and_image',
         'supports_reasoning_summary_parameter': False, 'supports_reasoning_effort_updates': True,
         'supports_image_detail_original': False, 'support_verbosity': False,
         'use_responses_lite': False, 'prefer_websockets': False,
-        'tool_mode': 'code_mode_only', 'shell_type': 'shell_command', 'apply_patch_tool_type': 'freeform',
+        # Claude reasons over each tool result, so it calls Codex tools directly.
+        'tool_mode': 'direct', 'shell_type': 'shell_command', 'apply_patch_tool_type': 'freeform',
         'experimental_supported_tools': [], 'service_tiers': [], 'additional_speed_tiers': [],
         'availability_nux': None, 'available_access_programs': {'cyber': []}, 'priority': 80,
     }

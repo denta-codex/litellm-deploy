@@ -5,6 +5,7 @@ import base64
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import signal
 import socket
@@ -246,8 +247,9 @@ class Acceptance:
             await rpc.call('initialize', {'clientInfo': {'name': 'claude_acceptance', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
             await rpc.send({'method': 'initialized', 'params': {}})
             async def new_thread(sandbox='read-only'):
+                # Use the catalog's Claude instructions, as a real chat would.
                 result = await rpc.call('thread/start', {'model': MODEL, 'modelProvider': 'claude_acceptance', 'cwd': str(work),
-                    'approvalPolicy': 'never', 'sandbox': sandbox, 'baseInstructions': 'Follow the user. Use supplied tools when needed. Be concise.'})
+                    'approvalPolicy': 'never', 'sandbox': sandbox})
                 return result['thread']['id']
             thread = await new_thread()
             reply, items = await rpc.turn(thread, 'Run cat ' + str(work / 'marker.txt') + ' using your shell and report the exact output.')
@@ -258,6 +260,17 @@ class Acceptance:
             assert (work / 'acceptance.txt').read_text() == 'PATCH_ACCEPTED\n'
             assert any(i['type'] == 'fileChange' for i in patch_items)
             self.passed('real Codex apply_patch execution')
+            tricky = work / 'tricky.txt'
+            original = 'name = "O\'Brien"\npath = C:\\temp\\new\\n\necho "$HOME and ${VAR}" `date`\n\tindented = 1\nstatus = draft\ntrailer = done\n'
+            replacement = 'status = "final" # it\'s $DONE \\o/'
+            tricky.write_text(original)
+            _, edit_items = await rpc.turn(patch_thread, 'In tricky.txt, replace the line `status = draft` with `' + replacement + '`. Change nothing else in the file.')
+            assert tricky.read_text() == original.replace('status = draft', replacement), repr(tricky.read_text())
+            assert any(i['type'] == 'fileChange' for i in edit_items)
+            writes = [i['command'] for i in edit_items if i['type'] == 'commandExecution' and 'tricky.txt' in i.get('command', '')
+                      and (re.search(r'>>?\s*\S*tricky\.txt', i['command']) or any(w in i['command'] for w in ('sed -i', 'tee ', 'python', 'perl', 'node ')))]
+            assert not writes, writes
+            self.passed('quote-heavy edit through apply_patch')
             reply, _ = await rpc.turn(thread, 'Repeat the marker without using tools.')
             assert marker in reply
             fork = await rpc.call('thread/fork', {'threadId': thread, 'model': MODEL, 'modelProvider': 'claude_acceptance'})

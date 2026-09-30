@@ -19,8 +19,9 @@ from claude_agent_sdk.types import AssistantMessage, ResultMessage, StreamEvent,
 from claude_context import REQUEST, validate_request
 import claude_provider
 from claude_provider import ClaudeProvider, usage_counts
-from claude_session import CORRELATION, EFFORTS, MODEL, Session, configuration, content_blocks, digest, history_prompt
-from configure_claude import MANIFEST, ClaudeSetup, generate
+from claude_session import (CORRELATION, EFFORTS, MODEL, WORKSPACE_NOTE, Session, configuration, content_blocks,
+                            digest, history_prompt, mcp_names)
+from configure_claude import INSTRUCTIONS, MANIFEST, ClaudeSetup, generate
 from refresh_models import Refresh
 
 FUNCTION = {'type': 'function', 'function': {'name': 'probe', 'description': 'Read a marker',
@@ -73,9 +74,31 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(row['display_name'], 'Claude Opus 5.5')
         self.assertEqual(row['available_access_programs'], {'cyber': []})
         self.assertEqual([e['effort'] for e in row['supported_reasoning_levels']], list(EFFORTS))
-        self.assertTrue(row['supports_search_tool'])
+        self.assertFalse(row['supports_search_tool'])
         self.assertNotIn('experimental', row['description'].lower())
+        self.assertEqual(row['tool_mode'], 'direct')
+        self.assertEqual(row['base_instructions'], INSTRUCTIONS.read_text())
+        self.assertIn('apply_patch', row['base_instructions'])
         self.assertEqual(generate(json.loads(MANIFEST.read_text()), config, new, '')[2]['test_models'], [])
+
+    def test_tool_names_stay_readable_with_safe_fallbacks(self):
+        long = 'a' * 53
+        names = ['exec_command', 'apply_patch', 'mcp__server__tool', 'web.search', long, 'exec_command', '9lives',
+                 'web_search_3', 'x_9', 'x!']
+        internal = mcp_names(names)
+        self.assertEqual(internal[:2], ['exec_command', 'apply_patch'])
+        self.assertEqual(internal[2:4], ['mcp_server_tool_2', 'web_search_3'])
+        self.assertEqual(internal[4], 'a' * 45 + '_4')
+        self.assertEqual(internal[5:7], ['exec_command_5', 'tool_9lives_6'])
+        self.assertEqual(internal[7:], ['web_search_3_7', 'x_9', 'x_9_1'])
+        self.assertEqual(len(set(internal)), len(names))
+        self.assertTrue(all(len('mcp__codex__' + n) <= 64 and '__' not in n for n in internal))
+
+    def test_system_prompt_disowns_scratch_directory(self):
+        with tempfile.TemporaryDirectory() as state:
+            options = Session(('note',), configuration([{'role': 'system', 'content': 'GUIDE'}], {}), state).options()
+            self.assertTrue(options.system_prompt.startswith('GUIDE'))
+            self.assertTrue(options.system_prompt.endswith(WORKSPACE_NOTE))
 
     def test_configuration_rejects_unimplemented_controls(self):
         for params in ({'temperature': 0.2}, {'reasoning_effort': 'none'}, {'max_tokens': 100},
@@ -234,10 +257,11 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_hook_preserves_sdk_identity_and_arguments(self):
         session = Session(('hook',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
         options = session.options()
+        self.assertEqual(options.allowed_tools, ['mcp__codex__probe'])
         hook = options.hooks['PreToolUse'][0].hooks[0]
-        result = await hook({'tool_name': 'mcp__codex__tool_0', 'tool_input': {'value': 'a'}}, 'sdk-id', {})
+        result = await hook({'tool_name': 'mcp__codex__probe', 'tool_input': {'value': 'a'}}, 'sdk-id', {})
         self.assertEqual(result['hookSpecificOutput']['updatedInput'], {'value': 'a', CORRELATION: 'sdk-id'})
-        await session.consume(AssistantMessage([ToolUseBlock('sdk-id', 'mcp__codex__tool_0', {'value': 'a'})], MODEL))
+        await session.consume(AssistantMessage([ToolUseBlock('sdk-id', 'mcp__codex__probe', {'value': 'a'})], MODEL))
         await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))
         kind, calls = await session.queue.get()
         self.assertEqual(kind, 'tools')
@@ -247,6 +271,16 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         session.deliver(calls[0]['id'], 'result')
         with self.assertRaisesRegex(ValueError, 'Conflicting'):
             session.deliver(calls[0]['id'], 'different')
+
+    async def test_fallback_tool_name_maps_back_to_client_name(self):
+        dotted = copy.deepcopy(FUNCTION)
+        dotted['function']['name'] = 'functions.probe'
+        session = Session(('dotted',), configuration([], {'tools': [dotted]}), self.temp.name, FakeClient)
+        self.assertEqual(session.options().allowed_tools, ['mcp__codex__functions_probe_0'])
+        await session.consume(AssistantMessage([ToolUseBlock('sdk-id', 'mcp__codex__functions_probe_0', {'value': 'a'})], MODEL))
+        await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))
+        _, calls = await session.queue.get()
+        self.assertEqual(calls[0]['name'], 'functions.probe')
 
     async def test_partial_out_of_order_results_and_new_prompt_after_abort(self):
         key = ('authenticated-test', 'chat', 'default', MODEL, 'chat')
@@ -304,7 +338,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_usage_is_not_counted_twice_across_tool_boundary(self):
         session = Session(('usage',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
         session.options()
-        await session.consume(AssistantMessage([ToolUseBlock('id', 'mcp__codex__tool_0', {'value': 'x'})], MODEL,
+        await session.consume(AssistantMessage([ToolUseBlock('id', 'mcp__codex__probe', {'value': 'x'})], MODEL,
             usage={'input_tokens': 10, 'output_tokens': 5}))
         await session.consume(StreamEvent('e', 'sid', {'type': 'message_delta', 'usage': {'input_tokens': 10, 'output_tokens': 5}}))
         await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))
@@ -318,7 +352,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         session = Session(('batch',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
         session.options()
         for index in range(2):
-            await session.consume(AssistantMessage([ToolUseBlock(str(index), 'mcp__codex__tool_0', {'value': str(index)})], MODEL))
+            await session.consume(AssistantMessage([ToolUseBlock(str(index), 'mcp__codex__probe', {'value': str(index)})], MODEL))
             self.assertTrue(session.queue.empty())
         await session.consume(StreamEvent('e', 'sid', {'type': 'message_delta', 'usage': {'input_tokens': 10, 'output_tokens': 15}}))
         await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))

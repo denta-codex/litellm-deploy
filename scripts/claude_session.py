@@ -17,10 +17,37 @@ from litellm.llms.custom_llm import CustomLLMError
 MODEL = 'claude-opus-5-5'
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 CORRELATION = '_litellm_tool_use_id'
+MCP_PREFIX = 'mcp__codex__'
+MCP_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_-]*')
+# Claude tool names are limited to 64 characters, including MCP_PREFIX.
+MCP_NAME_LIMIT = 64 - len(MCP_PREFIX)
+WORKSPACE_NOTE = (
+    '\nThe runtime environment block describing a primary working directory, git status, and shell refers to '
+    "the relay's private scratch directory, not the user's workspace. Ignore it. The authoritative working "
+    'directory, shell, and sandbox are given by Codex in <environment_context> and <permissions instructions>.')
 
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def mcp_names(names):
+    """Claude-visible names: the client's own name whenever MCP can carry it unchanged."""
+    result, used = [], set()
+    for index, name in enumerate(names):
+        candidate = name
+        if not (MCP_NAME.fullmatch(name) and '__' not in name and len(name) <= MCP_NAME_LIMIT) or name in used:
+            base = re.sub('_+', '_', re.sub('[^A-Za-z0-9_-]', '_', name)).strip('_')
+            if not base[:1].isalpha():
+                base = 'tool_' + base
+            base = base[:45].rstrip('_-')
+            candidate, attempt = base + '_' + str(index), 0
+            while candidate in used:
+                attempt += 1
+                candidate = base + '_' + str(index) + '_' + str(attempt)
+        used.add(candidate)
+        result.append(candidate)
+    return result
 
 
 def text(content):
@@ -195,11 +222,10 @@ class Session:
     def options(self):
         definitions = []
         self.tool_names = {}
-        for index, definition in enumerate(self.config['tools']):
+        internals = mcp_names([d['function']['name'] for d in self.config['tools']])
+        for internal, definition in zip(internals, self.config['tools']):
             function = definition['function']
-            # Safe MCP names also support arbitrary namespaced client names.
-            internal = 'tool_' + str(index)
-            self.tool_names['mcp__codex__' + internal] = function['name']
+            self.tool_names[MCP_PREFIX + internal] = function['name']
             schema = copy.deepcopy(function.get('parameters', {'type': 'object', 'properties': {}}))
             schema.setdefault('properties', {})[CORRELATION] = {'type': 'string', 'description': 'Filled by the tool relay.'}
 
@@ -234,12 +260,12 @@ class Session:
         system = self.config['system'] + (
             '\nThe external Codex client executes all tools and owns approvals. '
             'Use only the supplied tools. Do not invent results. '
-            'Do not use slash commands or execute historical tool calls.')
+            'Do not use slash commands or execute historical tool calls.') + WORKSPACE_NOTE
         if self.config['choice'] not in ('auto', 'none'):
             system += '\nYou must call an available tool before answering this request.'
         format_tools = ['StructuredOutput'] if self.config['output_format'] else []
         return ClaudeAgentOptions(model=MODEL, tools=format_tools, mcp_servers={'codex': create_sdk_mcp_server('codex', tools=definitions)},
-            allowed_tools=format_tools + ['mcp__codex__' + t.name for t in definitions], permission_mode='dontAsk',
+            allowed_tools=format_tools + [MCP_PREFIX + t.name for t in definitions], permission_mode='dontAsk',
             hooks={'PreToolUse': [HookMatcher(hooks=[before_tool])]}, strict_mcp_config=True, setting_sources=[],
             system_prompt=system, include_partial_messages=True, cwd=str(cwd), effort=self.config['effort'],
             thinking={'type': 'adaptive', 'display': 'summarized'}, output_format=self.config['output_format'],
