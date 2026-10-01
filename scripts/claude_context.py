@@ -2,8 +2,60 @@
 from contextvars import ContextVar
 import hashlib
 import json
+import re
+import time
+import uuid
 
 REQUEST = ContextVar('claude_request', default={})
+
+
+class ResponsesErrorStream:
+    """Translate pinned LiteLLM's bare SSE errors to terminal Responses events."""
+    def __init__(self):
+        self.buffer = b''
+        self.response = None
+        self.sequence = 0
+
+    def feed(self, body, final=False):
+        self.buffer += body
+        output = bytearray()
+        while match := re.search(rb'\r?\n\r?\n', self.buffer):
+            frame, self.buffer = self.buffer[:match.end()], self.buffer[match.end():]
+            output.extend(self.frame(frame))
+        if final and self.buffer:
+            output.extend(self.frame(self.buffer))
+            self.buffer = b''
+        return bytes(output)
+
+    def frame(self, frame):
+        data = b'\n'.join(line[5:].lstrip() for line in frame.splitlines() if line.startswith(b'data:'))
+        try:
+            event = json.loads(data)
+        except (ValueError, UnicodeDecodeError):
+            return frame
+        if not isinstance(event, dict):
+            return frame
+        sequence = event.get('sequence_number')
+        if isinstance(sequence, int):
+            self.sequence = max(self.sequence, sequence + 1)
+        if isinstance(event.get('response'), dict):
+            self.response = event['response']
+        error = event.get('error')
+        # Preserve native Responses errors and all successful events verbatim.
+        if event.get('type') or not isinstance(error, dict):
+            return frame
+        code = error.get('code')
+        if isinstance(code, int) or (isinstance(code, str) and code.isdigit()):
+            code = {400: 'invalid_request_error', 401: 'authentication_error',
+                    403: 'permission_denied', 429: 'rate_limit_exceeded'}.get(int(code), 'server_error')
+        code = code or 'server_error'
+        response = self.response or {'id': 'resp_' + uuid.uuid4().hex, 'object': 'response',
+                                     'created_at': int(time.time()), 'output': []}
+        failed = {'type': 'response.failed', 'sequence_number': self.sequence,
+                  'response': response | {'status': 'failed', 'error': {
+                      'code': code, 'message': error.get('message') or 'Model provider request failed'}}}
+        self.sequence += 1
+        return ('event: response.failed\ndata: ' + json.dumps(failed) + '\n\n').encode()
 
 
 class CaptureRequest:
@@ -22,6 +74,22 @@ class CaptureRequest:
                        'thread-id', 'session-id', 'x-codex-turn-metadata', 'x-claude-chat-id')}}
         token = REQUEST.set(context)
         body = bytearray()
+        errors = None
+        async def responses_send(message):
+            nonlocal errors
+            if message['type'] == 'http.response.start':
+                response_headers = dict(message.get('headers', []))
+                if (scope.get('path') in ('/responses', '/v1/responses')
+                        and message['status'] == 200
+                        and response_headers.get(b'content-type', b'').startswith(b'text/event-stream')):
+                    errors = ResponsesErrorStream()
+                    message = message | {'headers': [(k, v) for k, v in message.get('headers', [])
+                                                      if k.lower() != b'content-length']}
+            elif message['type'] == 'http.response.body' and errors is not None:
+                message = message | {'body': errors.feed(message.get('body', b''),
+                                                         final=not message.get('more_body', False))}
+            await send(message)
+
         async def capture_receive():
             message = await receive()
             if message['type'] == 'http.request':
@@ -34,7 +102,7 @@ class CaptureRequest:
                     body.clear()
             return message
         try:
-            await self.app(scope, capture_receive, send)
+            await self.app(scope, capture_receive, responses_send)
         finally:
             REQUEST.reset(token)
 

@@ -703,3 +703,17 @@ credentials. It exercises outgoing fields, exact/absent instructions, ordinary
 requests, tools/continuation, backend errors, and the reserved reviewer verifier.
 Existing tests also retain the reviewer routing, hidden metadata, and refresh
 checks. They neither contact the subscription backend nor restart live services.
+
+### Streaming provider failures
+
+The Responses endpoint translates LiteLLM 1.102.1's bare SSE error objects into
+terminal `response.failed` events. Provider messages and error codes are retained
+(HTTP 429 becomes `rate_limit_exceeded`), so Codex reports the actual quota or
+provider failure instead of a generic missing-`response.completed` disconnect.
+This does not change model selection or bypass subscription limits.
+
+Offline regression: `uv run --no-sync python -m unittest discover -s scripts`.
+To also verify error presentation with an installed stock Codex binary, set
+`CODEX_ERROR_TEST_BINARY` to its absolute path when running
+`test_responses_errors.py`; the test uses a loopback fixture and synthetic
+credentials, without modifying existing chats.
