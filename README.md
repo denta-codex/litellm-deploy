@@ -520,8 +520,15 @@ presentation. Exa is not enabled or configured by this release.
 Search-enabled model iterations are buffered. Search progress is emitted while
 the helper runs, then model text/reasoning and client tool calls are returned in
 batches. Ordinary requests without shared search/history keep the stock path.
-The limit is three helper queries per Responses request and 60 seconds per query,
-including retries. A client-tool continuation starts a new request. Results keep
+Every search the model requests runs; parallel searches in one batch are never
+capped. Each Responses request allows five search batches (rounds). Results in
+the fifth round tell the model that search is closed and to answer; any later
+search returns immediately as a failed "not run" result without a helper query.
+The tool list and `tool_choice` never change, because Claude workers are
+replaced when either changes. LiteLLM's `max_agentic_loops` is set to seven as
+the absolute stop: a model that ignores the closing message twice fails the
+request with an explicit error. Each query has 60 seconds, including retries. A
+client-tool continuation starts a new request with a fresh round count. Results keep
 up to 4,000 answer characters and eight sources per query. Failed/empty searches
 remain explicit, and no alternate provider is silently substituted. Client tool
 execution and approvals remain with Codex, including mixed and parallel batches.

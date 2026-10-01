@@ -15,7 +15,8 @@ import litellm
 from claude_context import REQUEST
 from claude_provider import ClaudeProvider
 from claude_session import MODEL
-from shared_search import SEARCH_NAME, ChatGPTSearch, SearchJournal, SearchResponses, SearchResult, SharedSearchInterceptor, plain
+from shared_search import (CLOSED, CLOSING, MAX_SEARCH_ROUNDS, SEARCH_NAME, ChatGPTSearch, SearchJournal,
+                           SearchResponses, SearchResult, SharedSearchInterceptor, plain)
 
 
 class Backend:
@@ -63,6 +64,35 @@ class FakeSession:
         self.closed = True
 
 
+class SearchingSession(FakeSession):
+    """Keeps searching until a search is refused, like a model ignoring the closing note once."""
+    def __init__(self, *args):
+        super().__init__(*args)
+        self.rounds = 0
+
+    async def start(self, prompt):
+        self.search()
+
+    def search(self):
+        self.rounds += 1
+        call_id = 'call_sdk' + str(self.rounds)
+        spec = {'id': call_id, 'name': SEARCH_NAME, 'arguments': json.dumps({'query': 'fixture fact ' + str(self.rounds)})}
+        self.pending[call_id] = {'spec': spec}
+        self.queue.put_nowait(('tools', [spec]))
+
+    def deliver(self, call_id, result):
+        if call_id in self.delivered:
+            return
+        self.delivered[call_id] = result
+        if CLOSED in result:
+            self.queue.put_nowait(('text', 'BLUE: https://example.com/fact'))
+            self.queue.put_nowait(('done', {'input_tokens': 10, 'output_tokens': 5}))
+            self.idle.set()
+        else:
+            # Like the real worker, the next batch arrives after the result.
+            asyncio.get_running_loop().call_soon(self.search)
+
+
 class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def loop_factory():
@@ -107,7 +137,10 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         body = json.loads(request.content)
         self.requests.append(body)
         available = any(t.get('function', {}).get('name') == SEARCH_NAME for t in body.get('tools', []))
-        if not available or (any(m.get('role') == 'tool' for m in body['messages']) and not self.repeat):
+        results = [m.get('content', '') for m in body['messages'] if m.get('role') == 'tool']
+        stop = (any(CLOSED in r for r in results) if self.repeat == 'until_closed'
+                else self.repeat != 'forever' and (results and not self.repeat))
+        if not available or stop:
             message = {'role': 'assistant', 'content': 'BLUE: https://example.com/fact'}
             reason = 'stop'
         else:
@@ -121,6 +154,23 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         return httpx.Response(200, json={'id': 'chatcmpl-fixture', 'object': 'chat.completion', 'created': 1,
             'model': 'fixture', 'choices': [{'index': 0, 'message': message, 'finish_reason': reason}],
             'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}})
+
+    def use_claude(self, session_factory):
+        """Route claude/opus-5.5 through the real provider with a fake SDK session."""
+        FakeSession.instances = []
+        provider = ClaudeProvider(Path(self.directory.name) / 'claude', session_factory)
+        previous = litellm.custom_provider_map
+        litellm.custom_provider_map = [{'provider': 'claudesdk', 'custom_handler': provider}]
+        from litellm.utils import custom_llm_setup
+        custom_llm_setup()
+        self.router = litellm.Router(model_list=[{'model_name': 'claude/opus-5.5', 'litellm_params': {
+            'model': 'claudesdk/' + MODEL, 'use_chat_completions_api': True,
+            'allowed_openai_params': ['reasoning_effort', 'parallel_tool_calls'], 'num_retries': 0}}], num_retries=0)
+        async def restore():
+            await provider.close()
+            litellm.custom_provider_map = previous
+            custom_llm_setup()
+        self.addAsyncCleanup(restore)
 
     async def call(self, **extra):
         request = {'model': 'modal/fixture', 'input': 'Find the fact', 'stream': False,
@@ -163,27 +213,27 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({m['tool_call_id'] for m in tools}, {'call_search', 'call_client'})
 
     async def test_claude_custom_provider_uses_same_upstream_loop(self):
-        FakeSession.instances = []
-        provider = ClaudeProvider(Path(self.directory.name) / 'claude', FakeSession)
-        previous = litellm.custom_provider_map
-        litellm.custom_provider_map = [{'provider': 'claudesdk', 'custom_handler': provider}]
-        from litellm.utils import custom_llm_setup
-        custom_llm_setup()
-        self.router = litellm.Router(model_list=[{'model_name': 'claude/opus-5.5', 'litellm_params': {
-            'model': 'claudesdk/' + MODEL, 'use_chat_completions_api': True,
-            'allowed_openai_params': ['reasoning_effort', 'parallel_tool_calls'], 'num_retries': 0}}], num_retries=0)
-        try:
-            response = await self.call(model='claude/opus-5.5')
-            self.assertEqual(self.backend.queries, ['fixture fact'])
-            self.assertEqual(len(FakeSession.instances), 1)
-            history = [{'role': 'user', 'content': 'Find the fact'}, *response['output'],
-                       {'role': 'user', 'content': 'Recall the source'}]
-            await self.call(model='claude/opus-5.5', input=history)
-            self.assertEqual(len(FakeSession.instances), 1, 'Search replay must not replace the SDK conversation')
-        finally:
-            await provider.close()
-            litellm.custom_provider_map = previous
-            custom_llm_setup()
+        self.use_claude(FakeSession)
+        response = await self.call(model='claude/opus-5.5')
+        self.assertEqual(self.backend.queries, ['fixture fact'])
+        self.assertEqual(len(FakeSession.instances), 1)
+        history = [{'role': 'user', 'content': 'Find the fact'}, *response['output'],
+                   {'role': 'user', 'content': 'Recall the source'}]
+        await self.call(model='claude/opus-5.5', input=history)
+        self.assertEqual(len(FakeSession.instances), 1, 'Search replay must not replace the SDK conversation')
+
+    async def test_claude_round_limit_keeps_one_session(self):
+        self.use_claude(SearchingSession)
+        response = await self.call(model='claude/opus-5.5')
+        self.assertEqual(len(self.backend.queries), MAX_SEARCH_ROUNDS)
+        searches = [i for i in response['output'] if i['type'] == 'web_search_call']
+        self.assertEqual([i['status'] for i in searches], ['completed'] * MAX_SEARCH_ROUNDS + ['failed'])
+        self.assertEqual(response['output'][-1]['type'], 'message')
+        self.assertEqual(len(FakeSession.instances), 1, 'The round limit must not replace the Claude worker')
+        history = [{'role': 'user', 'content': 'Find the fact'}, *response['output'],
+                   {'role': 'user', 'content': 'Recall the source'}]
+        await self.call(model='claude/opus-5.5', input=history)
+        self.assertEqual(len(FakeSession.instances), 1, 'The request after the limit must keep the Claude worker')
 
     async def test_retries_replay_without_another_search_even_after_restart(self):
         first = await self.call()
@@ -217,24 +267,42 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'identity'):
             self.bridge.journal.read('test-caller', '../escape')
 
-    async def test_parallel_searches_and_limit_keep_every_call(self):
-        self.parallel_searches = 4
+    async def test_parallel_searches_all_run_without_a_count_limit(self):
+        self.parallel_searches = 6
         response = await self.call(stream=True)
         searches = [i for i in response[-1]['response']['output'] if i['type'] == 'web_search_call']
-        self.assertEqual(len(searches), 4)
-        self.assertEqual(len(self.backend.queries), 3)
-        self.assertEqual(sum(i['status'] == 'failed' for i in searches), 1)
+        self.assertEqual(len(searches), 6)
+        self.assertEqual(len(self.backend.queries), 6)
+        self.assertTrue(all(i['status'] == 'completed' for i in searches))
         tools = [m for m in self.requests[-1]['messages'] if m['role'] == 'tool']
-        self.assertEqual(len(tools), 4)
-        self.assertEqual(len({m['tool_call_id'] for m in tools}), 4)
+        self.assertEqual(len(tools), 6)
+        self.assertEqual(len({m['tool_call_id'] for m in tools}), 6)
+        self.assertNotIn('limit', json.dumps(self.requests))
 
-    async def test_search_loop_ceiling_allows_final_answer(self):
-        self.repeat = True
+    async def test_search_round_limit_closes_search_by_message(self):
+        # Five rounds exceed LiteLLM's default loop ceiling of three; the
+        # bridge must raise that ceiling rather than fail the request.
+        self.repeat = 'until_closed'
         response = await self.call()
-        self.assertEqual(len(self.backend.queries), 3)
-        self.assertEqual(len(self.requests), 4)
+        self.assertEqual(len(self.backend.queries), MAX_SEARCH_ROUNDS)
+        self.assertEqual(len(self.requests), MAX_SEARCH_ROUNDS + 2)
         self.assertEqual(response['output'][-1]['type'], 'message')
-        self.assertFalse(any(t.get('function', {}).get('name') == SEARCH_NAME for t in self.requests[-1]['tools']))
+        for request in self.requests:
+            self.assertTrue(any(t.get('function', {}).get('name') == SEARCH_NAME for t in request['tools']))
+            self.assertNotEqual(request.get('tool_choice'), 'auto')
+        self.assertEqual(self.requests[0].get('tool_choice'), self.requests[-1].get('tool_choice'))
+        results = [m['content'] for m in self.requests[-1]['messages'] if m['role'] == 'tool']
+        self.assertEqual([CLOSING in r for r in results], [False] * (MAX_SEARCH_ROUNDS - 1) + [True, False])
+        self.assertIn(CLOSED, results[-1])
+        searches = [i for i in response['output'] if i['type'] == 'web_search_call']
+        self.assertEqual(searches[-1]['status'], 'failed')
+
+    async def test_model_that_never_stops_hits_absolute_ceiling(self):
+        self.repeat = 'forever'
+        with self.assertRaisesRegex(ValueError, f'kept searching after search closed \\({MAX_SEARCH_ROUNDS + 2} '):
+            await self.call()
+        self.assertEqual(len(self.backend.queries), MAX_SEARCH_ROUNDS)
+        self.assertEqual(len(self.requests), MAX_SEARCH_ROUNDS + 3)
 
     async def test_active_stream_close_cancels_backend(self):
         entered, cancelled = asyncio.Event(), asyncio.Event()
