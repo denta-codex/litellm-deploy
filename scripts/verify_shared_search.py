@@ -113,6 +113,17 @@ async def main(args):
                 assert any(i['type'] == 'commandExecution' for i in items), 'No external tool execution'
                 assert 'SEARCH_TOOL_OK' in reply and 'https://docs.astral.sh/uv/' in reply, 'Lost search or tool context'
                 print('PASS ' + model + ': client tool and follow-up search context', flush=True)
+                reply, items = await rpc.turn(thread, 'Use native web search only. In one parallel batch, run six separate '
+                    'searches, one per topic: uv Python installation docs; Ruff configuration docs; Python 3.14 What\'s New; '
+                    'Rust 2024 edition guide; PEP 8; SQLite write-ahead logging. Give one fact and its source URL per topic.')
+                (home / 'parallel-items.json').write_text(json.dumps(items, indent=2))
+                searches = [i for i in items if i['type'] == 'webSearch']
+                assert len(searches) >= 5, f'Expected at least five searches, got {len(searches)}'
+                if args.isolated:
+                    failed = [p.name for p in (directory / 'search').glob('*/ws_shared*.json')
+                              if 'Web search failed' in json.loads(p.read_text())['result']['output']]
+                    assert not failed, f'Searches failed: {failed}'
+                print(f'PASS {model}: {len(searches)} parallel searches without a count limit', flush=True)
                 if args.isolated:
                     records = [json.loads(p.read_text()) for p in (directory / 'search').glob('*/ws_shared*.json')]
                     assert records and any(r.get('sources') for r in records), 'Helper returned no structured sources'

@@ -31,6 +31,12 @@ from claude_session import atomic_json
 
 CURRENT = ContextVar('shared_search', default=None)
 HOSTED = ('web_search', 'web_search_preview')
+# Search batches per Responses request. Parallel searches within a batch are
+# never capped. The limit is enforced by message, never by changing the tool
+# list: Claude workers are replaced whenever tools or tool_choice change.
+MAX_SEARCH_ROUNDS = 5
+CLOSING = 'Search is now closed for this response; answer with what you have.'
+CLOSED = 'Not run: search is closed for this response. Answer now with the results you already have'
 
 
 def plain(value):
@@ -193,6 +199,7 @@ class Turn:
     calls: list = field(default_factory=list)
     failures: set = field(default_factory=set)
     count: int = 0
+    rounds: int = 0
     mixed: bool = False
     failure: Exception | None = None
     usage: dict = field(default_factory=dict)
@@ -231,8 +238,8 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
         call = next(c for c in turn.calls if c['query'] == query and not c.get('started'))
         call['started'] = True
         turn.count += 1
-        if turn.count > 3:
-            result = SearchResult('', error='The per-request search limit was reached')
+        if turn.rounds > MAX_SEARCH_ROUNDS:
+            result = SearchResult('', error=CLOSED)
         elif query in turn.failures:
             result = SearchResult('', error='This query already failed during this request')
         else:
@@ -250,7 +257,10 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
                 turn.failures.add(query)
         call['result'] = result
         await turn.queue.put(('search_done', call))
-        return result.tool_text(), None
+        text = result.tool_text()
+        if turn.rounds == MAX_SEARCH_ROUNDS:
+            text += '\n' + CLOSING
+        return text, None
 
     async def async_build_chat_completion_agentic_loop_plan(self, **kwargs):
         turn = CURRENT.get()
@@ -266,6 +276,7 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
                 if not isinstance(query, str) or not query.strip() or len(query) > 8000:
                     raise ValueError('Invalid shared search query')
                 turn.calls.append({'call_id': call['id'], 'id': 'ws_shared' + uuid.uuid4().hex, 'query': query})
+            turn.rounds += 1
             rendered = plain(Transform.transform_chat_completion_response_to_responses_api_response(
                 chat_completion_response=response, request_input=turn.request['input'],
                 responses_api_request=turn.request))
@@ -304,10 +315,6 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
             if clients:
                 turn.mixed = True
                 return AgenticLoopPlan(response_override=response)
-            if turn.count >= 3:
-                plan.request_patch.tools = [t for t in plan.request_patch.optional_params.get('tools', [])
-                                            if t.get('function', {}).get('name') != SEARCH_NAME]
-                plan.request_patch.optional_params['tool_choice'] = 'auto'
             return plan
         except Exception as exc:
             turn.failure = exc
@@ -372,6 +379,9 @@ class SearchResponses:
                 routed['tool_choice'] = {'type': 'function', 'name': SEARCH_NAME}
         routed.pop('_websearch_interception_converted_stream', None)
         routed['stream'] = False
+        # LiteLLM's loop ceiling (default 3) raises instead of answering. Leave
+        # room for the model to ignore the closing message twice before it stops.
+        routed['max_agentic_loops'] = MAX_SEARCH_ROUNDS + 2
         # No unsupported SDK parameters; ordinary request validation remains.
         async def execute():
             cached = (json.loads(cache_path.read_text()).get('response') if cache_path.exists()
@@ -386,6 +396,9 @@ class SearchResponses:
                     raise turn.failure
                 value = plain(response)
                 if any(i.get('name') == SEARCH_NAME for i in value.get('output', [])) and not turn.mixed:
+                    if turn.rounds > MAX_SEARCH_ROUNDS:
+                        # LiteLLM logs its loop ceiling and returns the unconsumed call.
+                        raise ValueError(f'Model kept searching after search closed ({turn.rounds} search rounds)')
                     raise ValueError('Shared search interception did not consume an internal call')
                 output = turn.output + ([] if turn.mixed else value.get('output', []))
                 sources = historical_sources + [s for c in turn.calls if 'result' in c for s in c['result'].sources]
