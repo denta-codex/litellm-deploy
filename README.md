@@ -1,5 +1,8 @@
 # Grace LiteLLM deployment
 
+> **Personal project:** This is my personal setup. I'm sharing the source in the
+> hope that it benefits others. I am not accepting outside pull requests at this time.
+
 LiteLLM 1.102.1 with a small repository-owned ChatGPT request customization,
 uv, and systemd on Grace, for stock Codex through a named
 `litellm` Responses provider. Default model: `chatgpt/gpt-6-astra`. Discover subscription models with
