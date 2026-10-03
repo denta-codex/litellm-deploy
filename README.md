@@ -575,8 +575,8 @@ The `llama-local.service` router listens only on `127.0.0.1:18743`. It starts at
 boot with weights unloaded, loads on the first inference request, and unloads
 weights and context after 300 idle seconds. Monitoring `/health`, `/models`, and
 `/props` does not wake it. One 16K slot and full GPU offload are explicit; automatic
-fit changes are disabled. Processing uses 512-token logical batches and 256-token
-physical batches to limit temporary GPU allocations. A 4 GiB system-RAM prompt
+fit changes are disabled. Processing uses 512-token logical and physical batches;
+larger batches would raise temporary GPU allocations. A 4 GiB system-RAM prompt
 cache (`cache-ram`) keeps processed prompts, such as Codex's shared setup text,
 when another request takes the single slot; it is cleared when the model
 unloads. The route is
