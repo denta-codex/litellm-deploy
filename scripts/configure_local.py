@@ -32,7 +32,7 @@ def generate(source, config, catalog, selected):
         'model_messages': {}, 'visibility': 'list', 'supported_in_api': True,
         'context_window': source['context_window'], 'max_context_window': source['context_window'],
         'truncation_policy': {'mode': 'tokens', 'limit': 2000},
-        'input_modalities': ['text', 'image'],
+        'input_modalities': ['text'],
         'supported_reasoning_levels': [{'effort': 'none', 'description': 'Direct answers'}],
         'default_reasoning_level': 'none', 'default_reasoning_summary': 'none',
         'supports_parallel_tool_calls': False, 'supports_reasoning_summaries': False,
@@ -84,7 +84,7 @@ class LocalSetup(Refresh):
         return candidate
 
     def validate(self):
-        # Image and light-tool acceptance is required before publishing the picker.
+        # Light-tool acceptance is required before publishing the picker.
         subprocess.run([self.uv, 'run', '--no-sync', '--project', str(self.root),
                         str(Path(__file__).with_name('verify_local.py')), '--proxy'], check=True, timeout=600)
         return super().validate()

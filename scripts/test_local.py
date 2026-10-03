@@ -13,7 +13,6 @@ import yaml
 
 from configure_local import LocalSetup, MANIFEST, generate
 from refresh_models import Refresh, encode
-from verify_local import image_fixture
 
 
 class LocalTests(unittest.TestCase):
@@ -47,7 +46,7 @@ class LocalTests(unittest.TestCase):
         self.assertTrue(params['use_chat_completions_api'])
         entry = catalog['models'][-1]
         self.assertEqual(entry['context_window'], 16384)
-        self.assertEqual(entry['input_modalities'], ['text', 'image'])
+        self.assertEqual(entry['input_modalities'], ['text'])
         self.assertTrue(entry['supports_search_tool'])
         self.assertFalse(entry['prefer_websockets'])
 
@@ -64,10 +63,6 @@ class LocalTests(unittest.TestCase):
             generate(self.spec | {'port': 8081}, self.config, self.catalog, '')
         with self.assertRaisesRegex(ValueError, 'Selected local model disappeared'):
             generate(self.spec, self.config, self.catalog, 'local/other')
-
-    def test_image_fixture_is_png(self):
-        import base64
-        self.assertTrue(base64.b64decode(image_fixture().split(',', 1)[1]).startswith(b'\x89PNG\r\n\x1a\n'))
 
 
 class LocalActivationTests(LocalTests):

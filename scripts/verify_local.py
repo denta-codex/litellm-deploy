@@ -1,30 +1,17 @@
 """Live local-model acceptance. All tool calls use fixtures, never real devices."""
 import argparse
-import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
-import struct
 import subprocess
 import threading
 import time
-import zlib
 
 import httpx
 
 SPEC = json.loads(Path(__file__).with_name('local-model.json').read_text())
 BACKEND = f"http://127.0.0.1:{SPEC['port']}"
 NAME = SPEC['name']
-
-
-def image_fixture():
-    """1024px red-left/blue-right PNG, with no image dependency."""
-    def chunk(kind, data):
-        return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
-    pixels = (b'\x00' + b'\xff\x00\x00' * 512 + b'\x00\x00\xff' * 512) * 1024
-    data = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1024, 1024, 8, 2, 0, 0, 0))
-    data += chunk(b'IDAT', zlib.compress(pixels)) + chunk(b'IEND', b'')
-    return 'data:image/png;base64,' + base64.b64encode(data).decode()
 
 
 def gpu_memory():
@@ -72,11 +59,7 @@ class Probe:
                 elif message['role'] == 'tool':
                     inputs.append({'type': 'function_call_output', 'call_id': message['tool_call_id'], 'output': message['content']})
                 else:
-                    content = message['content']
-                    if isinstance(content, list):
-                        content = [({'type': 'input_text', 'text': p['text']} if p['type'] == 'text' else
-                                    {'type': 'input_image', 'image_url': p['image_url']['url']}) for p in content]
-                    inputs.append({'role': message['role'], 'content': content})
+                    inputs.append({'role': message['role'], 'content': message['content']})
             payload = {'model': 'local/' + NAME, 'input': inputs, 'stream': True, 'max_output_tokens': 128}
             if tools:
                 payload['tools'] = [{'type': 'function', **tool['function']} for tool in tools]
@@ -114,11 +97,6 @@ class Probe:
     def smoke(self):
         text = self.request([{'role': 'user', 'content': 'Reply with exactly LOCAL_QWEN_OK.'}])
         assert 'LOCAL_QWEN_OK' in (text.get('content') or ''), text
-        image = self.request([{'role': 'user', 'content': [
-            {'type': 'text', 'text': 'Name the color on the left and then the color on the right. Be brief.'},
-            {'type': 'image_url', 'image_url': {'url': image_fixture()}}]}])
-        words = (image.get('content') or '').lower()
-        assert 'red' in words and 'blue' in words and words.index('red') < words.index('blue'), image
         tools = [{'type': 'function', 'function': {'name': 'set_light', 'description': 'Set a room light.', 'parameters': {
             'type': 'object', 'properties': {'room': {'type': 'string', 'enum': ['kitchen', 'hallway']},
             'state': {'type': 'string', 'enum': ['on', 'off']}}, 'required': ['room', 'state'], 'additionalProperties': False}}}]
@@ -130,7 +108,7 @@ class Probe:
         continuation = messages + [call, {'role': 'tool', 'tool_call_id': calls[0]['id'], 'content': 'LOCAL_LIGHT_OK: kitchen light is off.'}]
         followup = self.request(continuation)
         assert 'off' in (followup.get('content') or '').lower(), followup
-        print('PASS text, image, light tool and continuation', flush=True)
+        print('PASS text, light tool and continuation', flush=True)
         return continuation
 
 

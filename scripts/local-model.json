@@ -7,8 +7,7 @@
   "repository": "unsloth/Qwen3.8-27B-GGUF",
   "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
   "artifacts": [
-    {"name": "Qwen3.8-27B-UD-Q2_K_XL.gguf", "sha256": "fd4730dd8aad070517978752b63d530aeb1740d2283cab9fa24f1e404032ddb0"},
-    {"name": "mmproj-F16.gguf", "sha256": "cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e"}
+    {"name": "Qwen3.8-27B-UD-Q2_K_XL.gguf", "sha256": "fd4730dd8aad070517978752b63d530aeb1740d2283cab9fa24f1e404032ddb0"}
   ],
   "runtime": {
     "version": "b11377",

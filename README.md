@@ -565,7 +565,7 @@ after publication to load the new catalog.
 
 ## Local Qwen inference
 
-`deploy/local.yml` installs Qwen3.8-27B UD-Q2_K_XL, its F16 vision projector,
+`deploy/local.yml` installs Qwen3.8-27B UD-Q2_K_XL
 and the checksum-pinned llama.cpp CUDA 12.8 build recorded in
 `scripts/local-model.json`. It uses Grace's existing driver; no CUDA toolkit or
 language toolchain is installed. The private runtime and model files live under
@@ -576,11 +576,8 @@ boot with weights unloaded, loads on the first inference request, and unloads
 weights and context after 300 idle seconds. Monitoring `/health`, `/models`, and
 `/props` does not wake it. One 16K slot and full GPU offload are explicit; automatic
 fit changes are disabled. Processing uses 512-token logical batches and 128-token
-physical batches to limit temporary GPU allocations. The vision encoder runs on
-the CPU: placing it alongside the language model on the 12 GB GPU exhausted
-VRAM during acceptance. The language model remains fully GPU-offloaded with 16K
-context. Images and text are validated before the Codex picker
-advertises them. The route is `local/qwen3.8-27b`; requests may take up to five
+physical batches to limit temporary GPU allocations. The route is
+`local/qwen3.8-27b`; requests may take up to five
 minutes on cold start, with no automatic inference retries. Only the direct-answer
 reasoning choice is advertised initially. Shared search uses the existing cloud
 subscription helper; ordinary inference is local.
@@ -628,33 +625,16 @@ UV_PROJECT_ENVIRONMENT=/home/agent/.local/share/litellm/.venv \
 ```
 
 The lifecycle probe explicitly unloads this model, submits concurrent cold
-requests, checks text/images/tools, waits the full idle interval, checks memory
+requests, checks text/tools, waits the full idle interval, checks memory
 release, and resumes a tool conversation after reload. It prints measured timings
 and GPU memory, not estimated performance. Run it when no other local inference
 client is active. Backend-only validation uses `--backend` without `--lifecycle`.
 
-Acceptance on Grace on October 3, 2026 passed backend text/images/tools,
-LiteLLM Responses streaming and continuation, and stock Codex shared search,
-shell execution, and resumed context. The offline suite passed 145 tests with
-one optional test skipped. These fixture measurements are not general workload
-latency guarantees:
-
-| Probe | Measured result |
-| --- | --- |
-| Two concurrent requests with weights unloaded | 3.03 s and 3.19 s to completion |
-| Short warm text reply | 0.25 s; first text at 0.13 s |
-| 1024×1024 image, CPU vision encoder | 25.16 s |
-| Simulated light-control tool call | 1.32 s |
-| Idle sleep observed by five-second polling | 301.5 s after the last request |
-| Total GPU memory: baseline / peak / sleeping | 558 / 10,757 / 769 MiB |
-| Tool continuation after automatic reload | 2.78 s |
-
-Short backend samples decoded at approximately 34–45 tokens/s; these are small
-fixture outputs, not sustained throughput benchmarks. Sleep releases model
-allocations but leaves about 211 MiB of additional CUDA/process overhead in this
-measurement. Fully stopping the service also releases that process overhead.
-GPU-vision attempts failed with out-of-memory errors and were rejected before
-route publication; CPU vision is the validated configuration.
+Acceptance covers backend text/tools, LiteLLM Responses streaming and
+continuation, and stock Codex shared search, shell execution, and resumed
+context. The lifecycle probe reports cold/warm latency, idle duration, and GPU
+memory directly. Sleep releases model allocations; fully stopping the service
+also releases its remaining CUDA/process overhead.
 
 ## Modal inference
 
