@@ -76,6 +76,13 @@ class LocalSetup(Refresh):
         version = subprocess.check_output([self.codex, '--version'], text=True).strip().removeprefix('codex-cli ')
         return {'version': 1, 'codex_version': version, 'catalog': json.loads(MANIFEST.read_text())}
 
+    def candidate(self, snapshot):
+        candidate = super().candidate(snapshot)
+        previous = json.loads(candidate['originals']['snapshot'] or '{}')
+        if previous.get('catalog') != snapshot['catalog']:
+            candidate['summary']['test_models'] = candidate['summary']['after']
+        return candidate
+
     def validate(self):
         # Image and light-tool acceptance is required before publishing the picker.
         subprocess.run([self.uv, 'run', '--no-sync', '--project', str(self.root),

@@ -145,7 +145,11 @@ def main():
     initial = state()
     print(json.dumps({'initial_state': initial}), flush=True)
     if args.lifecycle:
-        backend('/models/unload', {'model': NAME})
+        if initial != 'unloaded':
+            backend('/models/unload', {'model': NAME})
+        deadline = time.monotonic() + 30
+        while state() != 'unloaded' and time.monotonic() < deadline:
+            time.sleep(0.2)
         assert state() == 'unloaded'
     baseline = gpu_memory()
     readings, stop = [baseline], threading.Event()

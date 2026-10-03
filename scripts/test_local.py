@@ -1,9 +1,18 @@
 """Offline local-route ownership and acceptance-fixture regression tests."""
 import copy
+import asyncio
 import json
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from configure_local import MANIFEST, generate
+import yaml
+
+from configure_local import LocalSetup, MANIFEST, generate
+from refresh_models import Refresh, encode
 from verify_local import image_fixture
 
 
@@ -59,6 +68,100 @@ class LocalTests(unittest.TestCase):
     def test_image_fixture_is_png(self):
         import base64
         self.assertTrue(base64.b64decode(image_fixture().split(',', 1)[1]).startswith(b'\x89PNG\r\n\x1a\n'))
+
+
+class LocalActivationTests(LocalTests):
+    def setUp(self):
+        super().setUp()
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.home = Path(temporary.name)
+        self.refresh = LocalSetup(self.home, self.home / 'runtime', 'uv')
+        self.refresh.state.mkdir(parents=True)
+        (self.home / '.codex').mkdir()
+        (self.home / '.codex/config.toml').write_text('model_provider="litellm"\nmodel="chatgpt/astra"\n')
+        self.refresh.paths['config'].parent.mkdir(parents=True)
+        self.refresh.paths['config'].write_text(yaml.safe_dump(self.config))
+        self.refresh.paths['catalog'].write_text(encode(self.catalog))
+        self.snapshot = {'version': 1, 'codex_version': 'test', 'catalog': self.spec}
+        self.originals = self.refresh.originals()
+
+    def prepare(self):
+        candidate = self.refresh.candidate(self.snapshot)
+        with patch.object(self.refresh, 'discover', return_value=self.snapshot), patch('refresh_models.subprocess.run',
+                return_value=subprocess.CompletedProcess([], 0, candidate['candidates']['catalog'], '')):
+            return self.refresh.prepare()
+
+    def test_failure_blocks_publication_and_rollback_restores_files(self):
+        self.prepare()
+        self.refresh.activate()
+        with patch('configure_local.subprocess.run', side_effect=subprocess.CalledProcessError(1, ['verify_local'])):
+            with self.assertRaises(subprocess.CalledProcessError):
+                self.refresh.validate()
+        with self.assertRaisesRegex(ValueError, 'not passed'):
+            self.refresh.finish()
+        self.refresh.rollback()
+        self.assertEqual(self.refresh.originals(), self.originals)
+
+    def test_shared_lock_identifies_local_recovery_owner(self):
+        self.prepare()
+        other = Refresh(self.home, self.home / 'runtime', 'uv')
+        with self.assertRaisesRegex(ValueError, 'local.yml'):
+            other.rollback()
+
+    def test_publishes_only_after_all_probes_and_then_converges(self):
+        self.prepare()
+        self.refresh.activate()
+        self.assertEqual(self.refresh.paths['catalog'].read_text(), self.originals['catalog'])
+        with patch('configure_local.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
+            self.refresh.validate()
+        self.assertEqual(run.call_count, 3)
+        self.refresh.finish()
+        self.assertTrue(self.refresh.check_snapshot()['snapshot_present'])
+        with patch.object(self.refresh, 'discover', return_value=self.snapshot):
+            self.assertFalse(self.refresh.prepare()['any_changes'])
+
+    def test_changed_artifacts_revalidate_even_if_route_unchanged(self):
+        config, catalog, _ = generate(self.spec, self.config, self.catalog, '')
+        self.refresh.paths['config'].write_text(yaml.safe_dump(config))
+        self.refresh.paths['catalog'].write_text(encode(catalog))
+        old = copy.deepcopy(self.snapshot)
+        old['catalog']['revision'] = 'old'
+        self.refresh.paths['snapshot'].write_text(encode(old))
+        candidate = self.refresh.candidate(self.snapshot)
+        self.assertFalse(candidate['summary']['routing_changed'])
+        self.assertEqual(candidate['summary']['test_models'], ['local/qwen3.8-27b'])
+
+
+class LocalFailureTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def loop_factory():
+        loop = asyncio.new_event_loop()
+        def tick():
+            loop.call_later(0.01, tick)
+        tick()
+        return loop
+
+    async def test_failed_load_is_not_retried_by_router_or_client(self):
+        os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
+        import httpx
+        import litellm
+        litellm.in_memory_llm_clients_cache.flush_cache()
+        calls = []
+        def fail(request):
+            calls.append(request)
+            return httpx.Response(503, json={'error': {'message': 'fixture: model load failed', 'type': 'server_error'}})
+        config, _, _ = generate(json.loads(MANIFEST.read_text()), {}, {}, '')
+        router = litellm.Router(model_list=config['model_list'])
+        try:
+            async with httpx.AsyncClient(transport=httpx.MockTransport(fail)) as client:
+                with patch('litellm.aclient_session', client):
+                    async with asyncio.timeout(20):
+                        with self.assertRaises(litellm.ServiceUnavailableError):
+                            await router.aresponses(model='local/qwen3.8-27b', input='fixture', stream=False)
+            self.assertEqual(len(calls), 1)
+        finally:
+            litellm.in_memory_llm_clients_cache.flush_cache()
 
 
 if __name__ == '__main__':
