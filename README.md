@@ -633,6 +633,29 @@ release, and resumes a tool conversation after reload. It prints measured timing
 and GPU memory, not estimated performance. Run it when no other local inference
 client is active. Backend-only validation uses `--backend` without `--lifecycle`.
 
+Acceptance on Grace on October 3, 2026 passed backend text/images/tools,
+LiteLLM Responses streaming and continuation, and stock Codex shared search,
+shell execution, and resumed context. The offline suite passed 145 tests with
+one optional test skipped. These fixture measurements are not general workload
+latency guarantees:
+
+| Probe | Measured result |
+| --- | --- |
+| Two concurrent requests with weights unloaded | 3.03 s and 3.19 s to completion |
+| Short warm text reply | 0.25 s; first text at 0.13 s |
+| 1024×1024 image, CPU vision encoder | 25.16 s |
+| Simulated light-control tool call | 1.32 s |
+| Idle sleep observed by five-second polling | 301.5 s after the last request |
+| Total GPU memory: baseline / peak / sleeping | 558 / 10,757 / 769 MiB |
+| Tool continuation after automatic reload | 2.78 s |
+
+Short backend samples decoded at approximately 34–45 tokens/s; these are small
+fixture outputs, not sustained throughput benchmarks. Sleep releases model
+allocations but leaves about 211 MiB of additional CUDA/process overhead in this
+measurement. Fully stopping the service also releases that process overhead.
+GPU-vision attempts failed with out-of-memory errors and were rejected before
+route publication; CPU vision is the validated configuration.
+
 ## Modal inference
 
 Modal uses stock LiteLLM's Responses-to-Chat-Completions bridge, configured with
