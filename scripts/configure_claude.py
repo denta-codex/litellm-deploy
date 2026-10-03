@@ -42,7 +42,9 @@ def generate(source, config, catalog, selected):
         'use_responses_lite': False, 'prefer_websockets': False,
         # Claude reasons over each tool result, so it calls Codex tools directly.
         'tool_mode': 'direct', 'shell_type': 'shell_command', 'apply_patch_tool_type': 'freeform',
-        'experimental_supported_tools': [], 'service_tiers': [], 'additional_speed_tiers': [],
+        'experimental_supported_tools': [],
+        'service_tiers': [{'id': 'priority', 'name': 'Fast', 'description': 'Faster Opus responses; uses paid Claude usage credits'}],
+        'additional_speed_tiers': ['fast'],
         'availability_nux': None, 'available_access_programs': {'cyber': []}, 'priority': 80,
     }
     before = {m['slug']: m for m in catalog.get('models', []) if m['slug'].startswith(PREFIX)}

@@ -132,8 +132,8 @@ class ClaudeProvider(CustomLLM):
             raise CustomLLMError(400, 'Only ' + MODEL + ' is configured')
         params = kwargs.get('optional_params', {})
         try:
-            validate_request()
-            config = configuration(messages, params)
+            fast_mode = validate_request()
+            config = configuration(messages, params, fast_mode=fast_mode)
             key = identity(model, params)
         except (ValueError, KeyError, TypeError) as exc:
             raise CustomLLMError(400, str(exc)) from None
@@ -157,6 +157,12 @@ class ClaudeProvider(CustomLLM):
                         for item in cached:
                             yield item
                         return
+            # Reject before the cleanup scope: this worker still owns tool futures.
+            if session and not session.closed and config['fast_mode'] != session.config['fast_mode']:
+                suffix = messages[len(session.history):] if messages[:len(session.history)] == session.history else []
+                if (not session.idle.is_set() or unresolved_calls(messages)
+                        or not any(m['role'] == 'user' for m in suffix)):
+                    raise CustomLLMError(409, 'Claude speed can change only on a new user turn after the current turn finishes; submit tool results at the original speed')
             normal_boundary = False
             emitted = []
             try:

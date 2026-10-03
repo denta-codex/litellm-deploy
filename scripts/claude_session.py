@@ -4,6 +4,7 @@ import base64
 import copy
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -11,10 +12,11 @@ import tempfile
 import uuid
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server, tool
-from claude_agent_sdk.types import AssistantMessage, HookMatcher, ResultMessage, StreamEvent, SystemMessage, ToolUseBlock
+from claude_agent_sdk.types import AssistantMessage, HookMatcher, RateLimitEvent, ResultMessage, StreamEvent, SystemMessage, ToolUseBlock
 from litellm.llms.custom_llm import CustomLLMError
 
 MODEL = 'claude-opus-5-5'
+LOG = logging.getLogger(__name__)
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 CORRELATION = '_litellm_tool_use_id'
 MCP_PREFIX = 'mcp__codex__'
@@ -127,7 +129,7 @@ def unresolved_calls(messages):
     return calls - results
 
 
-def configuration(messages, params):
+def configuration(messages, params, *, fast_mode=False):
     effort = params.get('reasoning_effort') or 'high'
     if effort not in EFFORTS:
         raise ValueError('Claude reasoning_effort must be one of ' + ', '.join(EFFORTS))
@@ -171,7 +173,7 @@ def configuration(messages, params):
         raise ValueError('Unsupported tool_choice')
     if choice == 'required' and not definitions:
         raise ValueError('tool_choice required needs tools')
-    return {'effort': effort, 'tools': definitions, 'choice': choice,
+    return {'effort': effort, 'tools': definitions, 'choice': choice, 'fast_mode': fast_mode,
             'parallel': params.get('parallel_tool_calls', True), 'output_format': output_format,
             'system': '\n\n'.join(text(m.get('content')) for m in messages if m['role'] in ('system', 'developer'))}
 
@@ -203,6 +205,10 @@ class Session:
         self.boundary_usage = None
         self.batch = []
         self.message_usage = None
+        self.speed_buffer = []
+        self.speed_verified = False
+        self.speed_message_open = False
+        self.verified_messages = 0
 
     def save(self):
         atomic_json(self.path, {'version': 1, 'key': self.key, 'generation': self.generation,
@@ -267,6 +273,7 @@ class Session:
         return ClaudeAgentOptions(model=MODEL, tools=format_tools, mcp_servers={'codex': create_sdk_mcp_server('codex', tools=definitions)},
             allowed_tools=format_tools + [MCP_PREFIX + t.name for t in definitions], permission_mode='dontAsk',
             hooks={'PreToolUse': [HookMatcher(hooks=[before_tool])]}, strict_mcp_config=True, setting_sources=[],
+            settings=json.dumps({'fastMode': self.config['fast_mode']}),
             system_prompt=system, include_partial_messages=True, cwd=str(cwd), effort=self.config['effort'],
             thinking={'type': 'adaptive', 'display': 'summarized'}, output_format=self.config['output_format'],
             cli_path=str(Path(__file__).with_name('claude-cli')), env={'DISABLE_AUTOUPDATER': '1'},
@@ -284,6 +291,12 @@ class Session:
                     self.idle.clear()
                     self.call_count = 0
                     self.reported_usage = {}
+                    self.verified_messages = 0
+                    self.speed_verified = False
+                    self.speed_message_open = False
+                    self.speed_buffer = []
+                    self.effective.update(requested_speed='fast' if self.config['fast_mode'] else 'standard',
+                                          speed=None, verified_messages=0)
                     async def prompt():
                         yield {'type': 'user', 'message': {'role': 'user', 'content': blocks}}
                     await client.query(prompt())
@@ -292,6 +305,9 @@ class Session:
                     self.idle.set()
         except asyncio.CancelledError:
             raise
+        except CustomLLMError as exc:
+            self.failure = exc
+            await self.queue.put(('error', exc))
         except Exception as exc:
             # Do not log exception strings containing user data or credentials.
             self.failure = CustomLLMError(502, 'Claude worker failed (' + type(exc).__name__ + ')')
@@ -305,16 +321,92 @@ class Session:
                     pending['future'].cancel()
             self.save()
 
+    def fast_failure(self, reason, status=502):
+        # Only fixed labels are passed here; never log raw SDK notifications.
+        self.effective.update(failure_reason=reason, failure_status=status)
+        LOG.warning('Claude speed requested=fast observed=%s failure=%s',
+                    self.effective.get('speed') or 'unknown', reason)
+        self.speed_buffer.clear()
+        raise CustomLLMError(status, 'Claude Fast request failed: ' + reason)
+
     async def consume(self, message):
+        """Gate every Fast message before exposing content or executable tools."""
+        if not self.config['fast_mode']:
+            return await self._consume(message)
+        if isinstance(message, RateLimitEvent):
+            info = message.rate_limit_info
+            if info.status == 'rejected' or info.overage_status == 'rejected':
+                self.fast_failure('rate limit or usage credits unavailable', 429)
+        if isinstance(message, SystemMessage) and message.subtype == 'notification':
+            notice = json.dumps(message.data).lower()
+            if 'fast' in notice and any(word in notice for word in ('disabled', 'unavailable', 'not available', 'exhausted', 'cooldown', 'requires usage credits')):
+                status = 429 if any(word in notice for word in ('cooldown', 'rate limit')) else 403
+                self.fast_failure('Fast unavailable or disabled by Claude', status)
+        if isinstance(message, AssistantMessage) and message.error:
+            status = {'authentication_failed': 401, 'billing_error': 403, 'rate_limit': 429,
+                      'invalid_request': 400}.get(message.error, 502)
+            self.fast_failure('upstream request rejected', status)
+        if isinstance(message, ResultMessage):
+            if message.is_error:
+                self.fast_failure('upstream request rejected', message.api_error_status or 502)
+            if self.speed_message_open or self.speed_buffer or not self.verified_messages:
+                self.fast_failure('Fast speed could not be verified')
+            return await self._consume(message)
+
+        usage = None
+        boundary = False
+        if isinstance(message, StreamEvent):
+            event = message.event
+            if event.get('type') == 'message_start':
+                if self.speed_message_open or self.speed_buffer:
+                    self.fast_failure('Fast speed could not be verified')
+                self.speed_verified = False
+                self.speed_message_open = True
+                self.effective['speed'] = None
+                usage = event.get('message', {}).get('usage')
+            elif event.get('type') == 'message_delta':
+                usage = event.get('usage')
+            boundary = event.get('type') == 'message_stop'
+        elif isinstance(message, AssistantMessage):
+            usage = message.usage
+        else:
+            return await self._consume(message)
+
+        speed = (usage or {}).get('speed')
+        if speed is not None:
+            self.effective['speed'] = speed if speed in ('fast', 'standard') else 'unknown'
+            if speed != 'fast':
+                self.fast_failure('Claude did not honor Fast speed')
+            if not self.speed_verified:
+                self.verified_messages += 1
+                self.effective['verified_messages'] = self.verified_messages
+            self.speed_verified = True
+        if not self.speed_verified:
+            if boundary:
+                self.fast_failure('Fast speed could not be verified')
+            self.speed_buffer.append(message)
+            return
+        buffered, self.speed_buffer = self.speed_buffer, []
+        for pending in buffered:
+            await self._consume(pending)
+        await self._consume(message)
+        if boundary:
+            self.speed_message_open = False
+
+    async def _consume(self, message):
         if isinstance(message, SystemMessage) and message.subtype == 'init':
             self.sdk_id = message.data.get('session_id')
-            self.effective = {k: message.data[k] for k in ('model', 'effort', 'tools') if k in message.data}
+            self.effective.update({k: message.data[k] for k in ('model', 'effort', 'tools') if k in message.data})
             if message.data.get('model') != MODEL:
                 raise RuntimeError('Claude initialized a different model')
             self.save()
         elif isinstance(message, StreamEvent):
             event = message.event
             delta = event.get('delta', {})
+            usage = event.get('message', {}).get('usage') if event.get('type') == 'message_start' else event.get('usage')
+            speed = (usage or {}).get('speed')
+            if speed in ('fast', 'standard'):
+                self.effective['speed'] = speed
             if event.get('type') == 'message_start':
                 self.batch = []
                 self.message_usage = event.get('message', {}).get('usage')

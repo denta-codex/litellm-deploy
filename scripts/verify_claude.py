@@ -232,10 +232,19 @@ class Acceptance:
         (work / 'marker.txt').write_text(marker)
         config = {'model': MODEL, 'model_provider': 'claude_acceptance', 'model_catalog_json': str(self.catalog),
             'model_reasoning_effort': 'low', 'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'disabled',
-            'features': {'shell_snapshot': False}, 'shell_environment_policy': {'exclude': ['CLAUDE_TEST_PROXY_KEY']},
+            'features': {'shell_snapshot': False, 'fast_mode': self.args.fast}, 'shell_environment_policy': {'exclude': ['CLAUDE_TEST_PROXY_KEY']},
             'model_providers': {'claude_acceptance': {'name': 'Claude acceptance', 'base_url': self.base + '/v1',
                 'wire_api': 'responses', 'env_key': 'CLAUDE_TEST_PROXY_KEY', 'supports_websockets': False,
                 'requires_openai_auth': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
+        if self.args.fast:
+            # Exercise the same account-backed Fast control as the desktop, with
+            # only a disposable login copy and the isolated proxy credential.
+            native = json.loads((Path.home() / '.codex/auth.json').read_text())
+            native['tokens']['refresh_token'] = ''
+            native['OPENAI_API_KEY'] = None
+            (home / 'auth.json').write_text(json.dumps(native))
+            config['service_tier'] = 'default'
+            config['model_providers']['claude_acceptance']['requires_openai_auth'] = True
         (home / 'config.toml').write_text(tomlkit.dumps(config))
         log = (self.directory / 'codex.log').open('w')
         self.logs.append(log)
@@ -251,6 +260,12 @@ class Acceptance:
                 result = await rpc.call('thread/start', {'model': MODEL, 'modelProvider': 'claude_acceptance', 'cwd': str(work),
                     'approvalPolicy': 'never', 'sandbox': sandbox})
                 return result['thread']['id']
+            if self.args.fast:
+                account = await rpc.call('account/read', {'refreshToken': False})
+                assert account['account']['type'] == 'chatgpt' and account['requiresOpenaiAuth']
+                await self.fast_checks(rpc, await new_thread(), work, marker)
+                if self.args.fast_only:
+                    return
             thread = await new_thread()
             reply, items = await rpc.turn(thread, 'Run cat ' + str(work / 'marker.txt') + ' using your shell and report the exact output.')
             assert marker in reply and any(i['type'] == 'commandExecution' for i in items)
@@ -317,6 +332,40 @@ class Acceptance:
             rpc.reader.cancel()
             await asyncio.gather(rpc.reader, return_exceptions=True)
 
+    def speed_observation(self, thread, tier):
+        journals = [json.loads(p.read_text()) for p in (self.directory / 'state/journals').glob('*.json')]
+        matches = [j for j in journals if j['key'][1] == thread and j['key'][-1] == 'chat']
+        effective = matches[0]['effective'] if len(matches) == 1 else {}
+        # Print only the adapter's fixed speed/status labels, never journal history.
+        print(f'SPEED tier={tier} requested={effective.get("requested_speed", "unknown")} '
+              f'observed={effective.get("speed") or "unknown"} '
+              f'verified_messages={effective.get("verified_messages", 0)} '
+              f'failure_status={effective.get("failure_status", "none")}', flush=True)
+        return effective
+
+    async def fast_checks(self, rpc, thread, work, marker):
+        for tier, expected, prompt in (
+            ('default', 'standard', 'Remember the label STANDARD_BASELINE. Reply OK without tools.'),
+            ('priority', 'fast', 'Run cat ' + str(work / 'marker.txt') + ' using your shell and report the exact output.'),
+            ('default', 'standard', 'Repeat the marker from the earlier command output without tools.'),
+        ):
+            try:
+                reply, items = await rpc.turn(thread, prompt, serviceTier=tier)
+            finally:
+                effective = self.speed_observation(thread, tier)
+            if tier == 'priority':
+                assert marker in reply and any(i['type'] == 'commandExecution' for i in items)
+            elif 'Repeat' in prompt:
+                assert marker in reply and not any(i['type'] == 'commandExecution' for i in items)
+            observed = effective.get('speed')
+            assert effective['requested_speed'] == expected
+            if expected == 'fast':
+                assert observed == 'fast', 'Pinned runtime did not report Fast speed'
+                assert effective.get('verified_messages', 0) >= 2, 'Must verify tool call and result continuation'
+            else:
+                assert observed in (None, 'standard'), 'Standard request unexpectedly used Fast'
+            self.passed('real Codex Claude speed=' + expected)
+
     async def run(self):
         if self.args.isolated:
             self.key = 'sk-claude-test-' + secrets.token_hex(20)
@@ -336,7 +385,7 @@ class Acceptance:
                 self.key = subprocess.check_output(['systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
                     str(Path.home() / '.config/litellm/proxy-key.cred'), '-'], text=True).strip()
         try:
-            if not self.args.codex_only:
+            if not self.args.codex_only and not self.args.fast_only:
                 await self.api_checks()
             if not self.args.api_only:
                 await self.codex_checks()
@@ -353,16 +402,24 @@ def main():
     parser.add_argument('--isolated', action='store_true')
     parser.add_argument('--api-only', action='store_true')
     parser.add_argument('--codex-only', action='store_true')
+    parser.add_argument('--fast', action='store_true', help='Opt in to paid Claude Fast acceptance, including Codex tool continuation')
+    parser.add_argument('--fast-only', action='store_true', help='Run only the paid standard/Fast/standard Codex probe; implies --fast')
     parser.add_argument('--base-url', default='http://127.0.0.1:4000')
     parser.add_argument('--catalog', type=Path, default=Path.home() / '.config/litellm/codex-models.json')
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
+    args.fast = args.fast or args.fast_only
+    if args.fast and (not args.isolated or args.api_only):
+        parser.error('--fast/--fast-only requires --isolated and cannot be combined with --api-only')
     os.umask(0o077)
     # Codex requires a home outside /tmp. This directory is removed on success.
     directory = Path(tempfile.mkdtemp(prefix='.claude-acceptance-', dir=ROOT))
     try:
         asyncio.run(Acceptance(args, directory).run())
     except BaseException:
+        # Retain diagnostics, not the disposable native login or credential link.
+        (directory / 'codex/auth.json').unlink(missing_ok=True)
+        (directory / 'claude-config/.credentials.json').unlink(missing_ok=True)
         print('Acceptance failed; diagnostic state retained at ' + str(directory), file=sys.stderr)
         raise
     else:

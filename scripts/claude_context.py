@@ -135,10 +135,11 @@ def validate_request():
         raise ValueError('Unsupported Claude request fields: ' + ', '.join(sorted(unknown)))
     if raw.get('store') is True:
         raise ValueError('Claude does not provide server-side Responses retrieval')
-    if raw.get('service_tier') not in (None, 'auto', 'default'):
-        raise ValueError('Claude does not support service_tier selection')
+    if raw.get('service_tier') not in (None, 'auto', 'default', 'priority'):
+        raise ValueError('Claude service_tier must be auto, default, or priority')
     reasoning = raw.get('reasoning') or {}
     if set(reasoning) - {'effort', 'summary'} or reasoning.get('summary') not in (None, 'auto', 'concise', 'detailed'):
         raise ValueError('Unsupported Claude reasoning controls')
     if set(raw.get('text') or {}) - {'format'}:
         raise ValueError('Claude does not support text verbosity controls')
+    return raw.get('service_tier') == 'priority'

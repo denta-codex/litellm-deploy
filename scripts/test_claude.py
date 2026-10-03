@@ -15,7 +15,8 @@ os.environ['LITELLM_TELEMETRY'] = 'False'
 
 import litellm
 import yaml
-from claude_agent_sdk.types import AssistantMessage, ResultMessage, StreamEvent, SystemMessage, ToolUseBlock
+from claude_agent_sdk.types import AssistantMessage, RateLimitEvent, RateLimitInfo, ResultMessage, StreamEvent, SystemMessage, ToolUseBlock
+from litellm.llms.custom_llm import CustomLLMError
 from claude_context import REQUEST, validate_request
 import claude_provider
 from claude_provider import ClaudeProvider, usage_counts
@@ -26,6 +27,14 @@ from refresh_models import Refresh
 
 FUNCTION = {'type': 'function', 'function': {'name': 'probe', 'description': 'Read a marker',
     'parameters': {'type': 'object', 'properties': {'value': {'type': 'string'}}, 'required': ['value'], 'additionalProperties': False}}}
+
+
+def stream_event(kind, **fields):
+    return StreamEvent('event', 'fake-session', {'type': kind, **fields})
+
+
+def fast_script(text='FAST', speed='fast'):
+    return [stream_event('message_start', message={'usage': {'speed': speed}}), text, stream_event('message_stop')]
 
 
 class FakeClient:
@@ -77,6 +86,8 @@ class ContractTests(unittest.TestCase):
         self.assertFalse(row['supports_search_tool'])
         self.assertNotIn('experimental', row['description'].lower())
         self.assertEqual(row['tool_mode'], 'direct')
+        self.assertEqual(row['service_tiers'][0]['id'], 'priority')
+        self.assertEqual(row['additional_speed_tiers'], ['fast'])
         self.assertEqual(row['base_instructions'], INSTRUCTIONS.read_text())
         self.assertIn('apply_patch', row['base_instructions'])
         self.assertEqual(generate(json.loads(MANIFEST.read_text()), config, new, '')[2]['test_models'], [])
@@ -109,13 +120,29 @@ class ContractTests(unittest.TestCase):
 
     def test_raw_responses_controls_cannot_be_silently_dropped(self):
         for raw in ({'temperature': 0.5}, {'max_output_tokens': 1}, {'store': True},
-                    {'service_tier': 'priority'}, {'text': {'verbosity': 'low'}}):
+                    {'service_tier': 'flex'}, {'text': {'verbosity': 'low'}}):
             token = REQUEST.set({'request': raw})
             try:
                 with self.assertRaises(ValueError):
                     validate_request()
             finally:
                 REQUEST.reset(token)
+
+    def test_speed_controls_reach_cli_without_global_settings(self):
+        from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+        with tempfile.TemporaryDirectory() as state:
+            for tier in (None, 'auto', 'default', 'priority'):
+                token = REQUEST.set({'request': {'service_tier': tier}})
+                try:
+                    config = configuration([], {}, fast_mode=validate_request())
+                finally:
+                    REQUEST.reset(token)
+                options = Session((tier,), config, state).options()
+                command = SubprocessCLITransport(prompt='probe', options=options)._build_command()
+                self.assertEqual(json.loads(command[command.index('--settings') + 1]), {'fastMode': tier == 'priority'})
+                self.assertEqual(options.setting_sources, [])
+                self.assertEqual(config['fast_mode'], tier == 'priority')
+            self.assertNotEqual(digest(configuration([], {})), digest(configuration([], {}, fast_mode=True)))
 
     def test_all_efforts_reach_pinned_cli_flags(self):
         from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
@@ -192,6 +219,189 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             return await self.response(messages, **params)
         finally:
             REQUEST.reset(token)
+
+    async def tier_response(self, tier, messages=None, **params):
+        token = REQUEST.set(REQUEST.get() | {'request': {'service_tier': tier}})
+        try:
+            return await self.response(messages, **params)
+        finally:
+            REQUEST.reset(token)
+
+    async def test_fast_switches_preserve_history_and_isolate_chats(self):
+        messages = [{'role': 'user', 'content': 'hello'}]
+        await self.response(messages)
+        messages = messages + [{'role': 'assistant', 'content': 'ANSWER'}, {'role': 'user', 'content': 'faster'}]
+        FakeClient.scripted = [fast_script()]
+        result = await self.tier_response('priority', messages)
+        self.assertEqual(''.join(c['text'] for c in result), 'FAST')
+        fast_client = FakeClient.instances[-1]
+        self.assertTrue(json.loads(fast_client.options.settings)['fastMode'])
+        self.assertIn('hello', json.dumps(fast_client.prompts))
+        self.assertEqual(result, await self.tier_response('priority', messages))
+        self.assertEqual(len(FakeClient.instances), 2)
+        # Completed Fast requests remain replayable after a proxy restart.
+        other = ClaudeProvider(self.temp.name)
+        token = REQUEST.set(REQUEST.get() | {'request': {'service_tier': 'priority'}})
+        try:
+            replay = [c async for c in other.astreaming(MODEL, messages, optional_params={})]
+            self.assertEqual(result, replay)
+        finally:
+            REQUEST.reset(token)
+        await self.chat('other')
+        self.assertFalse(json.loads(FakeClient.instances[-1].options.settings)['fastMode'])
+        self.assertTrue(self.provider.sessions[self.key('chat')].config['fast_mode'])
+        messages = messages + [{'role': 'assistant', 'content': 'FAST'}, {'role': 'user', 'content': 'normal again'}]
+        await self.tier_response('default', messages)
+        self.assertFalse(json.loads(FakeClient.instances[-1].options.settings)['fastMode'])
+        self.assertIn('FAST', json.dumps(FakeClient.instances[-1].prompts))
+
+    async def test_fast_cache_does_not_replay_standard_response(self):
+        await self.response()
+        with self.assertRaisesRegex(CustomLLMError, 'new user turn') as caught:
+            await self.tier_response('priority')
+        self.assertEqual(caught.exception.status_code, 409)
+        self.assertFalse(self.provider.sessions[self.key('chat')].closed)
+
+    async def test_speed_conflicts_preserve_partial_and_complete_tool_results(self):
+        for original_fast in (False, True):
+            await self.provider.close()
+            config = configuration([], {'tools': [FUNCTION]}, fast_mode=original_fast)
+            session = Session(self.key('chat'), config, self.temp.name, FakeClient)
+            self.provider.sessions[self.key('chat')] = session
+            session.history = [{'role': 'user', 'content': 'two tools'}]
+            session.idle.clear()
+            ids = [session.register('sdk-' + str(i), 'probe', {'value': str(i)}) for i in range(2)]
+            calls = [{'id': k, 'type': 'function', 'function': {'name': 'probe', 'arguments': '{}'}} for k in ids]
+            history = session.history + [{'role': 'assistant', 'tool_calls': calls}]
+            partial = history + [{'role': 'tool', 'tool_call_id': ids[1], 'content': 'second'}]
+            complete = partial + [{'role': 'tool', 'tool_call_id': ids[0], 'content': 'first'}]
+            opposite, original = ('default', 'priority') if original_fast else ('priority', 'default')
+            for messages in (partial, complete):
+                with self.assertRaises(CustomLLMError) as caught:
+                    await self.tier_response(opposite, messages, tools=[FUNCTION])
+                self.assertEqual(caught.exception.status_code, 409)
+                self.assertIs(self.provider.sessions[self.key('chat')], session)
+                self.assertFalse(session.closed)
+                self.assertEqual(session.delivered, {})
+            waiting = await self.tier_response(original, partial, tools=[FUNCTION])
+            self.assertEqual([c['tool_use']['id'] for c in waiting if c.get('tool_use')], [ids[0]])
+            await session.queue.put(('done', None))
+            await self.tier_response(original, complete, tools=[FUNCTION])
+            self.assertEqual(session.delivered, {ids[1]: 'second', ids[0]: 'first'})
+            self.assertFalse(session.closed)
+
+    async def test_fast_buffers_text_reasoning_and_tools_until_verified(self):
+        session = Session(('gate',), configuration([], {'tools': [FUNCTION]}, fast_mode=True), self.temp.name, FakeClient)
+        session.options()
+        await session.consume(stream_event('message_start', message={'usage': {'input_tokens': 2}}))
+        await session.consume(stream_event('content_block_delta', delta={'type': 'thinking_delta', 'thinking': 'summary'}))
+        await session.consume(stream_event('content_block_delta', delta={'type': 'text_delta', 'text': 'hello'}))
+        await session.consume(AssistantMessage([ToolUseBlock('sdk-id', 'mcp__codex__probe', {'value': 'x'})], MODEL))
+        self.assertTrue(session.queue.empty())
+        self.assertEqual(session.pending, {})
+        await session.consume(stream_event('message_delta', usage={'speed': 'fast', 'output_tokens': 3}))
+        await session.consume(stream_event('message_stop'))
+        self.assertEqual(await session.queue.get(), ('reasoning', 'summary'))
+        self.assertEqual(await session.queue.get(), ('text', 'hello'))
+        kind, calls = await session.queue.get()
+        self.assertEqual((kind, len(calls)), ('tools', 1))
+        self.assertEqual(session.effective['speed'], 'fast')
+        # A subsequent message must establish its own speed.
+        await session.consume(stream_event('message_start', message={'usage': {}}))
+        await session.consume(stream_event('content_block_delta', delta={'type': 'text_delta', 'text': 'UNVERIFIED'}))
+        with self.assertRaisesRegex(CustomLLMError, 'could not be verified'):
+            await session.consume(stream_event('message_stop'))
+        self.assertTrue(session.queue.empty())
+
+    async def test_fast_fallback_and_missing_speed_fail_without_output(self):
+        for speed in ('standard', None, 'unknown'):
+            FakeClient.scripted = [fast_script('MUST_NOT_LEAK', speed)]
+            token = REQUEST.set(REQUEST.get() | {'request': {'service_tier': 'priority'}})
+            output = []
+            try:
+                with self.assertRaises(CustomLLMError) as caught:
+                    async for item in self.provider.astreaming(MODEL, [{'role': 'user', 'content': str(speed)}], optional_params={}):
+                        output.append(item)
+                self.assertEqual(caught.exception.status_code, 502)
+                self.assertEqual(output, [])
+                self.assertNotIn(self.key('chat'), self.provider.sessions)
+                self.assertEqual(len(FakeClient.instances), ('standard', None, 'unknown').index(speed) + 1)
+            finally:
+                REQUEST.reset(token)
+
+    async def test_unverified_fast_tool_calls_are_never_exposed(self):
+        for speed in ('standard', None):
+            session = Session(('tools', speed), configuration([], {'tools': [FUNCTION]}, fast_mode=True), self.temp.name, FakeClient)
+            session.options()
+            await session.consume(stream_event('message_start', message={'usage': {}}))
+            await session.consume(AssistantMessage([ToolUseBlock('sdk-id', 'mcp__codex__probe', {'value': 'x'})], MODEL))
+            with self.assertRaises(CustomLLMError):
+                if speed:
+                    await session.consume(stream_event('message_delta', usage={'speed': speed}))
+                else:
+                    await session.consume(stream_event('message_stop'))
+            self.assertTrue(session.queue.empty())
+            self.assertEqual(session.pending, {})
+
+    async def test_fast_tool_result_continuation_verifies_each_message(self):
+        session = Session(('continuation',), configuration([], {'tools': [FUNCTION]}, fast_mode=True), self.temp.name, FakeClient)
+        session.options()
+        await session.consume(stream_event('message_start', message={'usage': {'speed': 'fast', 'input_tokens': 4}}))
+        await session.consume(AssistantMessage([ToolUseBlock('sdk-id', 'mcp__codex__probe', {'value': 'x'})], MODEL))
+        await session.consume(stream_event('message_delta', usage={'output_tokens': 2}))
+        await session.consume(stream_event('message_stop'))
+        kind, calls = await session.queue.get()
+        self.assertEqual(kind, 'tools')
+        session.deliver(calls[0]['id'], 'RESULT')
+        await session.consume(stream_event('message_start', message={'usage': {'speed': 'fast'}}))
+        await session.consume(stream_event('content_block_delta', delta={'type': 'text_delta', 'text': 'RESULT'}))
+        await session.consume(stream_event('message_stop'))
+        await session.consume(ResultMessage('success', 1, 1, False, 2, 'sid', usage={'input_tokens': 10, 'output_tokens': 6}))
+        self.assertEqual(await session.queue.get(), ('text', 'RESULT'))
+        self.assertEqual(await session.queue.get(), ('done', {'input_tokens': 6, 'output_tokens': 4,
+                                                           'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0}))
+        self.assertEqual(session.effective['verified_messages'], 2)
+
+    async def test_fast_notification_stops_worker_and_preserves_failure_status(self):
+        FakeClient.scripted = [[SystemMessage('notification', {'message': 'Fast mode disabled · usage credits exhausted'}), 'UNVERIFIED']]
+        with self.assertRaises(CustomLLMError) as caught:
+            await self.tier_response('priority')
+        self.assertEqual(caught.exception.status_code, 403)
+        self.assertNotIn(self.key('chat'), self.provider.sessions)
+        saved = json.loads((Path(self.temp.name) / 'journals' / (digest(self.key('chat')) + '.json')).read_text())
+        self.assertTrue(saved['closed'])
+        self.assertEqual(saved['responses'], {})
+        self.assertEqual(saved['effective']['failure_status'], 403)
+
+    async def test_fast_unavailable_signals_preserve_status_without_logging_content(self):
+        for message, status in (
+            (SystemMessage('notification', {'message': 'Fast mode disabled · usage credits exhausted PRIVATE'}), 403),
+            (SystemMessage('notification', {'message': 'Fast mode cooldown PRIVATE'}), 429),
+            (RateLimitEvent(RateLimitInfo('rejected'), 'uuid', 'sid'), 429),
+            (RateLimitEvent(RateLimitInfo('allowed', overage_status='rejected'), 'uuid', 'sid'), 429),
+            (AssistantMessage([], MODEL, error='authentication_failed'), 401),
+            (ResultMessage('error', 1, 1, True, 1, 'sid', api_error_status=529), 529),
+        ):
+            session = Session(('error',), configuration([], {}, fast_mode=True), self.temp.name, FakeClient)
+            with self.assertLogs('claude_session', level='WARNING') as logs, self.assertRaises(CustomLLMError) as caught:
+                await session.consume(message)
+            self.assertEqual(caught.exception.status_code, status)
+            self.assertNotIn('PRIVATE', str(logs.output))
+            self.assertTrue(session.queue.empty())
+
+    async def test_fast_missing_message_metadata_cannot_complete(self):
+        session = Session(('missing',), configuration([], {}, fast_mode=True), self.temp.name, FakeClient)
+        with self.assertRaisesRegex(CustomLLMError, 'could not be verified'):
+            await session.consume(ResultMessage('success', 1, 1, False, 1, 'sid', usage={'speed': 'fast'}))
+
+    async def test_fast_speed_survives_pinned_sdk_parser(self):
+        from claude_agent_sdk._internal.message_parser import parse_message
+        session = Session(('parser',), configuration([], {}, fast_mode=True), self.temp.name, FakeClient)
+        event = parse_message({'type': 'stream_event', 'uuid': 'event', 'session_id': 'sid', 'event': {
+            'type': 'message_start', 'message': {'usage': {'speed': 'fast'}}}})
+        await session.consume(event)
+        self.assertTrue(session.speed_verified)
+        self.assertEqual(session.effective['speed'], 'fast')
 
     def key(self, name):
         return ('authenticated-test', name, 'default', MODEL, 'chat')
@@ -323,6 +533,23 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 model='claude/opus-5.5', input='hello', reasoning={'effort': 'high'}, stream=True)]
             self.assertTrue(any(e['type'] == 'response.completed' for e in events))
             self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'ANSWER')
+
+    async def test_pinned_router_uses_captured_fast_tier(self):
+        from litellm.utils import custom_llm_setup
+        FakeClient.scripted = [fast_script()]
+        token = REQUEST.set(REQUEST.get() | {'request': {'service_tier': 'priority'}})
+        try:
+            with patch.object(litellm, 'custom_provider_map', [{'provider': 'claudesdk', 'custom_handler': self.provider}]):
+                custom_llm_setup()
+                routes, _, _ = generate(json.loads(MANIFEST.read_text()), {}, {}, '')
+                router = litellm.Router(model_list=routes['model_list'], num_retries=0)
+                events = [e.model_dump() async for e in await router.aresponses(
+                    model='claude/opus-5.5', input='hello', service_tier='priority', stream=True)]
+                self.assertTrue(any(e['type'] == 'response.completed' for e in events))
+                self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'FAST')
+                self.assertTrue(json.loads(FakeClient.instances[-1].options.settings)['fastMode'])
+        finally:
+            REQUEST.reset(token)
 
     async def test_pinned_router_emits_reasoning_summaries(self):
         from litellm.utils import custom_llm_setup

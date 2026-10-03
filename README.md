@@ -194,10 +194,58 @@ ignore the SDK's environment block, which describes the worker's scratch directo
 The adapter supports streaming/nonstreaming Responses, inline PNG/JPEG/GIF/WebP
 images, JSON schema output, summarized reasoning, and client tools including
 namespaced functions and freeform patches. It does not fetch image URLs. Sampling,
-token-budget, verbosity, priority-tier and server-side Responses retrieval controls
+token-budget, verbosity and server-side Responses retrieval controls
 are rejected. Codex metadata and cache hints are accepted as transport metadata;
 they do not force a Claude cache policy. Opaque encrypted reasoning is not exported.
 Hosted search uses the shared ChatGPT-backed interceptor described below.
+
+### Claude Fast mode
+
+The Codex Fast toggle's `service_tier: "priority"` selects the worker-local
+Claude setting `fastMode: true`. Omitted, `auto`, and `default` tiers explicitly
+select standard speed. Other tiers are rejected. Global Claude settings and
+billing settings are never changed. Fast requires enabled usage credits on the
+Claude account; subscription limits do not cover it.
+
+Speed changes take effect on a new user turn after the previous turn finishes.
+The adapter replaces the worker using completed conversation history. Changing
+speed during a tool continuation returns a conflict without closing the worker
+or consuming its pending results; finish the turn at its original speed first.
+Request replay caches distinguish Fast from standard requests.
+
+Fast is strict: every generated message must report `usage.speed: "fast"` before
+its text, reasoning, or tools can be exposed. Missing speed evidence, a standard
+response, unavailable Fast, exhausted credits, or cooldown fails the request.
+The adapter never retries at standard speed. Claude's runtime can internally
+attempt a standard-speed retry before the adapter detects it; this does not
+guarantee that no fallback request or charge occurs. Speed confirmation delayed
+until later stream events delays delivery of buffered output.
+
+The existing private worker journal records requested/observed speed and the
+number of verified messages. Warning logs contain only sanitized failure labels
+and speed metadata. The opt-in acceptance probe reports those fields without
+printing credentials or conversation history:
+
+```sh
+uv run --no-sync scripts/verify_claude.py --isolated --fast-only
+```
+
+This **consumes paid Claude usage credits** and tests standard → Fast → standard
+through the real Codex app-server control, including shell execution and tool
+continuation. `--fast` adds the same checks to full isolated acceptance. Routine
+deployment checks do not request Fast. Missing runtime speed evidence or denied
+Fast access blocks Fast release; do not deploy on the strength of offline tests
+alone. Desktop toggle interaction remains a separate manual acceptance check.
+
+After isolated acceptance passes, commit and deploy through `deploy/deploy.yml`
+when Claude workers are idle: deployment restarts the proxy and ends in-memory
+workers. Then run `deploy/claude.yml` to activate the Claude catalog's Fast
+capability and restart the desktop connection to reload it. Without that catalog
+capability, Codex can suppress the requested tier before it reaches the adapter.
+Recover with the existing deployment/model-activation workflow; do not add a
+second backup mechanism.
+
+### Claude session behavior
 
 Direct clients must send `thread-id` or `x-claude-chat-id` on authenticated requests
 and supply full conversation history. Session identity also includes the caller,
