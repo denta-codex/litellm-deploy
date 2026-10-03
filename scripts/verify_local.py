@@ -18,11 +18,11 @@ NAME = SPEC['name']
 
 
 def image_fixture():
-    """Small deterministic red-left/blue-right PNG, with no image dependency."""
+    """1024px red-left/blue-right PNG, with no image dependency."""
     def chunk(kind, data):
         return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
-    pixels = (b'\x00' + b'\xff\x00\x00' * 112 + b'\x00\x00\xff' * 112) * 224
-    data = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 224, 224, 8, 2, 0, 0, 0))
+    pixels = (b'\x00' + b'\xff\x00\x00' * 512 + b'\x00\x00\xff' * 512) * 1024
+    data = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 1024, 1024, 8, 2, 0, 0, 0))
     data += chunk(b'IDAT', zlib.compress(pixels)) + chunk(b'IEND', b'')
     return 'data:image/png;base64,' + base64.b64encode(data).decode()
 

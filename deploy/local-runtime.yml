@@ -53,6 +53,10 @@
         - "{{ local_root }}/runtime/{{ local_model.runtime.version }}"
         - "{{ local_root }}/models/{{ local_model.revision }}"
         - "{{ litellm_config }}"
+    - name: Inspect verified runtime release
+      ansible.builtin.stat:
+        path: "{{ local_root }}/runtime/{{ local_model.runtime.version }}/verified.json"
+      register: runtime_installed
     - name: Download checksum-verified runtime archives
       ansible.builtin.get_url:
         url: "https://github.com/ggml-org/llama.cpp/releases/download/{{ local_model.runtime.version }}/{{ item.name }}"
@@ -61,14 +65,27 @@
         mode: '0600'
         timeout: 120
       loop: "{{ local_model.runtime.artifacts }}"
-      when: not ansible_check_mode
+      when: not ansible_check_mode and not runtime_installed.stat.exists
     - name: Extract pinned runtime and its CUDA libraries
       ansible.builtin.unarchive:
         src: "{{ local_root }}/staging/{{ item.name }}"
         dest: "{{ local_root }}/runtime/{{ local_model.runtime.version }}"
         remote_src: true
       loop: "{{ local_model.runtime.artifacts }}"
-      when: not ansible_check_mode
+      when: not ansible_check_mode and not runtime_installed.stat.exists
+    - name: Verify runtime executable before marking the release installed
+      ansible.builtin.command:
+        argv: ["{{ local_root }}/runtime/{{ local_model.runtime.version }}/llama-{{ local_model.runtime.version }}/llama-server", --version]
+      environment:
+        LD_LIBRARY_PATH: "{{ local_root }}/runtime/{{ local_model.runtime.version }}/cudart-llama-{{ local_model.runtime.version }}-bin-ubuntu-cuda-{{ local_model.runtime.cuda }}-x64"
+      changed_when: false
+      when: not ansible_check_mode and not runtime_installed.stat.exists
+    - name: Mark fully extracted checksum-verified runtime
+      ansible.builtin.copy:
+        content: "{{ local_model.runtime | to_nice_json }}\n"
+        dest: "{{ local_root }}/runtime/{{ local_model.runtime.version }}/verified.json"
+        mode: '0600'
+      when: not ansible_check_mode and not runtime_installed.stat.exists
     - name: Download checksum-verified model and vision projector
       ansible.builtin.get_url:
         url: "https://huggingface.co/{{ local_model.repository }}/resolve/{{ local_model.revision }}/{{ item.name }}"
