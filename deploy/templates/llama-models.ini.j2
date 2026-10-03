@@ -1,0 +1,15 @@
+version = 1
+
+[{{ local_model.name }}]
+model = {{ local_root }}/models/{{ local_model.revision }}/{{ local_model.artifacts[0].name }}
+mmproj = {{ local_root }}/models/{{ local_model.revision }}/{{ local_model.artifacts[1].name }}
+load-on-startup = false
+ctx-size = {{ local_model.context_window }}
+parallel = 1
+n-gpu-layers = 999
+fit = off
+flash-attn = on
+jinja = true
+reasoning = off
+sleep-idle-seconds = {{ local_model.idle_seconds }}
+cache-ram = 0

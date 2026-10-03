@@ -75,6 +75,13 @@
           ansible.builtin.debug:
             msg: "{{ 'Refresh complete. Restart Grace through the owning Codex desktop to load the updated model picker.' if (discovery.stdout | from_json).catalog_changed else 'Refresh complete. No desktop restart required.' }}"
       rescue:
+        - name: Stop rejected local inference service
+          ansible.builtin.systemd_service:
+            name: "{{ refresh_failure_service }}"
+            state: stopped
+            enabled: false
+          become: true
+          when: refresh_failure_service is defined
         - name: Restore previous model files
           ansible.builtin.command:
             argv: "{{ refresh_command + ['rollback'] }}"
@@ -101,6 +108,13 @@
     - name: Recover an interrupted refresh explicitly
       when: refresh_action == 'rollback' and not ansible_check_mode
       block:
+        - name: Stop local inference during explicit recovery
+          ansible.builtin.systemd_service:
+            name: "{{ refresh_failure_service }}"
+            state: stopped
+            enabled: false
+          become: true
+          when: refresh_failure_service is defined
         - name: Restore pending refresh files
           ansible.builtin.command:
             argv: "{{ refresh_command + ['rollback'] }}"

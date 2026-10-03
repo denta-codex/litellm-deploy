@@ -1,0 +1,25 @@
+[Unit]
+Description=Local Qwen inference with automatic idle unloading
+After=network.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User={{ litellm_user }}
+Group={{ litellm_user }}
+WorkingDirectory={{ local_root }}
+Environment=HOME={{ litellm_home }}
+Environment=LLAMA_CACHE={{ local_root }}/cache
+Environment=LD_LIBRARY_PATH={{ local_root }}/runtime/{{ local_model.runtime.version }}/cudart-llama-{{ local_model.runtime.version }}-bin-ubuntu-cuda-{{ local_model.runtime.cuda }}-x64
+ExecStart={{ local_root }}/runtime/{{ local_model.runtime.version }}/llama-{{ local_model.runtime.version }}/llama-server --host 127.0.0.1 --port {{ local_model.port }} --models-preset {{ litellm_config }}/llama-models.ini --models-max 1 --models-autoload --no-webui --timeout 300
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=30
+KillMode=control-group
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
