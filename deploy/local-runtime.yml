@@ -102,11 +102,19 @@
                --check, "{{ local_model.chat_template.upstream_sha256 }}"]
       changed_when: false
       when: not ansible_check_mode
+    - name: Inspect committed chat template override
+      ansible.builtin.stat:
+        path: "{{ source_root }}/deploy/files/{{ local_model.chat_template.name }}"
+        checksum_algorithm: sha256
+      register: chat_template_source
+    - name: Require the override recorded in the manifest
+      ansible.builtin.assert:
+        that: chat_template_source.stat.checksum == local_model.chat_template.sha256
+        fail_msg: Chat template override does not match scripts/local-model.json sha256.
     - name: Install chat template override
       ansible.builtin.copy:
         src: "{{ source_root }}/deploy/files/{{ local_model.chat_template.name }}"
         dest: "{{ litellm_config }}/{{ local_model.chat_template.name }}"
-        checksum: "{{ local_model.chat_template.sha256 }}"
         mode: '0600'
       register: chat_template
     - name: Install model preset
