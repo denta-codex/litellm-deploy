@@ -270,6 +270,11 @@ class Session:
         if self.config['choice'] not in ('auto', 'none'):
             system += '\nYou must call an available tool before answering this request.'
         format_tools = ['StructuredOutput'] if self.config['output_format'] else []
+        # Live Fast success remains unverified for this subscription adapter as of
+        # 2026-10-03: the test account's $20/month Pro plan does not include Fast
+        # usage; it requires separately paid usage credits. The live probe hit a
+        # rejected SDK rate-limit signal, not a confirmed Fast response. Offline
+        # tests cover the adapter contract; this is not a blanket Pro access ban.
         return ClaudeAgentOptions(model=MODEL, tools=format_tools, mcp_servers={'codex': create_sdk_mcp_server('codex', tools=definitions)},
             allowed_tools=format_tools + [MCP_PREFIX + t.name for t in definitions], permission_mode='dontAsk',
             hooks={'PreToolUse': [HookMatcher(hooks=[before_tool])]}, strict_mcp_config=True, setting_sources=[],
