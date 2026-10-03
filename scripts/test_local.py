@@ -1,6 +1,7 @@
 """Offline local-route ownership and acceptance-fixture regression tests."""
 import copy
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -24,6 +25,12 @@ class LocalTests(unittest.TestCase):
             {'model_name': 'modal/example', 'litellm_params': {'model': 'openai/example'}}],
             'general_settings': {'master_key': 'os.environ/LITELLM_MASTER_KEY'}}
         self.catalog = {'models': [{'slug': 'chatgpt/astra'}, {'slug': 'codex-auto-review', 'visibility': 'hide'}]}
+
+    def test_chat_template_override_matches_manifest(self):
+        override = Path(__file__).parents[1] / 'deploy/files' / self.spec['chat_template']['name']
+        data = override.read_bytes()
+        self.assertEqual(hashlib.sha256(data).hexdigest(), self.spec['chat_template']['sha256'])
+        self.assertNotIn(b'System message must be at the beginning', data)
 
     def test_preserves_other_providers_and_converges(self):
         originals = copy.deepcopy((self.config, self.catalog))

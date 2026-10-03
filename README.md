@@ -582,6 +582,18 @@ minutes on cold start, with no automatic inference retries. Only the direct-answ
 reasoning choice is advertised initially. Shared search uses the existing cloud
 subscription helper; ordinary inference is local.
 
+The GGUF's built-in Qwen chat template rejects a system or developer message
+after the first user turn, which Codex sends on every desktop request. llama.cpp
+therefore loads `deploy/files/qwen3.8-27b-chat-template.jinja`: the embedded
+template with only that check changed to render a normal system turn. Deployment
+stops if the model's embedded template no longer matches `upstream_sha256` in
+`scripts/local-model.json`. To regenerate after a model update, run
+`uv run --no-project scripts/gguf_template.py <model.gguf> --extract deploy/files/qwen3.8-27b-chat-template.jinja`
+(it prints the new `upstream_sha256`), reapply the header comment and the
+one-line change, then update `sha256`. Remove the override, its preset line,
+and the manifest entry once upstream accepts mid-conversation system messages
+(llama.cpp #27367); the late-system probe in `verify_local.py` stays.
+
 From a clean committed checkout on Grace:
 
 ```sh

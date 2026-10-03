@@ -97,6 +97,12 @@ class Probe:
     def smoke(self):
         text = self.request([{'role': 'user', 'content': 'Reply with exactly LOCAL_QWEN_OK.'}])
         assert 'LOCAL_QWEN_OK' in (text.get('content') or ''), text
+        # Codex sends developer context after user turns; the stock Qwen template rejected it.
+        late = self.request([{'role': 'system', 'content': 'You are a test assistant.'}, {'role': 'user', 'content': 'Hello.'},
+                             {'role': 'developer', 'content': 'Reply with exactly LOCAL_LATE_SYSTEM_OK.'},
+                             {'role': 'user', 'content': 'Go.'}])
+        assert 'LOCAL_LATE_SYSTEM_OK' in (late.get('content') or ''), late
+        print('PASS late system message', flush=True)
         tools = [{'type': 'function', 'function': {'name': 'set_light', 'description': 'Set a room light.', 'parameters': {
             'type': 'object', 'properties': {'room': {'type': 'string', 'enum': ['kitchen', 'hallway']},
             'state': {'type': 'string', 'enum': ['on', 'off']}}, 'required': ['room', 'state'], 'additionalProperties': False}}}]
