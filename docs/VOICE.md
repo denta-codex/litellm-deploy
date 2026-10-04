@@ -1,6 +1,7 @@
 # Subscription voice on Grace — client contract v1
 
 This document is the handoff and replacement guide; no chat history is required.
+Deployment and observed acceptance results are recorded in [VOICE-ACCEPTANCE.md](VOICE-ACCEPTANCE.md).
 The target is stock Codex **0.159.2**, LiteLLM **1.102.1**, voice model
 `gpt-live-1-codex`, and initial voice `cove`. The adapter supports the single-user
 Grace deployment, using its existing private gateway master credential. It does
