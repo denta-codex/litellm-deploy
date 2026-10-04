@@ -142,7 +142,8 @@ async def run(args):
     recorder = MediaRecorder(str(args.output))
     ready = asyncio.Event()
     report = {'schema':1, 'transport':'webrtc', 'control_transport':'unix' if args.socket else 'remote-wss', 'voice':'cove', 'connected':False,
-              'audio_frames':0, 'audible_frames':0, 'transcripts':[], 'commands':[], 'errors':[], 'stopped':False}
+              'audio_frames':0, 'audible_frames':0, 'transcripts':[], 'commands':[],
+              'agent_messages':[], 'event_order':[], 'errors':[], 'stopped':False}
     pc.addTrack(InputTrack(audio, ready))
     channel = pc.createDataChannel('oai-events')
     @channel.on('message')
@@ -198,10 +199,16 @@ async def run(args):
                 await pc.setRemoteDescription(RTCSessionDescription(sdp=p['sdp'], type='answer'))
             elif method == 'thread/realtime/transcript/done':
                 report['transcripts'].append({'role':p['role'], 'text':p['text']})
+                report['event_order'].append({'type':'transcript', 'index':len(report['transcripts']) - 1})
                 print(p['role'] + ': ' + p['text'], flush=True)
             elif method == 'item/completed' and p.get('item', {}).get('type') == 'commandExecution':
                 item = p['item']
                 report['commands'].append({k:item.get(k) for k in ('command','aggregatedOutput','exitCode')})
+                report['event_order'].append({'type':'command', 'index':len(report['commands']) - 1})
+            elif method == 'item/completed' and p.get('item', {}).get('type') == 'agentMessage':
+                item = p['item']
+                report['agent_messages'].append({k:item.get(k) for k in ('text','phase')})
+                report['event_order'].append({'type':'agent_message', 'index':len(report['agent_messages']) - 1})
             elif method == 'thread/realtime/error':
                 report['errors'].append({'source':'codex', 'code':'realtime_error'})
                 break

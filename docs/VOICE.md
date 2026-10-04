@@ -156,7 +156,9 @@ uv run --script scripts/voice_client.py --input question.wav --output answer.wav
   --receipt receipt.json --duration 60
 ```
 
-The receipt contains transcripts and command results; it and audio outputs are
+The receipt contains transcripts, command results, Codex agent messages, and
+their observed event order to help investigate tool-to-speech discrepancies;
+it and audio outputs are
 private artifacts, not routine server logs. Use synthetic speech for automated
 tests. `--say 'Read exactly these words aloud: ...'` can generate a spoken fixture.
 The real acceptance invocation must use `--input`, with no text prompt supplying

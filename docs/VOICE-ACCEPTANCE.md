@@ -18,9 +18,8 @@ on port 4000; the temporary candidate on port 48769 was stopped.
 | Protocol/security and recovery | 17 focused offline tests passed, covering authorization, malformed/bounded offers, invalid handles, attachment retry/duplicates, capacity, expiry, cancellation, shutdown races, refresh failure, and targeted rollback. Ansible syntax and installed-file/config verification passed. |
 | Existing functionality | Live authentication/catalog/streaming/function-result checks passed. Stock Codex native search, shell execution and resume/context checks passed. Running app-server validation confirmed the pinned executable, ChatGPT identity, and absence of the proxy key in shell tools. |
 
-The full offline suite before the final shutdown-race additions passed 157 tests
-with one existing optional skip; all 17 voice/rollout tests passed after those
-additions.
+The final pre-merge offline suite passed 159 tests with one existing optional
+skip. This includes all 17 voice/rollout tests.
 
 ## Observed limitation
 
