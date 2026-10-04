@@ -25,6 +25,14 @@
       ansible.builtin.stat:
         path: "{{ litellm_state }}/model-refresh"
       register: pending_refresh
+    - name: Inspect pending voice acceptance
+      ansible.builtin.stat:
+        path: "{{ litellm_state }}/voice-rollout.json"
+      register: pending_voice
+    - name: Require voice acceptance or recovery before general deployment
+      ansible.builtin.assert:
+        that: not pending_voice.stat.exists
+        fail_msg: Finish or roll back the pending deploy/voice.yml transaction first.
     - name: Require completed model refresh or recovery
       ansible.builtin.assert:
         that: not pending_refresh.stat.exists
@@ -80,7 +88,7 @@
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py, shared_search.py]
+      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py, shared_search.py, live_voice.py]
       notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
@@ -88,7 +96,7 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py']
+      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py', 'live_voice.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"

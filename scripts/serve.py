@@ -13,6 +13,9 @@ def main():
     from claude_provider import install as install_claude
     from litellm.proxy.proxy_server import app
     install_claude(app)
+    # Temporary subscription signaling adapter; retirement steps: docs/VOICE.md.
+    from live_voice import install as install_voice
+    install_voice(app)
     from shared_search import install as install_search
     install_search()
     from litellm.proxy.proxy_cli import run_server
