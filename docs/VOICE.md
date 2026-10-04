@@ -161,6 +161,11 @@ their observed event order to help investigate tool-to-speech discrepancies;
 it and audio outputs are
 private artifacts, not routine server logs. Use synthetic speech for automated
 tests. `--say 'Read exactly these words aloud: ...'` can generate a spoken fixture.
+This is an interactive voice session, not a dedicated text-to-speech engine: it
+may continue beyond the requested quotation or execute its instructions. Inspect
+the generation receipt and recording before reuse. The input fixture must contain
+only the user's question; exclude any assistant acknowledgement, tool answer, or
+later speech. Do not count an `ok` generation receipt as fixture validation.
 The real acceptance invocation must use `--input`, with no text prompt supplying
 the question. `--require-tool --expect 'unpredictable test value'` requires a real
 successful command, matching command output, and a matching spoken transcript.

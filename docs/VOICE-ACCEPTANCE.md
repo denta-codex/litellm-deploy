@@ -35,6 +35,27 @@ the voice model, or mark that first test as passing. Client UI should retain the
 actual Codex tool result for inspection. Do not automatically replay failed tool
 requests to mask this issue.
 
+Follow-up fixture inspection found that the interactive `--say` generation path
+can read the question aloud and then execute it, adding its own answer to the
+recording. A newly generated fixture contained a file-missing answer after the
+question. This is a plausible source of contaminated test input; the original
+recording had already been removed, so it cannot establish that attempt's cause.
+Three trials with a question-only cut also exposed filename recognition errors:
+the requested path was heard as `/tmp/voice.txt`, and both Codex and voice
+correctly reported that different path missing. These are not reproductions of
+the successful-command/wrong-speech mismatch. Validate generated audio fixtures
+and distinguish recognition errors from tool-result fidelity.
+
+A further three concurrent trials used an inspected question-only recording and
+the simple filename `proof` in the client's working directory. All three command
+results and Codex final written answers contained the correct four-word value.
+Two spoken transcripts matched exactly; one shortened four repeated words to
+two. That failure narrows this reproduced discrepancy to after Codex's written
+answer, in the voice handoff/output path. It does not isolate handoff versus
+voice synthesis/transcription, and no server transport fix is claimed. The
+private receipts include written answers and event order; synthetic input/output
+audio for these follow-up trials is retained with the investigation evidence.
+
 ## Records and recovery
 
 Private receipts, including both production attempts, concurrent-client checks,
