@@ -31,6 +31,15 @@ Application files live under `~/.local/share/litellm`, configuration under
 `~/.config/litellm`, and mutable state under `~/.local/state/litellm`.
 The root-owned unit is `/etc/systemd/system/litellm.service`.
 
+### Subscription voice
+
+The repository includes a narrow stock-Codex WebRTC signaling/control adapter
+inside LiteLLM. Initial activation uses `deploy/voice.yml`, with targeted recovery
+and actual desktop acceptance before finalization. Client audio travels directly
+over WebRTC; Grace does not run an audio bridge. See [the voice handoff and
+replacement guide](docs/VOICE.md) for the pinned contract, reference client,
+verification, rollback, and migration to future upstream LiteLLM support.
+
 ### Browser capability
 
 The `browser/` package supplies a conversation-scoped stdio MCP wrapper around
@@ -862,3 +871,62 @@ To also verify error presentation with an installed stock Codex binary, set
 `CODEX_ERROR_TEST_BINARY` to its absolute path when running
 `test_responses_errors.py`; the test uses a loopback fixture and synthetic
 credentials, without modifying existing chats.
+
+### Subscription voice experiment — October 4, 2026
+
+The selected architecture puts WebRTC on the client (including the planned Echo
+Dot client). Stock Codex on Grace owns conversations, reasoning, tool execution,
+and voice delegation. The client uses Codex's existing app-server control
+connection for session startup and SDP negotiation; WebRTC carries audio between
+the client and the upstream voice service. Grace retains subscription credentials
+and performs signaling/control routing. Do not add a Grace audio bridge or move
+client audio capture, playback, buffering, or interruption handling onto Grace.
+
+An isolated stock Codex 0.159.2 server and the existing subscription credentials
+passed WebRTC speech input/output with `gpt-live-1-codex` and `cove`. A spoken
+request to run `printf` was delegated through the existing LiteLLM text route:
+Codex executed `printf 'voice test'`, returned exit code 0 and output `voice test`,
+and the voice service subsequently spoke “Ran it—output is voice test.” No Codex
+source patch or separately billed API credential was used.
+
+The temporary `scripts/experimental_voice_gateway.py` supplied missing call
+creation and sideband routes on a separate authenticated loopback listener. It
+is a diagnostic prototype, not an installed service or a general LiteLLM adapter.
+The temporary listener and disposable Codex test servers have been stopped;
+production gateway and Codex configuration were not changed. The intended server
+change is narrow subscription signaling/control support in the gateway, with
+audio transport and device behavior implemented by the client.
+
+The direct WebRTC probe requesting `marin` received “Voice session access
+denied”; changing only the voice to `cove` established the session. The standalone
+subscription audio WebSocket remained denied with `cove`. Those failures do not
+establish that the subscription lacks voice access, and that standalone route is
+not a dependency of the selected architecture. The accepted WebSocket sideband
+attaches to an already-created WebRTC call and is a different route.
+
+Remaining validation includes the actual desktop microphone/speaker experience,
+client WebRTC compatibility and resource use on the Dot, interruption and echo
+handling, and reconnect/lifecycle behavior. One earlier spoken trial produced an
+empty delegation transcript; a subsequent trial completed the full tool round
+trip. These successful prototype tests do not establish unattended reliability.
+
+Subsequent desktop evidence supplied by the user on October 4:
+
+- Local Mac chat **Respond to greeting**, ID
+  `01a1082d-3f54-7581-b401-eb7d5c5dd3c3`, has a completed realtime transcript-tail
+  handoff: user “Hey, can you hear me”; assistant “Yeah, I can hear you clearly.”
+  Its host is `local` and its workspace is
+  `/Users/andrew/Documents/Codex/2026-10-04/hel`. This verifies an actual desktop
+  spoken exchange on the Mac. The retrieved history does not record its precise
+  media transport, voice selection, or provider configuration.
+- Archived Grace chat **hello**, ID
+  `01a1082d-a9e5-7a01-9b90-f437a5297dd4`, belongs to
+  `/home/agent/workspaces/card_studio_deno`. Its history contains a successful
+  text greeting only. The user's accompanying screenshot shows voice startup
+  failing with HTTP 404 at `http://127.0.0.1:4000/v1/live`. This is the installed
+  gateway's missing call-creation route; it is not a subscription denial and
+  does not test whether the audio transport would subsequently work.
+
+The desktop microphone/speaker experience is therefore demonstrated for the
+local Mac chat; it remains unverified through Grace's installed gateway. Keep
+these two chats separate when assessing what has actually been deployed.

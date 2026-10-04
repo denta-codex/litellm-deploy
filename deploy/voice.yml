@@ -1,0 +1,66 @@
+- name: Deploy or recover subscription voice on Grace
+  hosts: grace
+  gather_facts: true
+  vars:
+    voice_action: preview
+    source_root: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Validate destination and action
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.hostname == 'grace'
+          - ansible_facts.user_id == litellm_user
+          - voice_action in ['preview', 'prepare', 'verify', 'rollback', 'finish']
+          - voice_action != 'finish' or (voice_desktop_validated | default(false) | bool)
+
+    - name: Apply the targeted voice transaction
+      ansible.builtin.command:
+        argv: "{{ [litellm_uv, 'run', '--no-sync', '--project', litellm_root, source_root ~ '/scripts/voice_rollout.py', voice_action, '--source', source_root] + (['--receipt', voice_receipt, '--desktop-validated'] if voice_action == 'finish' else []) }}"
+      register: voice_result
+      changed_when: "(voice_result.stdout | from_json).changed | default(false)"
+      check_mode: false
+      when: not ansible_check_mode or voice_action == 'preview'
+
+    - name: Restart and verify the selected gateway, restoring failed preparation
+      when: voice_action in ['prepare', 'verify', 'rollback'] and not ansible_check_mode
+      block:
+        - name: Restart the gateway after staging or restoring voice files
+          ansible.builtin.systemd_service:
+            name: litellm.service
+            state: restarted
+          become: true
+          when: voice_action in ['prepare', 'rollback'] and voice_result.changed
+        - name: Verify gateway liveness
+          ansible.builtin.uri:
+            url: http://127.0.0.1:4000/health/liveliness
+          register: voice_health
+          until: voice_health.status == 200
+          retries: 20
+          delay: 2
+      rescue:
+        - name: Restore a failed preparation from its targeted journal
+          ansible.builtin.command:
+            argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/voice_rollout.py", rollback, --source, "{{ source_root }}"]
+          when: voice_action == 'prepare'
+        - name: Restart the restored gateway
+          ansible.builtin.systemd_service:
+            name: litellm.service
+            state: restarted
+          become: true
+          when: voice_action == 'prepare'
+        - name: Verify restored gateway liveness
+          ansible.builtin.uri:
+            url: http://127.0.0.1:4000/health/liveliness
+          register: restored_health
+          until: restored_health.status == 200
+          retries: 20
+          delay: 2
+          when: voice_action == 'prepare'
+        - name: Stop after failed voice activation
+          ansible.builtin.fail:
+            msg: Voice activation failed. Preparation was rolled back when possible; inspect any retained journal before retrying.
+
+    - name: Report voice transaction
+      ansible.builtin.debug:
+        msg: "{{ voice_result.stdout | from_json }}"
+      when: voice_result.stdout is defined
