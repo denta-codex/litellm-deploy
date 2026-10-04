@@ -1,0 +1,251 @@
+- name: Stage, prepare, activate, verify, or roll back Grace's browser capability
+  hosts: grace
+  gather_facts: true
+  vars:
+    codex_browser_action: preview
+    source_root: "{{ playbook_dir }}/.."
+    browser_root: "{{ litellm_home }}/.local/share/codex-browser"
+    browser_state: "{{ litellm_home }}/.local/state/codex-browser"
+    browser_skill: "{{ litellm_home }}/.codex/skills/browser"
+    browser_node: "{{ litellm_home }}/.local/share/mise/installs/node/26.8.1/bin/node"
+    browser_npm: "{{ litellm_home }}/.local/share/mise/installs/node/26.8.1/bin/npm"
+    browser_dropin: /etc/systemd/system/codex-app-server.service.d/40-browser.conf
+  tasks:
+    - name: Validate target and action
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.hostname == 'grace'
+          - ansible_facts.user_id == litellm_user
+          - codex_browser_action in ['preview', 'stage', 'prepare', 'activate', 'verify', 'rollback', 'finish']
+
+    - name: Calculate the immutable source release
+      ansible.builtin.command:
+        argv: ["{{ browser_node }}", "{{ source_root }}/browser/scripts/manifest.mjs"]
+      register: browser_manifest
+      changed_when: false
+      check_mode: false
+
+    - name: Select release
+      ansible.builtin.set_fact:
+        browser_release_dir: "{{ browser_root }}/releases/{{ (browser_manifest.stdout | from_json).release }}"
+
+    - name: Preview deployment
+      ansible.builtin.debug:
+        msg:
+          action: "{{ codex_browser_action }}"
+          release: "{{ browser_release_dir }}"
+          skill: "{{ browser_skill }}"
+          restart: "{{ codex_browser_action in ['activate', 'rollback'] }}"
+          config_toml: unchanged
+
+    - name: Inspect existing integration paths
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        follow: false
+      loop: ["{{ browser_root }}/current", "{{ browser_root }}/previous", "{{ browser_skill }}", "{{ browser_dropin }}", "{{ browser_release_dir }}/.ready"]
+      register: browser_paths
+
+    - name: Refuse to overwrite an unrelated browser skill or unmanaged integration
+      ansible.builtin.assert:
+        that:
+          - not browser_paths.results[0].stat.exists or (browser_paths.results[0].stat.islnk | default(false) and browser_paths.results[0].stat.lnk_source.startswith(browser_root ~ '/releases/'))
+          - not browser_paths.results[1].stat.exists or (browser_paths.results[1].stat.islnk | default(false) and browser_paths.results[1].stat.lnk_source.startswith(browser_root ~ '/releases/'))
+          - not browser_paths.results[2].stat.exists or (browser_paths.results[2].stat.islnk | default(false) and browser_paths.results[2].stat.lnk_target == browser_root ~ '/current/skill/browser')
+      when: codex_browser_action != 'preview'
+
+    - name: Read an existing service registration
+      ansible.builtin.slurp:
+        src: "{{ browser_dropin }}"
+      register: browser_existing_dropin
+      when: browser_paths.results[3].stat.exists
+
+    - name: Require ownership of the service registration
+      ansible.builtin.assert:
+        that: (browser_existing_dropin.content | b64decode) == lookup('ansible.builtin.template', 'templates/codex-browser.conf.j2')
+      when: browser_paths.results[3].stat.exists and codex_browser_action != 'preview'
+
+    - name: Stage the browser package without restarting or registering tools
+      when: codex_browser_action == 'stage'
+      block:
+        - name: Create private installation directories
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: '0700'
+          loop: ["{{ browser_root }}", "{{ browser_root }}/releases", "{{ browser_release_dir }}", "{{ browser_release_dir }}/bin", "{{ browser_state }}"]
+
+        - name: Copy release sources
+          ansible.builtin.copy:
+            src: "{{ source_root }}/browser/{{ item }}"
+            dest: "{{ browser_release_dir }}/"
+            mode: preserve
+          loop: [package.json, package-lock.json, tsconfig.json, src, skill, scripts, test]
+          when: not browser_paths.results[4].stat.exists
+
+        - name: Install pinned dependencies without lifecycle scripts
+          ansible.builtin.command:
+            argv: ["{{ browser_npm }}", ci, --ignore-scripts, --no-audit, --no-fund]
+            chdir: "{{ browser_release_dir }}"
+          environment:
+            PATH: "{{ browser_node | dirname }}:/usr/bin:/bin"
+          when: not browser_paths.results[4].stat.exists and not ansible_check_mode
+
+        - name: Compile the release
+          ansible.builtin.command:
+            argv: ["{{ browser_npm }}", run, build]
+            chdir: "{{ browser_release_dir }}"
+          environment:
+            PATH: "{{ browser_node | dirname }}:/usr/bin:/bin"
+          when: not browser_paths.results[4].stat.exists and not ansible_check_mode
+
+        - name: Install the release launcher
+          ansible.builtin.template:
+            src: templates/codex-browser-launcher.j2
+            dest: "{{ browser_release_dir }}/bin/browser"
+            mode: '0700'
+
+        - name: Verify the installed release with disposable browser fixtures
+          ansible.builtin.command:
+            argv: ["{{ browser_node }}", --test, test/session.test.mjs]
+            chdir: "{{ browser_release_dir }}"
+          changed_when: false
+          when: not browser_paths.results[4].stat.exists and not ansible_check_mode
+
+        - name: Mark the validated release ready
+          ansible.builtin.copy:
+            content: "{{ (browser_manifest.stdout | from_json).release }}\n"
+            dest: "{{ browser_release_dir }}/.ready"
+            mode: '0600'
+          when: not ansible_check_mode
+
+    - name: Require a staged release before registration
+      ansible.builtin.assert:
+        that: browser_paths.results[4].stat.exists
+        fail_msg: Run the stage action first.
+      when: codex_browser_action in ['prepare', 'activate']
+
+    - name: Register the staged browser release
+      when: codex_browser_action in ['prepare', 'activate']
+      block:
+        - name: Retain the previous managed release for rollback
+          ansible.builtin.file:
+            src: "{{ browser_paths.results[0].stat.lnk_source }}"
+            dest: "{{ browser_root }}/previous"
+            state: link
+            force: true
+          when: browser_paths.results[0].stat.exists and browser_paths.results[0].stat.lnk_source != browser_release_dir
+
+        - name: Select the new release
+          ansible.builtin.file:
+            src: "{{ browser_release_dir }}"
+            dest: "{{ browser_root }}/current"
+            state: link
+            force: true
+          register: browser_selected
+
+        - name: Register the skill
+          ansible.builtin.file:
+            src: "{{ browser_root }}/current/skill/browser"
+            dest: "{{ browser_skill }}"
+            state: link
+            # In check mode the preceding current symlink has not actually been created.
+            force: "{{ ansible_check_mode }}"
+          register: browser_skill_registered
+
+        - name: Create the service drop-in directory
+          ansible.builtin.file:
+            path: "{{ browser_dropin | dirname }}"
+            state: directory
+            mode: '0755'
+          become: true
+
+        - name: Register browser MCP on the app-server
+          ansible.builtin.template:
+            src: templates/codex-browser.conf.j2
+            dest: "{{ browser_dropin }}"
+            mode: '0644'
+          become: true
+          register: browser_registered
+
+    - name: Restore the previous managed release
+      ansible.builtin.file:
+        src: "{{ browser_paths.results[1].stat.lnk_source }}"
+        dest: "{{ browser_root }}/current"
+        state: link
+        force: true
+      when: codex_browser_action == 'rollback' and browser_paths.results[1].stat.exists
+      register: browser_restored
+
+    - name: Remove first-install browser registration on rollback
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: ["{{ browser_dropin }}", "{{ browser_skill }}", "{{ browser_root }}/current"]
+      become: true
+      when: codex_browser_action == 'rollback' and not browser_paths.results[1].stat.exists
+      register: browser_removed
+
+    - name: Reload prepared service configuration without restarting
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+      become: true
+      when: codex_browser_action == 'prepare'
+
+    - name: Restart only for explicit activation or rollback
+      ansible.builtin.systemd_service:
+        name: codex-app-server.service
+        daemon_reload: true
+        state: restarted
+      become: true
+      when: >-
+        codex_browser_action == 'activate' or
+        (codex_browser_action == 'rollback' and
+        (browser_restored.changed | default(false) or browser_removed.changed | default(false)))
+
+    - name: Verify the active browser release
+      ansible.builtin.command:
+        argv: ["{{ browser_node }}", --test, test/session.test.mjs]
+        chdir: "{{ browser_root }}/current"
+      changed_when: false
+      when: codex_browser_action == 'verify' and not ansible_check_mode
+
+    - name: Identify the running app-server process
+      ansible.builtin.command:
+        argv: [systemctl, show, codex-app-server.service, --property=MainPID, --value]
+      register: browser_live_pid
+      changed_when: false
+      when: codex_browser_action == 'verify'
+
+    - name: Require a running app-server
+      ansible.builtin.assert:
+        that: browser_live_pid.stdout | int > 0
+      when: codex_browser_action == 'verify'
+
+    - name: Inspect the running process rather than just the prepared unit
+      ansible.builtin.command:
+        argv: [cat, "/proc/{{ browser_live_pid.stdout | trim }}/cmdline"]
+      register: browser_live_command
+      changed_when: false
+      when: codex_browser_action == 'verify'
+
+    - name: Require browser registration on the running service
+      ansible.builtin.assert:
+        that: browser_root ~ '/current/bin/browser' in browser_live_command.stdout
+      when: codex_browser_action == 'verify'
+
+    - name: Require successful adoption before retiring recovery state
+      ansible.builtin.assert:
+        that: codex_browser_validated | default(false) | bool
+      when: codex_browser_action == 'finish'
+
+    - name: Remove the superseded release after validation
+      ansible.builtin.file:
+        path: "{{ browser_paths.results[1].stat.lnk_source }}"
+        state: absent
+      when: codex_browser_action == 'finish' and browser_paths.results[1].stat.exists and browser_paths.results[0].stat.exists and browser_paths.results[1].stat.lnk_source != browser_paths.results[0].stat.lnk_source
+
+    - name: Retire the rollback pointer after successful adoption
+      ansible.builtin.file:
+        path: "{{ browser_root }}/previous"
+        state: absent
+      when: codex_browser_action == 'finish'

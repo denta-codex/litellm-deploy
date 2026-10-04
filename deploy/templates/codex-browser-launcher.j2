@@ -1,0 +1,6 @@
+#!/bin/sh
+# Managed browser entry point. Resolve the immutable release even across upgrades.
+set -eu
+export CODEX_BROWSER_STATE_DIR={{ browser_state | quote }}
+export CODEX_BROWSER_EXECUTABLE=/usr/bin/chromium
+exec {{ browser_node | quote }} {{ (browser_release_dir ~ '/dist/index.js') | quote }}

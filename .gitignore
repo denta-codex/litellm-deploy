@@ -2,3 +2,6 @@
 __pycache__/
 *.retry
 .claude-acceptance-*/
+.browser-acceptance-*/
+browser/node_modules/
+browser/dist/

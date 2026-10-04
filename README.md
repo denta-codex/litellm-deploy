@@ -31,6 +31,100 @@ Application files live under `~/.local/share/litellm`, configuration under
 `~/.config/litellm`, and mutable state under `~/.local/state/litellm`.
 The root-owned unit is `/etc/systemd/system/litellm.service`.
 
+### Browser capability
+
+The `browser/` package supplies a conversation-scoped stdio MCP wrapper around
+Playwright MCP 0.0.83, plus a progressively loaded `browser` skill. It connects
+directly to stock Codex; LiteLLM still carries only model traffic. Grace's existing
+code-mode host keeps browser tool schemas out of initial model context and exposes
+them through `ALL_TOOLS` when requested. A lightweight MCP process can initialize
+for discovery; Chromium starts only on a browser operation. There is no desktop,
+Steel, remote browser account, live viewer, or Android update dependency.
+
+Hosted search remains the default for research. Website interaction uses browser
+tools, and full skill instructions load only when selected. Screenshots are MCP
+image content for the agent; code-mode callers must forward them with `image()`.
+The API-based `defer_loading` flag is not added to Codex configuration: acceptance
+verifies the installed code-mode discovery behavior on the real LiteLLM route.
+
+`browser_session` accepts `status`, `open`, or `close`. Default browsing is isolated
+and in memory. Explicit `open` with `mode: "saved"` and a profile name uses persistent
+website storage. Profile names contain 1–64 lowercase letters, digits, underscores,
+or hyphens, starting with a letter or digit. A saved profile is exclusively locked
+to one conversation until close or idle expiry. Profiles do not import personal
+browser logins; human takeover is not implemented. No arbitrary Node-code execution
+tool is exposed. Browser page evaluation is available; it is not a host shell.
+
+Browsers close after 15 idle minutes. Tabs and isolated cookies are then gone;
+saved profile storage remains. Profile changes and restart recovery explicitly
+invalidate prior tab/element references. Uncertain actions are never automatically
+replayed. Automatic screenshots, snapshots, and downloads live in temporary session
+directories: copy deliverables to the authorized workspace before closing. Named
+profiles live under `~/.local/state/codex-browser/profiles/` with owner-only access.
+Browser subprocesses do not inherit model-provider credentials; operational logs
+do not record page contents or tool payloads.
+
+Use Grace's managed Node 26.8.1, Chromium, and Ansible. No toolchain installer is
+run. The separate Ansible workflow defaults to preview:
+
+```sh
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=stage --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=stage
+```
+
+Stage installs a content-addressed release under `~/.local/share/codex-browser/`,
+runs its disposable browser fixtures, and marks it ready. Repeating stage for the
+same sources does not rebuild or restart anything. It does not register the skill
+or MCP. Failed staging leaves that one release directory for diagnosis/retry;
+remove it if abandoning the attempt. There are no whole-home/config backups.
+
+After isolated acceptance passes, prepare the registration without interrupting
+active conversations. Prepare selects the release, registers the skill and MCP,
+and reloads systemd configuration, but leaves the running app-server untouched:
+
+```sh
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=prepare --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=prepare
+```
+
+When ready, restart with `sudo systemctl restart codex-app-server.service`, or use
+the activate action below. **Activation and rollback can restart the live
+app-server.** Activation also performs preparation if it was not done separately:
+
+```sh
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=activate --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=activate
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=verify
+```
+
+Activation registers the skill and adds `40-browser.conf` to the systemd app-server
+drop-ins; the base runtime unit and user-managed `~/.codex/config.toml` are unchanged.
+Repeated stage or prepare actions do not restart. Activate explicitly restarts,
+including after preparation. Verify runs the
+active release's browser fixture suite; the separate model-path test below verifies
+discovery, image understanding, and continuation using an isolated app-server.
+
+`-e codex_browser_action=rollback` restores the previous browser release, or removes
+the registration on first-install rollback. Saved profiles are retained. After
+successful adoption, `-e codex_browser_action=finish -e codex_browser_validated=true`
+removes the superseded release and rollback pointer. Other unused staged releases
+can be removed once no current/previous pointer references them.
+
+Development and acceptance:
+
+```sh
+npm --prefix browser ci --ignore-scripts --no-audit --no-fund
+npm --prefix browser test
+node browser/scripts/verify-codex.mjs
+```
+
+The model-path check uses the existing encrypted proxy credential in memory and
+the configured `chatgpt/gpt-6-astra` route. It keeps only request-shape booleans,
+not transcripts or credentials, and removes its isolated Codex home afterward.
+`BROWSER_TEST_MODEL` and `BROWSER_TEST_CODEX` select another installed model/binary
+for compatibility validation. It does not alter or restart the live app-server.
+
 ### ChatGPT Responses customization
 
 `scripts/chatgpt_responses.py` subclasses the pinned upstream adapter and changes

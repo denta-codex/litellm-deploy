@@ -1,0 +1,4 @@
+# Managed by litellm-deploy/deploy/browser.yml
+[Service]
+ExecStart=
+ExecStart={{ litellm_root }}/scripts/codex-launcher -c features.code_mode_host=true -c 'mcp_servers.browser.command="{{ browser_root }}/current/bin/browser"' -c 'mcp_servers.browser.startup_timeout_sec=30' app-server --listen unix://
