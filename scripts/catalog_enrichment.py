@@ -128,7 +128,12 @@ def parse_openai(markdown):
 
 
 def _fetch(url, maximum):
-    with urllib.request.urlopen(url, timeout=10) as response:
+    # models.dev rejects urllib's default agent; identify the refresh client.
+    request = urllib.request.Request(url, headers={
+        'User-Agent': 'litellm-deploy-model-refresh/1',
+        'Accept': 'application/json' if url == MODELS_DEV_URL else 'text/markdown',
+    })
+    with urllib.request.urlopen(request, timeout=10) as response:
         data = response.read(maximum + 1)
     if len(data) > maximum:
         raise ValueError('Pricing source too large')

@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from catalog_enrichment import (HEADER, OPENAI_URL, MODELS_DEV_URL, enrich_catalog,
-                                fetch_sources, parse_openai, validate_metadata)
+                                fetch_sources, parse_openai, validate_metadata, _fetch)
 
 AT = '2026-10-05T00:00:00Z'
 LATER = '2026-10-05T01:00:00Z'
@@ -129,6 +129,21 @@ class EnrichmentTests(unittest.TestCase):
         self.config['model_list'][0]['model_info'] = {'catalog_pricing': {'aliases': ['claude/opus']}}
         with self.assertRaisesRegex(ValueError, 'Ambiguous'):
             self.enrich()
+
+    def test_public_source_fetch_identifies_client_and_bounds_response(self):
+        with patch('catalog_enrichment.urllib.request.urlopen') as open_url:
+            response = open_url.return_value.__enter__.return_value
+            response.read.return_value = b'{}'
+            self.assertEqual(_fetch(MODELS_DEV_URL, 100), b'{}')
+            request = open_url.call_args.args[0]
+            self.assertEqual(request.full_url, MODELS_DEV_URL)
+            self.assertEqual(request.get_header('User-agent'), 'litellm-deploy-model-refresh/1')
+            self.assertEqual(request.get_header('Accept'), 'application/json')
+            self.assertEqual(open_url.call_args.kwargs['timeout'], 10)
+            response.read.assert_called_once_with(101)
+            response.read.return_value = b'123'
+            with self.assertRaisesRegex(ValueError, 'too large'):
+                _fetch(MODELS_DEV_URL, 2)
 
     def test_official_tables_include_tiers_context_cache_rates_and_reject_incomplete_or_duplicate_data(self):
         result = parse_openai(markdown())
