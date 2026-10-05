@@ -38,10 +38,17 @@ def main():
         if not key or any(c.isspace() for c in key):
             raise ValueError('Invalid LiteLLM proxy credential')
         token = modal_token((credentials / 'modal-inference-token').read_text())
+        cerebras = credentials / 'cerebras-api-key'
+        cerebras_key = cerebras.read_text().strip() if cerebras.exists() else None
+        if cerebras_key is not None and (not cerebras_key or any(c.isspace() for c in cerebras_key)):
+            raise ValueError('Invalid Cerebras credential')
     except (KeyError, OSError, ValueError):
         sys.exit('Cannot load LiteLLM systemd credentials; check the encrypted credential files.')
     os.environ['LITELLM_MASTER_KEY'] = key
     os.environ['MODAL_API_KEY'] = token
+    os.environ.pop('CEREBRAS_API_KEY', None)
+    if cerebras_key is not None:
+        os.environ['CEREBRAS_API_KEY'] = cerebras_key
     server = Path(__file__).with_name('serve.py')
     port = sys.argv[2] if len(sys.argv) > 2 else '4000'
     os.execv(sys.executable, [sys.executable, str(server), '--config', sys.argv[1], '--port', port])
