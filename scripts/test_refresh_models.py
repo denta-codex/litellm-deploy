@@ -288,6 +288,7 @@ class ActivationTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
         self.refresh = Refresh(self.home, self.home / 'runtime', 'uv')
+        self.refresh.pricing_sources = lambda: {'openai': None, 'models_dev': None}
         self.refresh.state.mkdir(parents=True)
         (self.home / '.codex').mkdir()
         (self.home / '.codex/config.toml').write_text('model_provider="litellm"\nmodel="chatgpt/astra"\n')
@@ -338,6 +339,64 @@ class ActivationTests(unittest.TestCase):
             result = self.refresh.prepare()
         self.assertFalse(result['any_changes'])
         run.assert_not_called()
+
+    def install_inventory_baseline(self):
+        candidate = self.refresh.candidate(self.snapshot)
+        for name, text in candidate['candidates'].items():
+            self.refresh.paths[name].write_text(text)
+        self.originals = self.refresh.originals()
+
+    def test_pricing_only_publication_skips_inference_and_routing_changes(self):
+        self.install_inventory_baseline()
+        self.refresh.pricing_sources = lambda: {'openai': {'astra': [{
+            'tier': 'standard', 'context': 'short', 'input_per_million': 2, 'output_per_million': 10}]},
+            'models_dev': {}}
+        summary = self.prepare()
+        self.assertTrue(summary['enrichment_changed'])
+        self.assertTrue(summary['catalog_document_changed'])
+        self.assertFalse(summary['catalog_changed'])
+        self.assertFalse(summary['routing_changed'])
+        self.assertFalse(summary['test_reviewer'])
+        self.assertEqual(summary['test_models'], [])
+        self.refresh.activate()
+        with patch('refresh_models.subprocess.run') as run:
+            self.assertEqual(self.refresh.validate(), {'validated': []})
+            run.assert_not_called()
+        self.refresh.finish()
+        published = self.refresh.originals()
+        self.assertEqual(published['config'], self.originals['config'])
+        self.assertEqual(json.loads(published['catalog'])['models'], json.loads(self.originals['catalog'])['models'])
+        row = next(r for r in json.loads(published['catalog'])['remote_codex']['models'] if r['model'] == 'chatgpt/astra')
+        self.assertEqual(row['pricing']['rates'][0]['input_per_million'], 2)
+        with patch.object(self.refresh, 'pricing_sources', side_effect=AssertionError('Unexpected source refresh')):
+            self.assertTrue(self.refresh.check_snapshot()['snapshot_present'])
+            self.assertFalse(self.refresh.candidate(self.snapshot)['summary']['any_changes'])
+        self.assertEqual(published, self.refresh.originals())
+
+    def test_pricing_publication_and_recovery_preserve_concurrent_catalog_edit(self):
+        self.install_inventory_baseline()
+        self.prepare()
+        self.refresh.activate()
+        with patch('refresh_models.subprocess.run') as run:
+            self.refresh.validate()
+            run.assert_not_called()
+        edited = json.loads(self.refresh.paths['catalog'].read_text())
+        edited['concurrent_editor'] = True
+        self.refresh.paths['catalog'].write_text(encode(edited))
+        with self.assertRaisesRegex(ValueError, 'refusing to overwrite'):
+            self.refresh.finish()
+        with self.assertRaisesRegex(ValueError, 'Concurrent edit'):
+            self.refresh.rollback()
+        self.assertEqual(json.loads(self.refresh.paths['catalog'].read_text()), edited)
+
+    def test_two_refreshes_cannot_own_the_same_transaction(self):
+        self.install_inventory_baseline()
+        self.prepare()
+        other = Refresh(self.home, self.home / 'runtime', 'uv')
+        with self.assertRaisesRegex(ValueError, 'Unfinished refresh'):
+            other.prepare()
+        self.assertEqual(self.refresh.originals(), self.originals)
+        self.refresh.rollback()
 
     def test_reviewer_failure_blocks_publication_and_rolls_back(self):
         self.prepare()
