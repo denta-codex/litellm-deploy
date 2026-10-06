@@ -176,10 +176,15 @@ async def run(args):
             params['threadId'] = args.thread_id
             result = await rpc.call('thread/resume', params)
         else:
-            params['ephemeral'] = True
+            params['ephemeral'] = not args.persist
+            params['projectId'] = None
             result = await rpc.call('thread/start', params)
         tid = result['thread']['id']
         report['thread_id'] = tid
+        report['model_provider'] = result['thread'].get('modelProvider')
+        report['model'] = result['thread'].get('model')
+        report['project_id'] = result['thread'].get('projectId')
+        report['ephemeral'] = result['thread'].get('ephemeral')
         await pc.setLocalDescription(await pc.createOffer())
         await rpc.call('thread/realtime/start', {'threadId':tid, 'version':'v3', 'voice':'cove',
                        'outputModality':'audio', 'includeStartupContext':False,
@@ -249,6 +254,8 @@ def main():
     parser.add_argument('--socket', type=Path, help='Diagnostic local Unix app-server socket instead of remote WSS')
     parser.add_argument('--voice-base', help='Diagnostic per-thread voice gateway override')
     parser.add_argument('--thread-id')
+    parser.add_argument('--persist', action='store_true',
+                        help='Retain a new projectless speech conversation for history/UI acceptance')
     parser.add_argument('--model', help='Optional existing Codex text-model alias')
     parser.add_argument('--cwd', type=Path, default=Path('/tmp'))
     parser.add_argument('--input', type=Path)
@@ -259,6 +266,8 @@ def main():
     parser.add_argument('--expect', help='Required phrase in the spoken answer')
     parser.add_argument('--require-tool', action='store_true')
     args = parser.parse_args()
+    if args.persist and (args.say or args.thread_id or not args.input):
+        parser.error('--persist requires --input and a new thread, without --say')
     if not 1 <= args.duration <= 300:
         parser.error('duration must be between 1 and 300 seconds')
     try:

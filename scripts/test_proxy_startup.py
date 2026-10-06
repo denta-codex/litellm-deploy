@@ -77,6 +77,14 @@ class Backend(BaseHTTPRequestHandler):
 
 
 class StartupTests(unittest.TestCase):
+    def test_voice_route_is_registered_by_production_startup(self):
+        # A healthy text proxy can still have lost its voice startup hook.
+        # GET never creates a call; a registered POST route returns 405, not 404.
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(self.base + '/v1/live', timeout=5)
+        self.assertEqual(caught.exception.code, 405)
+        caught.exception.close()
+
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory(prefix='litellm-startup-')

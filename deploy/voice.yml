@@ -37,6 +37,12 @@
           until: voice_health.status == 200
           retries: 20
           delay: 2
+        - name: Verify subscription voice registration without creating a call
+          ansible.builtin.uri:
+            url: http://127.0.0.1:4000/v1/live
+            method: GET
+            status_code: 405
+          when: voice_action in ['prepare', 'verify']
       rescue:
         - name: Restore a failed preparation from its targeted journal
           ansible.builtin.command:

@@ -166,6 +166,12 @@
       retries: 20
       delay: 2
       when: not ansible_check_mode
+    - name: Verify subscription voice registration without creating a call
+      ansible.builtin.uri:
+        url: http://127.0.0.1:4000/v1/live
+        method: GET
+        status_code: 405
+      when: not ansible_check_mode
   handlers:
     - name: Restart LiteLLM
       ansible.builtin.systemd_service:
