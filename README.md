@@ -40,6 +40,36 @@ over WebRTC; Grace does not run an audio bridge. See [the voice handoff and
 replacement guide](docs/VOICE.md) for the pinned contract, reference client,
 verification, rollback, and migration to future upstream LiteLLM support.
 
+### Mobile follow-up suggestions through Cerebras
+
+The suggestions-only route `cerebras/qwen-3.8-27b` uses stock LiteLLM's Cerebras
+provider with reasoning disabled. It is separate from the Codex working model
+and does not add an entry to the coding model picker. Subscription refreshes
+preserve the route and its no-retry policy.
+
+The inventory enables Cerebras credential loading. On an explicitly authorized
+deployment, `deploy.yml` imports `CEREBRAS_API_KEY` from the ignored
+`/home/agent/workspaces/remote-codex/.env` into the root-owned encrypted systemd
+credential `/etc/credstore.encrypted/cerebras-api-key`. Existing credentials are
+retained; provisioning never rotates or replaces them. The plaintext key is
+passed to encryption on stdin and loaded only into LiteLLM's process environment.
+Set `litellm_cerebras_enabled=false` to deploy without Cerebras credentials.
+
+After deploying the updated service files, explicitly activate the route:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/cerebras.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/cerebras.yml
+```
+
+Activation shares the existing model-refresh lock, validates a bounded JSON
+suggestion completion, and rolls back routing on failure. Recover an interrupted
+Cerebras activation with `deploy/cerebras.yml -e refresh_action=rollback`.
+Neither an Android credential nor a public LiteLLM endpoint is required: the
+client uses stock `command/exec` over its existing WSS connection, and the host
+authenticates to localhost LiteLLM with its existing proxy credential. Operational
+logs contain neither prompts nor generated messages.
+
 ### Browser capability
 
 The `browser/` package supplies a conversation-scoped stdio MCP wrapper around

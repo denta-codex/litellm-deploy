@@ -11,5 +11,8 @@ all:
       litellm_uv: /home/agent/.local/share/mise/installs/uv/0.12.11/.mise-bins/uv
       litellm_model: chatgpt/gpt-6-astra
       litellm_modal_credential: /etc/credstore.encrypted/codex-gateway-modal
+      litellm_cerebras_enabled: true
+      litellm_cerebras_credential: /etc/credstore.encrypted/cerebras-api-key
+      litellm_cerebras_env_file: /home/agent/workspaces/remote-codex/.env
       codex_version: 0.159.2
       codex_mise: /usr/bin/mise
