@@ -14,5 +14,7 @@ all:
       litellm_cerebras_enabled: true
       litellm_cerebras_credential: /etc/credstore.encrypted/cerebras-api-key
       litellm_cerebras_env_file: /home/agent/workspaces/remote-codex/.env
+      litellm_bedrock_enabled: true
+      litellm_bedrock_credential: /etc/credstore.encrypted/litellm-bedrock-aws
       codex_version: 0.159.2
       codex_mise: /usr/bin/mise

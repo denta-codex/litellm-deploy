@@ -31,6 +31,86 @@ Application files live under `~/.local/share/litellm`, configuration under
 `~/.config/litellm`, and mutable state under `~/.local/state/litellm`.
 The root-owned unit is `/etc/systemd/system/litellm.service`.
 
+### Selected AWS Bedrock models
+
+Bedrock is an explicit allowlist of `bedrock/opus-5.5` and
+`bedrock/gpt-6.1-sol`, displayed as **Claude Opus 5.5 (AWS Bedrock)** and
+**GPT 6.1 Sol (AWS Bedrock)**. Each uses its exact US inference profile in
+`us-east-1`; unavailable models are reported without substitutions. These routes
+are billed to AWS. The default and existing subscription routes stay as configured.
+The picker uses a conservative 200,000-token context window for both models.
+
+Before paid validation, verify the account's credit terms include Bedrock
+foundation-model usage. Provisioning uses the existing locked environment's AWS
+SDK and `op-bridge`; no AWS keys are written to a profile, YAML, or Git. Supply
+literal 1Password references for only the access-key and secret-key fields. The
+temporary setup identity needs `IAMFullAccess` and `AmazonBedrockFullAccess`.
+Do not use root access keys.
+
+```sh
+uv run --no-sync python scripts/provision_bedrock.py enroll \
+  --account-id ACCOUNT_ID \
+  --access-key-ref 'op://VAULT/ITEM_ID/ACCESS_KEY_ID' \
+  --secret-key-ref 'op://VAULT/ITEM_ID/SECRET_ACCESS_KEY' \
+  --company COMPANY --website https://example.com --industry Software \
+  --use-case 'Internal coding assistance through a private LiteLLM proxy.'
+
+uv run --no-sync python scripts/provision_bedrock.py provision \
+  --account-id ACCOUNT_ID \
+  --access-key-ref 'op://VAULT/ITEM_ID/ACCESS_KEY_ID' \
+  --secret-key-ref 'op://VAULT/ITEM_ID/SECRET_ACCESS_KEY'
+```
+
+Enrollment submits Anthropic's first-use form for internal use if none exists,
+then activates the selected public usage-based model agreements. Pending
+agreements are checked without resubmission. Wait for AWS to finish activation
+before provisioning. New-account verification can separately block inference even
+after agreements become available; leave routes unpublished until live validation
+passes. An uncertain write must be inspected before retrying.
+
+The dedicated runtime IAM user defaults to `litellm-grace`. Its inline policy
+permits invocation only of selected profiles and their exact regional foundation
+models, plus the reads required to recheck those models. There are no Marketplace
+or IAM administration permissions in normal operation. The credential pair is
+encrypted into `/etc/credstore.encrypted/litellm-bedrock-aws`; systemd exposes it
+only to LiteLLM. The launcher scrubs ambient AWS authentication. The provisioning
+record under `~/.local/state/litellm/bedrock-provision.json` contains identity
+metadata for finishing or recovering this operation, not the secret key.
+
+Once provisioned, enable `litellm_bedrock_enabled` in the inventory, commit the
+source, run the ordinary deployment, and activate the routes:
+
+```sh
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml
+```
+
+Activation shares the model-refresh lock, validates streaming, tools, stock Codex,
+and hosted search before publishing the picker, and restores prior routes on
+failure. Recover an interrupted activation with `deploy/bedrock.yml
+-e refresh_action=rollback`. Subscription refreshes preserve these routes.
+Hosted search uses the existing ChatGPT helper; it does not add another AWS model
+or make the search helper's usage part of AWS billing.
+
+After activation succeeds, retire the temporary setup user and remove the completed
+provisioning record:
+
+```sh
+uv run --no-sync python scripts/provision_bedrock.py retire \
+  --account-id ACCOUNT_ID \
+  --access-key-ref 'op://VAULT/ITEM_ID/ACCESS_KEY_ID' \
+  --secret-key-ref 'op://VAULT/ITEM_ID/SECRET_ACCESS_KEY'
+```
+
+Retirement refuses to remove an identity with unrelated policies, groups, keys,
+or console access. For the brief deletion operation only, it grants the runtime
+user permission to delete that exact bootstrap identity and removes the cleanup
+policy afterward. It does not edit the source 1Password item. Failed provisioning
+retains only its encrypted credential and metadata record when needed for recovery;
+do not create replacement access keys to work around an unfinished operation.
+
 ### Mobile follow-up suggestions through Cerebras
 
 The suggestions-only route `cerebras/qwen-3.8-27b` uses stock LiteLLM's Cerebras

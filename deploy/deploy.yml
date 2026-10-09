@@ -28,7 +28,7 @@
     - name: Require completed model refresh or recovery
       ansible.builtin.assert:
         that: not pending_refresh.stat.exists
-        fail_msg: Recover the pending transaction with its original playbook (claude.yml, modal.yml, cerebras.yml or refresh-models.yml) -e refresh_action=rollback before deploying.
+        fail_msg: Recover the pending transaction with its original playbook (bedrock.yml, claude.yml, modal.yml, cerebras.yml or refresh-models.yml) -e refresh_action=rollback before deploying.
     - name: Inspect existing model refresh utility
       ansible.builtin.stat:
         path: "{{ litellm_root }}/scripts/refresh_models.py"
@@ -50,6 +50,32 @@
       changed_when: false
       check_mode: false
       when: installed_cerebras.stat.exists
+    - name: Inspect installed Bedrock configuration utility
+      ansible.builtin.stat:
+        path: "{{ litellm_root }}/scripts/configure_bedrock.py"
+      register: installed_bedrock
+    - name: Verify saved Bedrock routing before ordinary deployment
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_bedrock.py", check-snapshot]
+      changed_when: false
+      check_mode: false
+      when: installed_bedrock.stat.exists
+    - name: Inspect encrypted Bedrock runtime credential
+      ansible.builtin.stat:
+        path: "{{ litellm_bedrock_credential }}"
+        get_checksum: false
+        get_mime: false
+      become: true
+      register: bedrock_credential
+      when: litellm_bedrock_enabled | default(false)
+    - name: Require the provisioned private Bedrock credential
+      ansible.builtin.assert:
+        that:
+          - bedrock_credential.stat.exists
+          - bedrock_credential.stat.isreg | default(false)
+          - bedrock_credential.stat.uid | default(-1) == 0
+          - bedrock_credential.stat.mode | default('') == '0600'
+      when: litellm_bedrock_enabled | default(false)
     - name: Inspect retained encrypted Modal inference credential
       ansible.builtin.stat:
         path: "{{ litellm_modal_credential }}"
@@ -90,7 +116,7 @@
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py, shared_search.py]
+      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, bedrock_aws.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py, shared_search.py]
       notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
@@ -98,7 +124,7 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py']
+      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'bedrock_aws.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"
