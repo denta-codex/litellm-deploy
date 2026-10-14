@@ -13,6 +13,8 @@ Environment=CHATGPT_TOKEN_DIR={{ litellm_state }}/chatgpt
 Environment=CLAUDE_ADAPTER_STATE={{ litellm_state }}/claude
 Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
 Environment=LITELLM_TELEMETRY=False
+Environment=COMPACTION_FALLBACK_ENABLED={{ (compaction_fallback_enabled | default(false) | bool) | ternary('true', 'false') }}
+Environment=COMPACTION_MODEL_CATALOG={{ litellm_config }}/codex-models.json
 Environment=UV_OFFLINE=1
 Environment=UV_PYTHON_DOWNLOADS=never
 LoadCredentialEncrypted=litellm-proxy-key:/etc/credstore.encrypted/litellm-proxy-key

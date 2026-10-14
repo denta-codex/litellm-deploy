@@ -464,6 +464,18 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             REQUEST.reset(token)
         self.assertEqual(len(self.provider.sessions), 3)
 
+    async def test_canonical_compaction_metadata_uses_separate_worker(self):
+        await self.response()
+        context = REQUEST.get()
+        token = REQUEST.set(context | {'request': {'client_metadata': {
+            'x-codex-turn-metadata': '{"request_kind":"compaction","context_window_id":"new"}'}}})
+        try:
+            await self.response()
+        finally:
+            REQUEST.reset(token)
+        self.assertEqual(len(self.provider.sessions), 2)
+        self.assertTrue(any(key[-1] == 'compaction' for key in self.provider.sessions))
+
     async def test_hook_preserves_sdk_identity_and_arguments(self):
         session = Session(('hook',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
         options = session.options()

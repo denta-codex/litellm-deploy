@@ -116,7 +116,7 @@
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, bedrock_aws.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py, shared_search.py]
+      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, bedrock_aws.py, claude-cli, claude_context.py, claude_session.py, claude_provider.py, shared_search.py, compaction_fallback.py]
       notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
@@ -124,7 +124,7 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'bedrock_aws.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py']
+      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'bedrock_aws.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py', 'compaction_fallback.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"

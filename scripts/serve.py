@@ -15,6 +15,8 @@ def main():
     install_claude(app)
     from shared_search import install as install_search
     install_search()
+    from compaction_fallback import install as install_compaction
+    install_compaction()
     from litellm.proxy.proxy_cli import run_server
 
     # Multiple workers/reload would import upstream in fresh processes and lose

@@ -107,6 +107,27 @@ class CaptureRequest:
             REQUEST.reset(token)
 
 
+def codex_turn_metadata(request=None):
+    """Current Codex uses client_metadata; the header remains a compatibility projection."""
+    context = REQUEST.get()
+    raw = context.get('request', {})
+    for source in (raw, request or {}):
+        client = source.get('client_metadata') or {}
+        if not isinstance(client, dict):
+            continue
+        if 'x-codex-turn-metadata' in client:
+            metadata = json.loads(client['x-codex-turn-metadata'])
+            if not isinstance(metadata, dict):
+                raise ValueError('Invalid Codex turn metadata')
+            return metadata
+        if 'request_kind' in client:
+            return client
+    metadata = json.loads(context.get('headers', {}).get('x-codex-turn-metadata', '{}'))
+    if not isinstance(metadata, dict):
+        raise ValueError('Invalid Codex turn metadata')
+    return metadata
+
+
 def identity(model, params):
     context = REQUEST.get()
     headers = context.get('headers', {})
@@ -115,7 +136,7 @@ def identity(model, params):
     if not caller or not chat:
         raise ValueError('Claude requires an authenticated request and thread-id or x-claude-chat-id')
     try:
-        metadata = json.loads(headers.get('x-codex-turn-metadata', '{}'))
+        metadata = codex_turn_metadata()
     except (TypeError, ValueError):
         raise ValueError('Invalid x-codex-turn-metadata') from None
     if not isinstance(metadata, dict):
