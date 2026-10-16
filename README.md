@@ -570,13 +570,22 @@ and passes the same checks.
 ### Compaction recovery
 
 `compaction_fallback_enabled` in the deployment inventory enables the repository's
-compaction-only recovery wrapper. The service projects it as
+compaction-only recovery wrapper. Its owned systemd drop-in projects it as
 `COMPACTION_FALLBACK_ENABLED`; setting the inventory flag to `false` and repeating
-`deploy/deploy.yml` restores ordinary dispatch without changing Codex or model
+`deploy/deploy.yml --tags compaction-recovery` restores ordinary dispatch without changing Codex or model
 discovery. `COMPACTION_MODEL_CATALOG` points at the same saved catalog used by the
 desktop picker. The wrapper reloads that catalog for each compaction and intersects
 it with active router deployments, so existing model-refresh playbooks also update
 future fallback candidates without another list to maintain.
+
+`ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --tags compaction-recovery`
+installs only the compaction runtime, verifier, and service drop-in, then restarts
+LiteLLM and checks liveness. Use this tag to activate recovery independently of
+other pending runtime or provider updates. The tagged deployment inserts the
+compaction installation after shared search in the existing launcher, preserving
+other active integrations such as voice. Ordinary deployment installs the complete
+repository launcher, which already includes compaction recovery; the targeted
+insertion is only for this staged rollout.
 
 Only requests explicitly marked `request_kind=compaction` enter recovery. Current
 Codex transports that marker in `client_metadata["x-codex-turn-metadata"]`; the
