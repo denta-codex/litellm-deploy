@@ -49,6 +49,9 @@ def generate(source, config, catalog, selected):
         raise ValueError('Selected local model disappeared; select another model first')
     before = {m['slug']: m for m in catalog.get('models', []) if m['slug'].startswith(PREFIX)}
     old_routes = {r['model_name']: r for r in config.get('model_list', []) if r['model_name'].startswith(PREFIX)}
+    policy = old_routes.get(name, {}).get('model_info', {}).get('catalog_pricing')
+    if policy is not None:
+        route['model_info']['catalog_pricing'] = copy.deepcopy(policy)
     new_config, new_catalog = copy.deepcopy(config), copy.deepcopy(catalog)
     new_config['model_list'] = [r for r in new_config.get('model_list', []) if not r['model_name'].startswith(PREFIX)] + [route]
     new_catalog['models'] = [m for m in new_catalog.get('models', []) if not m['slug'].startswith(PREFIX)] + [entry]
@@ -76,8 +79,8 @@ class LocalSetup(Refresh):
         version = subprocess.check_output([self.codex, '--version'], text=True).strip().removeprefix('codex-cli ')
         return {'version': 1, 'codex_version': version, 'catalog': json.loads(MANIFEST.read_text())}
 
-    def candidate(self, snapshot):
-        candidate = super().candidate(snapshot)
+    def candidate(self, snapshot, refresh_pricing=False):
+        candidate = super().candidate(snapshot, refresh_pricing=refresh_pricing)
         previous = json.loads(candidate['originals']['snapshot'] or '{}')
         if previous.get('catalog') != snapshot['catalog']:
             candidate['summary']['test_models'] = candidate['summary']['after']

@@ -57,6 +57,14 @@ class LocalTests(unittest.TestCase):
         self.assertTrue(entry['supports_search_tool'])
         self.assertFalse(entry['prefer_websockets'])
 
+    def test_explicit_pricing_policy_survives_local_regeneration(self):
+        config, catalog, _ = generate(self.spec, self.config, self.catalog, '')
+        policy = {'zero_rate': True, 'aliases': ['local-qwen']}
+        config['model_list'][-1]['model_info']['catalog_pricing'] = policy
+        regenerated, _, result = generate(self.spec, config, catalog, '')
+        self.assertEqual(regenerated['model_list'][-1]['model_info']['catalog_pricing'], policy)
+        self.assertEqual(result['test_models'], [])
+
     def test_route_or_capability_edits_require_revalidation(self):
         config, catalog, _ = generate(self.spec, self.config, self.catalog, '')
         config['model_list'][-1]['litellm_params']['timeout'] = 30
@@ -79,6 +87,7 @@ class LocalActivationTests(LocalTests):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.refresh = LocalSetup(self.home, self.home / 'runtime', 'uv')
+        self.refresh.pricing_sources = lambda: {'openai': None, 'models_dev': None}
         self.refresh.state.mkdir(parents=True)
         (self.home / '.codex').mkdir()
         (self.home / '.codex/config.toml').write_text('model_provider="litellm"\nmodel="chatgpt/astra"\n')
