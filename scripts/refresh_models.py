@@ -265,8 +265,7 @@ class Refresh:
         journal = json.loads((self.transaction / 'journal.json').read_text())
         owner = journal.get('prefix', PREFIX)
         if owner != self.prefix:
-            playbook = {'modal/': 'modal.yml', 'claude/': 'claude.yml', 'cerebras/': 'cerebras.yml',
-                        'bedrock/': 'bedrock.yml', PREFIX: 'refresh-models.yml'}.get(owner)
+            playbook = {'modal/': 'modal.yml', 'claude/': 'claude.yml', PREFIX: 'refresh-models.yml'}.get(owner)
             if playbook is None:
                 raise ValueError(f'Unknown pending transaction owner: {owner}')
             raise ValueError(f'Pending transaction belongs to {owner}; recover with {playbook} -e refresh_action=rollback')

@@ -107,7 +107,6 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.directory.cleanup)
         self.requests = []
         self.mixed = False
-        self.bedrock = False
         self.repeat = False
         self.parallel_searches = 1
         self.backend = Backend()
@@ -134,8 +133,6 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         litellm.in_memory_llm_clients_cache.flush_cache()
 
     def upstream(self, request):
-        if self.bedrock:
-            return self.bedrock_upstream(request)
         self.assertEqual(request.headers['authorization'], 'Bearer modal-only')
         body = json.loads(request.content)
         self.requests.append(body)
@@ -157,72 +154,6 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         return httpx.Response(200, json={'id': 'chatcmpl-fixture', 'object': 'chat.completion', 'created': 1,
             'model': 'fixture', 'choices': [{'index': 0, 'message': message, 'finish_reason': reason}],
             'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}})
-
-    def use_bedrock(self, profile='us.anthropic.claude-opus-5-5'):
-        self.bedrock = True
-        from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
-        handler = AsyncHTTPHandler()
-        original_client = handler.client
-        self.addAsyncCleanup(original_client.aclose)
-        handler.client = self.client
-        http_patch = patch('litellm.llms.bedrock.chat.converse_handler.get_async_httpx_client', return_value=handler)
-        http_patch.start()
-        self.addCleanup(http_patch.stop)
-        self.router = litellm.Router(model_list=[{'model_name': 'bedrock/fixture', 'litellm_params': {
-            'model': 'bedrock/converse/' + profile,
-            'aws_access_key_id': 'AKIA' + 'A' * 16, 'aws_secret_access_key': 'B' * 40,
-            'aws_region_name': 'us-east-1', 'use_chat_completions_api': True,
-            'allowed_openai_params': ['tools', 'tool_choice', 'reasoning_effort'], 'num_retries': 0}}], num_retries=0)
-
-    def bedrock_upstream(self, request):
-        self.assertIn('bedrock-runtime.us-east-1.amazonaws.com', str(request.url))
-        self.assertTrue(request.headers['authorization'].startswith('AWS4-HMAC-SHA256 '))
-        body = json.loads(request.content)
-        self.requests.append(body)
-        results = [c['toolResult'] for m in body['messages'] for c in m['content'] if 'toolResult' in c]
-        if results:
-            self.assertIn('BLUE', json.dumps(results))
-            content = [{'text': 'BLUE: https://example.com/fact'}]
-            reason = 'end_turn'
-        else:
-            names = [t['toolSpec']['name'] for t in body['toolConfig']['tools']]
-            self.assertIn(SEARCH_NAME, names)
-            content = [{'toolUse': {'toolUseId': 'call_search', 'name': SEARCH_NAME,
-                                   'input': {'query': 'fixture fact'}}}]
-            if self.mixed:
-                content.append({'toolUse': {'toolUseId': 'call_client', 'name': 'probe', 'input': {}}})
-            reason = 'tool_use'
-        return httpx.Response(200, json={'output': {'message': {'role': 'assistant', 'content': content}},
-            'stopReason': reason, 'usage': {'inputTokens': 10, 'outputTokens': 5, 'totalTokens': 15},
-            'metrics': {'latencyMs': 1}}, headers={'x-amzn-requestid': 'fixture-bedrock-request'})
-
-    async def test_bedrock_converse_search_uses_real_signed_transport_and_loop(self):
-        self.use_bedrock()
-        response = await self.call(model='bedrock/fixture')
-        self.assertEqual(len(self.requests), 2)
-        self.assertEqual(self.backend.queries, ['fixture fact'])
-        self.assertTrue(any(i['type'] == 'web_search_call' for i in response['output']))
-        self.assertFalse(any(i.get('name') == SEARCH_NAME for i in response['output']))
-        text = ''.join(p.get('text', '') for i in response['output'] for p in i.get('content', []))
-        self.assertIn('BLUE', text)
-        self.assertEqual(response['usage']['input_tokens'], 20)
-
-    async def test_bedrock_streamed_mixed_search_preserves_client_tool(self):
-        self.use_bedrock()
-        self.mixed = True
-        events = await self.call(model='bedrock/fixture', stream=True)
-        final = next(e['response'] for e in events if e['type'] == 'response.completed')
-        self.assertTrue(any(i['type'] == 'web_search_call' for i in final['output']))
-        self.assertTrue(any(i['type'] == 'function_call' and i['name'] == 'probe' for i in final['output']))
-        self.assertEqual(len(self.requests), 1)
-
-    async def test_bedrock_gpt_reasoning_and_tools_work_without_a_cost_map_entry(self):
-        self.use_bedrock('us.openai.gpt-6.1-sol')
-        response = await self.call(model='bedrock/fixture', reasoning={'effort': 'low'})
-        self.assertEqual(len(self.requests), 2)
-        self.assertEqual(self.backend.queries, ['fixture fact'])
-        self.assertEqual(self.requests[0]['additionalModelRequestFields']['reasoning']['effort'], 'low')
-        self.assertTrue(any(i['type'] == 'web_search_call' for i in response['output']))
 
     def use_claude(self, session_factory):
         """Route claude/opus-5.5 through the real provider with a fake SDK session."""

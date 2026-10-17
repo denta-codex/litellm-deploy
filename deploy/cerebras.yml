@@ -1,4 +1,0 @@
-- name: Configure Cerebras suggestions using the shared activation and recovery workflow
-  ansible.builtin.import_playbook: refresh-models.yml
-  vars:
-    refresh_script: configure_cerebras.py
