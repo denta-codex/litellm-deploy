@@ -1,0 +1,17 @@
+version = 1
+
+[{{ local_model.name }}]
+model = {{ local_root }}/models/{{ local_model.revision }}/{{ local_model.artifacts[0].name }}
+load-on-startup = false
+ctx-size = {{ local_model.context_window }}
+parallel = 1
+batch-size = 512
+ubatch-size = 512
+n-gpu-layers = 999
+fit = off
+flash-attn = on
+jinja = true
+chat-template-file = {{ litellm_config }}/{{ local_model.chat_template.name }}
+reasoning = off
+sleep-idle-seconds = {{ local_model.idle_seconds }}
+cache-ram = 4096

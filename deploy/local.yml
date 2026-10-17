@@ -1,0 +1,13 @@
+- name: Install local runtime
+  ansible.builtin.import_playbook: local-runtime.yml
+  when: (refresh_action | default('refresh')) != 'rollback'
+
+- name: Install matching LiteLLM integration
+  ansible.builtin.import_playbook: deploy.yml
+  when: (refresh_action | default('refresh')) != 'rollback'
+
+- name: Activate local route using existing model transaction
+  ansible.builtin.import_playbook: refresh-models.yml
+  vars:
+    refresh_script: configure_local.py
+    refresh_failure_service: llama-local.service

@@ -192,6 +192,15 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(i.get('name') == SEARCH_NAME for i in response['output']))
         self.assertTrue(response['output'][-1]['content'][0]['annotations'])
 
+    async def test_local_qwen_uses_shared_search(self):
+        self.router = litellm.Router(model_list=[{'model_name': 'local/qwen3.8-27b', 'litellm_params': {
+            'model': 'openai/fixture', 'api_key': 'modal-only', 'api_base': 'https://modal.invalid/v1',
+            'use_chat_completions_api': True}}], num_retries=0)
+        result = await self.call(model='local/qwen3.8-27b')
+        self.assertEqual(self.backend.queries, ['fixture fact'])
+        self.assertTrue(any(i['type'] == 'web_search_call' for i in result['output']))
+        self.assertEqual(len(self.requests), 2)
+
     async def test_stream_matches_json_and_real_progress(self):
         events = await self.call(stream=True)
         self.assertIn('response.web_search_call.searching', [e['type'] for e in events])

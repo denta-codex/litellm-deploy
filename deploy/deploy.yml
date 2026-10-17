@@ -48,6 +48,16 @@
       changed_when: false
       check_mode: false
       when: installed_refresh.stat.exists
+    - name: Inspect saved local model snapshot
+      ansible.builtin.stat:
+        path: "{{ litellm_state }}/local-model.json"
+      register: local_snapshot
+    - name: Verify saved local route with installed generator
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_local.py", check-snapshot]
+      changed_when: false
+      check_mode: false
+      when: local_snapshot.stat.exists
     - name: Inspect retained encrypted Modal inference credential
       ansible.builtin.stat:
         path: "{{ litellm_modal_credential }}"

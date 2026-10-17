@@ -717,6 +717,94 @@ context, and removes successful test state. Failed evidence is retained at the
 printed path only until diagnosis completes. Restart Grace's desktop connection
 after publication to load the new catalog.
 
+## Local Qwen inference
+
+`deploy/local.yml` installs Qwen3.8-27B UD-Q2_K_XL
+and the checksum-pinned llama.cpp CUDA 12.8 build recorded in
+`scripts/local-model.json`. It uses Grace's existing driver; no CUDA toolkit or
+language toolchain is installed. The private runtime and model files live under
+`~/.local/share/llama-local`; the preset is `~/.config/litellm/llama-models.ini`.
+
+The `llama-local.service` router listens only on `127.0.0.1:18743`. It starts at
+boot with weights unloaded, loads on the first inference request, and unloads
+weights and context after 300 idle seconds. Monitoring `/health`, `/models`, and
+`/props` does not wake it. One 16K slot and full GPU offload are explicit; automatic
+fit changes are disabled. Processing uses 512-token logical and physical batches;
+larger batches would raise temporary GPU allocations. A 4 GiB system-RAM prompt
+cache (`cache-ram`) keeps processed prompts, such as Codex's shared setup text,
+when another request takes the single slot; it is cleared when the model
+unloads. The route is
+`local/qwen3.8-27b`; requests may take up to five
+minutes on cold start, with no automatic inference retries. Only the direct-answer
+reasoning choice is advertised initially. Shared search uses the existing cloud
+subscription helper; ordinary inference is local.
+
+The GGUF's built-in Qwen chat template rejects a system or developer message
+after the first user turn, which Codex sends on every desktop request. llama.cpp
+therefore loads `deploy/files/qwen3.8-27b-chat-template.jinja`: the embedded
+template with only that check changed to render a normal system turn. Deployment
+stops if the model's embedded template no longer matches `upstream_sha256` in
+`scripts/local-model.json`. To regenerate after a model update, run
+`uv run --no-project scripts/gguf_template.py <model.gguf> --extract deploy/files/qwen3.8-27b-chat-template.jinja`
+(it prints the new `upstream_sha256`), reapply the header comment and the
+one-line change, then update `sha256`. Remove the override, its preset line,
+and the manifest entry once upstream accepts mid-conversation system messages
+(llama.cpp #27367); the late-system probe in `verify_local.py` stays.
+
+From a clean committed checkout on Grace:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/local.yml --syntax-check
+ansible-playbook -i deploy/inventory.yml deploy/local.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/local.yml
+```
+
+Preview renders managed settings but skips large downloads, extraction, and live
+inference. Live setup verifies the backend before installing the matching proxy
+integration, then uses the existing model-refresh transaction to validate and
+publish the picker. The default model and other providers are preserved. Restart
+Grace's desktop connection after publication to load the picker. Shared-search
+validation consumes subscription usage.
+
+```sh
+systemctl status llama-local.service
+sudo systemctl stop llama-local.service
+sudo systemctl start llama-local.service
+ansible-playbook -i deploy/inventory.yml deploy/local.yml -e refresh_action=rollback
+```
+
+Rollback recovers an **unfinished** activation and stops/disables the local
+service. Normal manual stop releases model memory and prevents incoming requests
+from loading it until started again. Nothing detects games or modifies Steam,
+Sunshine, or GameMode. A request during gaming can still load Qwen unless the
+service is stopped. A load failure is explicit; the router remains available for
+status, and systemd restarts are bounded to three in five minutes.
+
+Backend rejection stops/disables the new service without publishing routes.
+Route rejection restores the previous config/catalog using the shared recovery
+directory. Successfully installed runtime archives are removed; model artifacts
+remain at their versioned paths for retries. Ordinary deployment checks the saved
+local snapshot. Updates to model/runtime pins require explicit local activation.
+
+Live acceptance (uses fixture lights, never real devices):
+
+```sh
+UV_PROJECT_ENVIRONMENT=/home/agent/.local/share/litellm/.venv \
+  uv run --no-sync scripts/verify_local.py --proxy --lifecycle
+```
+
+The lifecycle probe explicitly unloads this model, submits concurrent cold
+requests, checks text/tools, waits the full idle interval, checks memory
+release, and resumes a tool conversation after reload. It prints measured timings
+and GPU memory, not estimated performance. Run it when no other local inference
+client is active. Backend-only validation uses `--backend` without `--lifecycle`.
+
+Acceptance covers backend text/tools, LiteLLM Responses streaming and
+continuation, and stock Codex shared search, shell execution, and resumed
+context. The lifecycle probe reports cold/warm latency, idle duration, and GPU
+memory directly. Sleep releases model allocations; fully stopping the service
+also releases its remaining CUDA/process overhead.
+
 ## Modal inference
 
 Modal uses stock LiteLLM's Responses-to-Chat-Completions bridge, configured with
