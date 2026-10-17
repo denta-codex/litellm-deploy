@@ -105,6 +105,19 @@ voice access from that earlier result.
 
 ## Deployment and recovery
 
+October 6, 2026 recovery: the October 4 voice integration was merged remotely,
+but the original local deployment checkout lacked it. The October 5 deployment
+replaced `serve.py` with that older version and restarted the gateway, leaving
+`live_voice.py` on disk without registering its routes. Reconcile remote main
+with local deployment additions before redeploying. The restored source retains
+the local Cerebras integration as well as voice; no provider split is needed.
+
+Both ordinary deployment and voice activation now check `GET /v1/live` returns
+405 after liveness passes. This proves the POST route is registered without
+creating a call, and catches the observed healthy-text/missing-voice regression.
+The isolated production-startup test checks the same behavior. Route registration
+alone is not subscription or acoustic acceptance.
+
 Use the repository's existing managed toolchain and encrypted credentials.
 `deploy/voice.yml` owns this initial cutover. From committed source:
 
@@ -144,6 +157,14 @@ to `~/.local/state/litellm/voice-installed.json`. Future ordinary deployments us
 the existing module copy/restart mechanism. No separate voice service remains.
 
 ## Reference client and acceptance
+
+For saved-history acceptance, use `--persist --input question.wav --model
+chatgpt/gpt-6-luna --cwd /home/agent/workspaces`. This creates a durable,
+projectless conversation with genuine speech records. It cannot be combined
+with `--say` or `--thread-id`. The receipt reports the actual thread provider,
+model, project assignment and ephemeral status. Ordinary fixtures remain
+ephemeral by default. Retain the thread for active Desktop checks before any
+explicit archived-history comparison; do not substitute ordinary text turns.
 
 `scripts/voice_client.py` is a runnable, version-pinned WebRTC reference client.
 It connects through the same authenticated remote WSS route as the Dot will use.

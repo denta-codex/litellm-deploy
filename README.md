@@ -466,6 +466,77 @@ isolated proxy. Check the desktop Fast toggle before declaring fast mode verifie
 Remove the forwarding override when a pinned upstream release preserves the tier
 and passes the same checks.
 
+### Compaction recovery
+
+`compaction_fallback_enabled` in the deployment inventory enables the repository's
+compaction-only recovery wrapper. Its owned systemd drop-in projects it as
+`COMPACTION_FALLBACK_ENABLED`; setting the inventory flag to `false` and repeating
+`deploy/deploy.yml --tags compaction-recovery` restores ordinary dispatch without changing Codex or model
+discovery. `COMPACTION_MODEL_CATALOG` points at the same saved catalog used by the
+desktop picker. The wrapper reloads that catalog for each compaction and intersects
+it with active router deployments, so existing model-refresh playbooks also update
+future fallback candidates without another list to maintain.
+
+`ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --tags compaction-recovery`
+installs only the compaction runtime, verifier, and service drop-in, then restarts
+LiteLLM and checks liveness. Use this tag to activate recovery independently of
+other pending runtime or provider updates. The tagged deployment inserts the
+compaction installation after shared search in the existing launcher, preserving
+other active integrations such as voice. Ordinary deployment installs the complete
+repository launcher, which already includes compaction recovery; the targeted
+insertion is only for this staged rollout.
+
+Only requests explicitly marked `request_kind=compaction` enter recovery. Current
+Codex transports that marker in `client_metadata["x-codex-turn-metadata"]`; the
+legacy HTTP header remains supported. Ordinary turns and `codex-auto-review` keep
+their existing routing. The requested compactor is always tried first. After an
+availability failure, models from other inference backends are tried in picker
+priority order, followed by remaining models on the original backend. Hidden,
+inactive, duplicate, unauthorized, and unsuitable context/modality routes are
+excluded. Each attempt has a 120-second timeout, with nested retries/fallbacks
+disabled; cancellation closes the active stream immediately.
+
+ChatGPT compaction with historical native search calls includes the required
+search declaration while explicitly disabling tool execution. Synthetic live
+comparison reproduced `response protection is unavailable` when the declaration
+was absent and succeeded with it present.
+
+Compaction summaries are buffered until completion, with SSE comment keepalives
+while waiting. Failed partial summaries never reach Codex. Compatible models can
+reuse native history; other backends receive quoted readable history and tool
+results with tool execution disabled, at standard speed. Opaque compaction
+checkpoints cannot be translated across backends, and unknown history items are
+rejected rather than dropped. Size checks exclude encoded images and encrypted
+state from readable text. A known tokenizer can reject text that exceeds the
+advertised window; unknown tokenizers, image budgets, or context windows defer
+the decision to the provider. Provider context-limit errors continue recovery
+and are distinguished from preflight rejection in the diagnostics. On success,
+Codex persists its
+usual replacement checkpoint and continues with the selected working model. On
+exhaustion, the original error and model/outcome list are returned. Structured
+`compaction_recovery` logs and response metadata identify the actual compactor.
+For fallback attempts, they also report the size decision, estimator, readable
+token estimate, context window, and image count. They do not contain transcripts
+or credentials.
+
+Offline validation includes the real proxy process and optional installed-Codex
+acceptance with a synthetic backend that fails compaction and recovers through a
+second provider:
+
+```sh
+uv run -m unittest discover -s scripts -p 'test_compaction_fallback.py'
+CODEX_COMPACTION_TEST_BINARY=/path/to/codex-0.159.2 uv run scripts/test_proxy_startup.py
+```
+
+After deployment, `uv run scripts/verify_compaction.py` checks the live proxy with
+a synthetic history and the selected working model. `--model` selects another
+active route. It uses the existing encrypted proxy credential in memory and reports
+only requested/actual model IDs and whether the marker survived; it does not
+operate on an existing desktop chat.
+
+Native OpenAI chats that bypass LiteLLM do not use this recovery path. No response
+security setting is changed.
+
 ### Grace Codex runtime
 
 The desktop's Fast controls require the host's genuine ChatGPT identity.
@@ -640,6 +711,57 @@ Recovery refuses to overwrite concurrent edits. In that case inspect
 is removed after successful activation or successful recovery. Ordinary deployment
 refuses to proceed while a refresh is unfinished.
 
+### Canonical catalog pricing for Android
+
+LiteLLM owns `~/.config/litellm/codex-models.json`. The shared explicit refresh
+workflow embeds versioned `remote_codex` pricing/provenance beside its stock
+`models` array. There is no separate pricing snapshot, controller command, custom
+RPC, or forwarder parsing. Inventory snapshots remain discovery inputs; pricing
+sources never introduce selectable models or alter their capabilities.
+
+Records use provider `litellm` and the actual route name (`chatgpt/...`,
+`claude/...`, or `modal/...`). `upstream` records the separate pricing identity.
+OpenAI rates come from its official pricing document, including published tiers,
+context variants, and cache rates. Other providers use exact models.dev identities.
+Modal endpoint identities are explicit `pricing_model` entries in
+`scripts/modal-models.json`; an endpoint name is never guessed to be a model ID.
+Unknown rates remain unavailable, including hosted endpoints without an exact
+published rate. These are API-equivalent estimates, not hosting invoices or
+additional subscription charges.
+
+An optional route `model_info.catalog_pricing` policy can specify an exact
+`provider` and `model` pricing identity, explicit `aliases` for recorded runtime
+IDs, or `zero_rate: true` for a deliberately free local route. A public free
+listing alone does not grant zero pricing. Cache read/write zeros published as
+part of otherwise priced models remain valid.
+
+The complete candidate passes stock Codex parsing before publication through the
+existing shared transaction and lock. Source failures retain only previously
+validated prices for the same upstream identity, with their original timestamp
+and explicit stale status. Successful sources that no longer publish an exact
+price make it unknown. Historical enrichment records remain available for prior
+chat usage without returning retired models to the picker. A content revision
+covers stock rows, identities, rates, and freshness.
+
+Pricing-only changes set `enrichment_changed` and `catalog_document_changed`, but
+leave `catalog_changed`, `routing_changed`, and model-probe lists unchanged. They
+publish without inference probes, a LiteLLM restart, or a desktop restart.
+Ordinary deployment/snapshot checks never fetch prices or change timestamps.
+
+Deploy the committed implementation through `deploy/deploy.yml` first; then run
+the existing explicit `deploy/refresh-models.yml`. Routine deployment does not
+refresh the catalog. Preview (`--check --diff`) fetches current inventories and
+public pricing but publishes nothing. After successful refresh, Android reads
+`model_catalog_json` from stock `config/read` and the published file from stock
+`fs/readFile`. Its host/path/revision cache is a copy of this catalog, not another
+pricing authority. Model refresh in Android only reads published data.
+
+Offline validation includes price/alias/freshness cases, transaction concurrency,
+pricing-only probe exclusion for ChatGPT and Claude, and pinned Codex 0.159.2
+`debug models`, paged `model/list`, `config/read`, and `fs/readFile` parity. The
+stock binary integration test skips explicitly when that pinned binary is absent.
+Live catalog and phone-badge acceptance follow deployment and explicit refresh.
+
 ### Native web-search compatibility
 
 Validated initially with Codex 0.155.1 and LiteLLM 1.102.1. Models using Responses
@@ -716,6 +838,94 @@ helper output with sources, native Codex activity, external tools and follow-up
 context, and removes successful test state. Failed evidence is retained at the
 printed path only until diagnosis completes. Restart Grace's desktop connection
 after publication to load the new catalog.
+
+## Local Qwen inference
+
+`deploy/local.yml` installs Qwen3.8-27B UD-Q2_K_XL
+and the checksum-pinned llama.cpp CUDA 12.8 build recorded in
+`scripts/local-model.json`. It uses Grace's existing driver; no CUDA toolkit or
+language toolchain is installed. The private runtime and model files live under
+`~/.local/share/llama-local`; the preset is `~/.config/litellm/llama-models.ini`.
+
+The `llama-local.service` router listens only on `127.0.0.1:18743`. It starts at
+boot with weights unloaded, loads on the first inference request, and unloads
+weights and context after 300 idle seconds. Monitoring `/health`, `/models`, and
+`/props` does not wake it. One 16K slot and full GPU offload are explicit; automatic
+fit changes are disabled. Processing uses 512-token logical and physical batches;
+larger batches would raise temporary GPU allocations. A 4 GiB system-RAM prompt
+cache (`cache-ram`) keeps processed prompts, such as Codex's shared setup text,
+when another request takes the single slot; it is cleared when the model
+unloads. The route is
+`local/qwen3.8-27b`; requests may take up to five
+minutes on cold start, with no automatic inference retries. Only the direct-answer
+reasoning choice is advertised initially. Shared search uses the existing cloud
+subscription helper; ordinary inference is local.
+
+The GGUF's built-in Qwen chat template rejects a system or developer message
+after the first user turn, which Codex sends on every desktop request. llama.cpp
+therefore loads `deploy/files/qwen3.8-27b-chat-template.jinja`: the embedded
+template with only that check changed to render a normal system turn. Deployment
+stops if the model's embedded template no longer matches `upstream_sha256` in
+`scripts/local-model.json`. To regenerate after a model update, run
+`uv run --no-project scripts/gguf_template.py <model.gguf> --extract deploy/files/qwen3.8-27b-chat-template.jinja`
+(it prints the new `upstream_sha256`), reapply the header comment and the
+one-line change, then update `sha256`. Remove the override, its preset line,
+and the manifest entry once upstream accepts mid-conversation system messages
+(llama.cpp #27367); the late-system probe in `verify_local.py` stays.
+
+From a clean committed checkout on Grace:
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/local.yml --syntax-check
+ansible-playbook -i deploy/inventory.yml deploy/local.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/local.yml
+```
+
+Preview renders managed settings but skips large downloads, extraction, and live
+inference. Live setup verifies the backend before installing the matching proxy
+integration, then uses the existing model-refresh transaction to validate and
+publish the picker. The default model and other providers are preserved. Restart
+Grace's desktop connection after publication to load the picker. Shared-search
+validation consumes subscription usage.
+
+```sh
+systemctl status llama-local.service
+sudo systemctl stop llama-local.service
+sudo systemctl start llama-local.service
+ansible-playbook -i deploy/inventory.yml deploy/local.yml -e refresh_action=rollback
+```
+
+Rollback recovers an **unfinished** activation and stops/disables the local
+service. Normal manual stop releases model memory and prevents incoming requests
+from loading it until started again. Nothing detects games or modifies Steam,
+Sunshine, or GameMode. A request during gaming can still load Qwen unless the
+service is stopped. A load failure is explicit; the router remains available for
+status, and systemd restarts are bounded to three in five minutes.
+
+Backend rejection stops/disables the new service without publishing routes.
+Route rejection restores the previous config/catalog using the shared recovery
+directory. Successfully installed runtime archives are removed; model artifacts
+remain at their versioned paths for retries. Ordinary deployment checks the saved
+local snapshot. Updates to model/runtime pins require explicit local activation.
+
+Live acceptance (uses fixture lights, never real devices):
+
+```sh
+UV_PROJECT_ENVIRONMENT=/home/agent/.local/share/litellm/.venv \
+  uv run --no-sync scripts/verify_local.py --proxy --lifecycle
+```
+
+The lifecycle probe explicitly unloads this model, submits concurrent cold
+requests, checks text/tools, waits the full idle interval, checks memory
+release, and resumes a tool conversation after reload. It prints measured timings
+and GPU memory, not estimated performance. Run it when no other local inference
+client is active. Backend-only validation uses `--backend` without `--lifecycle`.
+
+Acceptance covers backend text/tools, LiteLLM Responses streaming and
+continuation, and stock Codex shared search, shell execution, and resumed
+context. The lifecycle probe reports cold/warm latency, idle duration, and GPU
+memory directly. Sleep releases model allocations; fully stopping the service
+also releases its remaining CUDA/process overhead.
 
 ## Modal inference
 

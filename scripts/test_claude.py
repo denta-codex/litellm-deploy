@@ -92,6 +92,14 @@ class ContractTests(unittest.TestCase):
         self.assertIn('apply_patch', row['base_instructions'])
         self.assertEqual(generate(json.loads(MANIFEST.read_text()), config, new, '')[2]['test_models'], [])
 
+    def test_pricing_policy_survives_inventory_generation_without_model_probes(self):
+        source = json.loads(MANIFEST.read_text())
+        config, catalog, _ = generate(source, {'model_list': []}, {'models': []}, '')
+        config['model_list'][0]['model_info']['catalog_pricing'] = {'aliases': ['claude-explicit-alias']}
+        result, _, summary = generate(source, config, catalog, '')
+        self.assertEqual(result, config)
+        self.assertEqual(summary['test_models'], [])
+
     def test_tool_names_stay_readable_with_safe_fallbacks(self):
         long = 'a' * 53
         names = ['exec_command', 'apply_patch', 'mcp__server__tool', 'web.search', long, 'exec_command', '9lives',
@@ -464,6 +472,18 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             REQUEST.reset(token)
         self.assertEqual(len(self.provider.sessions), 3)
 
+    async def test_canonical_compaction_metadata_uses_separate_worker(self):
+        await self.response()
+        context = REQUEST.get()
+        token = REQUEST.set(context | {'request': {'client_metadata': {
+            'x-codex-turn-metadata': '{"request_kind":"compaction","context_window_id":"new"}'}}})
+        try:
+            await self.response()
+        finally:
+            REQUEST.reset(token)
+        self.assertEqual(len(self.provider.sessions), 2)
+        self.assertTrue(any(key[-1] == 'compaction' for key in self.provider.sessions))
+
     async def test_hook_preserves_sdk_identity_and_arguments(self):
         session = Session(('hook',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
         options = session.options()
@@ -685,6 +705,7 @@ class ActivationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         home = Path(self.temp.name)
         self.refresh = ClaudeSetup(home, home / 'runtime', 'uv')
+        self.refresh.pricing_sources = lambda: {'openai': None, 'models_dev': None}
         (home / '.codex').mkdir()
         (home / '.codex/config.toml').write_text('model_provider="litellm"\nmodel="chatgpt/gpt-6-astra"\n')
         self.refresh.paths['config'].parent.mkdir(parents=True)
@@ -724,6 +745,18 @@ class ActivationTests(unittest.TestCase):
         self.assertTrue(self.refresh.check_snapshot()['snapshot_present'])
         with patch.object(self.refresh, 'discover', return_value=self.snapshot):
             self.assertFalse(self.refresh.prepare()['any_changes'])
+
+    def test_pricing_only_validation_skips_claude_and_search_probes(self):
+        self.refresh.state.mkdir(parents=True)
+        candidate = self.refresh.candidate(self.snapshot)
+        for name, text in candidate['candidates'].items():
+            self.refresh.paths[name].write_text(text)
+        self.prepare()
+        self.refresh.activate()
+        with patch('configure_claude.subprocess.run') as run:
+            self.assertEqual(self.refresh.validate(), {'validated': []})
+            run.assert_not_called()
+        self.refresh.finish()
 
     def test_concurrent_edits_are_not_overwritten_by_recovery(self):
         self.prepare()

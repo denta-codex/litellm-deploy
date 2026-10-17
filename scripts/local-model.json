@@ -1,0 +1,25 @@
+{
+  "name": "qwen3.8-27b",
+  "display_name": "Local Qwen3.8 27B (UD-Q2_K_XL)",
+  "context_window": 16384,
+  "idle_seconds": 300,
+  "port": 18743,
+  "repository": "unsloth/Qwen3.8-27B-GGUF",
+  "revision": "4ca720788d1e01f1bff70c033e0d0028fd02e502",
+  "artifacts": [
+    {"name": "Qwen3.8-27B-UD-Q2_K_XL.gguf", "sha256": "fd4730dd8aad070517978752b63d530aeb1740d2283cab9fa24f1e404032ddb0"}
+  ],
+  "chat_template": {
+    "name": "qwen3.8-27b-chat-template.jinja",
+    "sha256": "804a36e3b39d8f0e1aca49e5d2ab407dfde410dff700e2c32dfbe7ad7d9a1f7f",
+    "upstream_sha256": "12827f24b742ea4e80cdc12dbcf9622227056b9f797252a3149263d4f9aaadce"
+  },
+  "runtime": {
+    "version": "b11377",
+    "cuda": "12.8",
+    "artifacts": [
+      {"name": "llama-b11377-bin-ubuntu-cuda-12.8-x64.tar.gz", "sha256": "597c53fd30ca5f24596a47368e591283ec9fb2e836eb0065e049ec7b15147927"},
+      {"name": "cudart-llama-b11377-bin-ubuntu-cuda-12.8-x64.tar.gz", "sha256": "d24b0125ff3461bda9ee11dcef9fe13fef4cc36b0357c4dcfdfdb6a4ad8e52b4"}
+    ]
+  }
+}
