@@ -94,6 +94,14 @@ class ModalTests(unittest.TestCase):
         self.assertEqual([m for m in refreshed_catalog['models'] if m['slug'].startswith('modal/')], catalog['models'][3:])
         self.assertEqual([r for r in refreshed_config['model_list'] if r['model_name'].startswith('modal/')], config['model_list'][2:])
 
+    def test_pricing_policy_survives_inventory_generation_without_model_probes(self):
+        config, catalog, _ = generate(self.source, self.config, self.catalog, '')
+        policy = {'zero_rate': True, 'aliases': ['modal-explicit-alias']}
+        config['model_list'][2]['model_info']['catalog_pricing'] = policy
+        result, _, summary = generate(self.source, config, catalog, '')
+        self.assertEqual(result, config)
+        self.assertEqual(summary['test_models'], [])
+
     def test_manifest_rejections_and_selected_removal(self):
         for source in ({'models': []}, {'models': [self.source['models'][0]] * 2},
                        {'models': [self.source['models'][0] | {'endpoint': 'https://untrusted.invalid'}]},
@@ -117,6 +125,7 @@ class ActivationTests(ModalTests):
         self.addCleanup(temporary.cleanup)
         self.home = Path(temporary.name)
         self.refresh = ModalSetup(self.home, self.home / 'runtime', 'uv')
+        self.refresh.pricing_sources = lambda: {'openai': None, 'models_dev': None}
         self.refresh.state.mkdir(parents=True)
         (self.home / '.codex').mkdir()
         (self.home / '.codex/config.toml').write_text('model_provider="litellm"\nmodel="chatgpt/astra"\n')

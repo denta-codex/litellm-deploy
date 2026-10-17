@@ -640,6 +640,57 @@ Recovery refuses to overwrite concurrent edits. In that case inspect
 is removed after successful activation or successful recovery. Ordinary deployment
 refuses to proceed while a refresh is unfinished.
 
+### Canonical catalog pricing for Android
+
+LiteLLM owns `~/.config/litellm/codex-models.json`. The shared explicit refresh
+workflow embeds versioned `remote_codex` pricing/provenance beside its stock
+`models` array. There is no separate pricing snapshot, controller command, custom
+RPC, or forwarder parsing. Inventory snapshots remain discovery inputs; pricing
+sources never introduce selectable models or alter their capabilities.
+
+Records use provider `litellm` and the actual route name (`chatgpt/...`,
+`claude/...`, or `modal/...`). `upstream` records the separate pricing identity.
+OpenAI rates come from its official pricing document, including published tiers,
+context variants, and cache rates. Other providers use exact models.dev identities.
+Modal endpoint identities are explicit `pricing_model` entries in
+`scripts/modal-models.json`; an endpoint name is never guessed to be a model ID.
+Unknown rates remain unavailable, including hosted endpoints without an exact
+published rate. These are API-equivalent estimates, not hosting invoices or
+additional subscription charges.
+
+An optional route `model_info.catalog_pricing` policy can specify an exact
+`provider` and `model` pricing identity, explicit `aliases` for recorded runtime
+IDs, or `zero_rate: true` for a deliberately free local route. A public free
+listing alone does not grant zero pricing. Cache read/write zeros published as
+part of otherwise priced models remain valid.
+
+The complete candidate passes stock Codex parsing before publication through the
+existing shared transaction and lock. Source failures retain only previously
+validated prices for the same upstream identity, with their original timestamp
+and explicit stale status. Successful sources that no longer publish an exact
+price make it unknown. Historical enrichment records remain available for prior
+chat usage without returning retired models to the picker. A content revision
+covers stock rows, identities, rates, and freshness.
+
+Pricing-only changes set `enrichment_changed` and `catalog_document_changed`, but
+leave `catalog_changed`, `routing_changed`, and model-probe lists unchanged. They
+publish without inference probes, a LiteLLM restart, or a desktop restart.
+Ordinary deployment/snapshot checks never fetch prices or change timestamps.
+
+Deploy the committed implementation through `deploy/deploy.yml` first; then run
+the existing explicit `deploy/refresh-models.yml`. Routine deployment does not
+refresh the catalog. Preview (`--check --diff`) fetches current inventories and
+public pricing but publishes nothing. After successful refresh, Android reads
+`model_catalog_json` from stock `config/read` and the published file from stock
+`fs/readFile`. Its host/path/revision cache is a copy of this catalog, not another
+pricing authority. Model refresh in Android only reads published data.
+
+Offline validation includes price/alias/freshness cases, transaction concurrency,
+pricing-only probe exclusion for ChatGPT and Claude, and pinned Codex 0.159.2
+`debug models`, paged `model/list`, `config/read`, and `fs/readFile` parity. The
+stock binary integration test skips explicitly when that pinned binary is absent.
+Live catalog and phone-badge acceptance follow deployment and explicit refresh.
+
 ### Native web-search compatibility
 
 Validated initially with Codex 0.155.1 and LiteLLM 1.102.1. Models using Responses

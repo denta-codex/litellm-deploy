@@ -68,6 +68,10 @@ def generate(source, config, catalog, selected):
         raise ValueError('Selected Modal model disappeared; select another model before configuring')
     before = {m['slug']: m for m in catalog.get('models', []) if m['slug'].startswith(PREFIX)}
     old_routes = {r['model_name']: r for r in config.get('model_list', []) if r['model_name'].startswith(PREFIX)}
+    for route in routes:
+        policy = old_routes.get(route['model_name'], {}).get('model_info', {}).get('catalog_pricing')
+        if policy is not None:
+            route['model_info']['catalog_pricing'] = copy.deepcopy(policy)
     new_config, new_catalog = copy.deepcopy(config), copy.deepcopy(catalog)
     new_config['model_list'] = [r for r in new_config.get('model_list', []) if not r['model_name'].startswith(PREFIX)] + routes
     new_catalog['models'] = [m for m in new_catalog.get('models', []) if not m['slug'].startswith(PREFIX)] + entries

@@ -16,6 +16,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import yaml
 
+from catalog_enrichment import enrich_catalog, fetch_sources, stock_catalog
+
 PREFIX = 'chatgpt/'
 REVIEW_MODEL = 'codex-auto-review'
 
@@ -200,7 +202,10 @@ class Refresh:
         validate_source(source)
         return {'version': 1, 'codex_version': version, 'catalog': source}
 
-    def candidate(self, snapshot):
+    def pricing_sources(self):
+        return fetch_sources()
+
+    def candidate(self, snapshot, refresh_pricing=False):
         originals = self.originals()
         if originals['config'] is None:
             raise ValueError('Deploy LiteLLM before refreshing models')
@@ -221,13 +226,20 @@ class Refresh:
             summary['test_models'] = summary['after']
             if 'test_reviewer' in summary:
                 summary['test_reviewer'] = True
+        pricing_summary = {}
+        if refresh_pricing:
+            manifest = json.loads(Path(__file__).with_name('modal-models.json').read_text())
+            new_catalog, pricing_summary = enrich_catalog(new_catalog, new_config, manifest, self.pricing_sources())
         candidates = {
             'config': originals['config'] if new_config == config else yaml.safe_dump(new_config, sort_keys=False),
             'catalog': originals['catalog'] if new_catalog == catalog else encode(new_catalog),
             'snapshot': encode(snapshot),
         }
-        summary.update(routing_changed=new_config != config, catalog_changed=new_catalog != catalog,
-                       snapshot_changed=originals['snapshot'] != candidates['snapshot'])
+        summary.update(routing_changed=new_config != config,
+                       catalog_changed=stock_catalog(new_catalog) != stock_catalog(catalog),
+                       enrichment_changed=new_catalog.get('remote_codex') != catalog.get('remote_codex'),
+                       catalog_document_changed=new_catalog != catalog,
+                       snapshot_changed=originals['snapshot'] != candidates['snapshot'], **pricing_summary)
         summary['any_changes'] = any(originals[k] != candidates[k] for k in originals)
         return {'originals': originals, 'candidates': candidates, 'summary': summary, 'prefix': self.prefix,
                 'codex_config_sha256': hashlib.sha256((self.home / '.codex/config.toml').read_bytes()).hexdigest()}
@@ -236,7 +248,7 @@ class Refresh:
         if self.transaction.exists():
             self.journal()
             raise ValueError(f'Unfinished refresh exists. Run {self.playbook} -e refresh_action=rollback first')
-        journal = self.candidate(self.discover())
+        journal = self.candidate(self.discover(), refresh_pricing=True)
         if preview or not journal['summary']['any_changes']:
             return journal['summary']
         self.state.mkdir(parents=True, exist_ok=True, mode=0o700)
