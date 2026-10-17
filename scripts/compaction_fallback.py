@@ -1,7 +1,7 @@
 """Atomic, compaction-only recovery at the authenticated Responses dispatch boundary."""
 import asyncio
 import copy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from importlib.metadata import version
 import json
 import logging
@@ -185,33 +185,88 @@ def fallback_request(data, original, target):
     return request
 
 
-def fits(request, target):
-    modalities = target.metadata.get('input_modalities', ['text'])
-    images = []
-    for item in request.get('input', []) if isinstance(request.get('input'), list) else []:
-        for part in item.get('content', []) if isinstance(item.get('content'), list) else []:
-            if part.get('type') == 'input_image':
-                images.append(part)
-    if images and 'image' not in modalities:
-        return False, 'unsupported_modality'
+def declare_historical_search(request, target):
+    """ChatGPT requires a search declaration to consume native search history.
+
+    Declare the historical tool while forbidding new tool execution. Other
+    backends consume quoted history or retain their own tool contract.
+    """
+    if not target or not target.group or any(group[0] != 'chatgpt' for group in target.group):
+        return request
+    history = request.get('input')
+    if not isinstance(history, list) or not any(item.get('type') == 'web_search_call' for item in history):
+        return request
+    request = copy.deepcopy(request)
+    if not any(tool.get('type') in ('web_search', 'web_search_preview') for tool in request.get('tools', [])):
+        request['tools'] = [*request.get('tools', []), {'type': 'web_search'}]
+    request.update(tool_choice='none', parallel_tool_calls=False)
+    return request
+
+
+@dataclass(frozen=True)
+class SizeAssessment:
+    size_decision: str
+    estimated_tokens: int
+    token_estimator: str
+    context_window: int | None
+    image_count: int
+
+    @property
+    def rejection(self):
+        return {'over_limit': 'context_limit',
+                'unsupported_modality': 'unsupported_modality'}.get(self.size_decision)
+
+
+def assess_size(request, target):
+    """Estimate readable input without interpreting transport bytes as model tokens.
+
+    Image budgets and encrypted checkpoints are provider-specific. Unknown sizing
+    is a reason to ask the provider, not evidence that a candidate cannot fit.
+    """
+    images, opaque = 0, False
+
+    def readable(value):
+        nonlocal images, opaque
+        if isinstance(value, list):
+            return [readable(part) for part in value]
+        if not isinstance(value, dict):
+            return value
+        if value.get('type') == 'input_image':
+            images += 1
+            return {'type': 'input_image'}
+        if value.get('type') in ('reasoning', 'compaction') and 'encrypted_content' in value:
+            opaque = True
+            return {key: readable(part) for key, part in value.items() if key != 'encrypted_content'}
+        return {key: readable(part) for key, part in value.items()}
+
+    rendered = json.dumps(readable({'instructions': request.get('instructions'),
+                                    'input': request.get('input')}), ensure_ascii=False)
     window = target.metadata.get('context_window')
-    if not isinstance(window, int) or window <= 0:
-        return False, 'unknown_context_window'
-    # Counting serialized history is conservative about role/tool framing. Unknown model
-    # tokenizers use a byte upper bound instead of inventing a smaller token estimate.
-    rendered = json.dumps({'instructions': request.get('instructions'), 'input': request.get('input')},
-                          ensure_ascii=False)
-    try:
-        if target.model not in litellm.model_cost and target.model.partition('/')[2] not in litellm.model_cost:
-            raise ValueError('unknown tokenizer')
-        tokens = litellm.token_counter(model=target.model, text=rendered)
-        tokens = math.ceil(tokens * 1.1)
-    except Exception:
-        tokens = len(rendered.encode())
-    # Serialized data URLs already contribute their bytes. URL images have unknown
-    # dimensions, so reserve the documented maximum-resolution image token budget.
-    tokens += len(images) * 16384
-    return (True, None) if tokens + SUMMARY_TOKENS < window * .95 else (False, 'context_limit')
+    window = window if type(window) is int and window > 0 else None
+    # Resolve a picker alias through its configured route before looking for a
+    # tokenizer. Pricing identities are not tokenizer/capability declarations.
+    names = [identity[-1] for identity in target.identity] + [target.model]
+    names += [name.partition('/')[2] for name in names if '/' in name]
+    tokenizer = next((name for name in names if name in litellm.model_cost), None)
+    tokens, estimator = len(rendered.encode()), 'byte_upper_bound'
+    if tokenizer:
+        try:
+            tokens = math.ceil(litellm.token_counter(model=tokenizer, text=rendered) * 1.1)
+            estimator = 'tokenizer'
+        except Exception:
+            pass
+    if images and 'image' not in target.metadata.get('input_modalities', ['text']):
+        decision = 'unsupported_modality'
+    elif window is None or images or opaque or estimator != 'tokenizer':
+        decision = 'unknown'
+    else:
+        decision = 'fit' if tokens + SUMMARY_TOKENS < window * .95 else 'over_limit'
+    return SizeAssessment(decision, tokens, estimator, window, images)
+
+
+def fits(request, target):
+    rejection = assess_size(request, target).rejection
+    return rejection is None, rejection
 
 
 class AttemptError(Exception):
@@ -225,6 +280,9 @@ def failure(exc):
     original = getattr(exc, 'original_exception', None)
     if original is not None:
         exc = original
+    if (isinstance(exc, litellm.ContextWindowExceededError)
+            or getattr(exc, 'code', None) in ('context_length_exceeded', 'context_window_exceeded')):
+        return 'provider_context_limit', True
     status = getattr(exc, 'status_code', 500)
     if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) or status == 408:
         return 'timeout', True
@@ -352,20 +410,25 @@ class CompactionResponses:
             group = original.group if target is None and original else target.group if target else ()
             provider = sorted({g[0] for g in group})
             started = time.monotonic()
+            sizing = {}
             try:
                 routed = request if target is None else fallback_request(request, original, target)
+                routed = declare_historical_search(routed, original if target is None else target)
                 if target is not None:
-                    usable, reason = fits(routed, target)
-                    if not usable:
-                        raise UnusableHistory(reason)
+                    assessment = assess_size(routed, target)
+                    sizing = asdict(assessment)
+                    if assessment.rejection:
+                        raise UnusableHistory(assessment.rejection)
                     if self.authorize:
                         await self.authorize(model, kwargs)
                 response = await self.attempt(routed, kwargs)
                 LOGGER.warning('compaction_recovery %s', json.dumps({
                     'requested_model': request['model'], 'compactor_model': model, 'provider': provider,
-                    'elapsed_ms': int((time.monotonic() - started) * 1000), 'outcome': 'completed'}))
+                    'elapsed_ms': int((time.monotonic() - started) * 1000), 'outcome': 'completed', **sizing}))
                 response['metadata'] = (response.get('metadata') or {}) | {
                     'compaction_requested_model': request['model'], 'compaction_model': model}
+                if sizing:
+                    response['metadata']['compaction_sizing'] = json.dumps(sizing)
                 return response
             except asyncio.CancelledError:
                 raise
@@ -378,10 +441,10 @@ class CompactionResponses:
                 # A candidate-specific capability rejection should not stop traversal.
                 if target is not None and category == 'request_rejected':
                     retry = True
-            outcomes.append({'model': model, 'outcome': category})
+            outcomes.append({'model': model, 'outcome': category, **sizing})
             LOGGER.warning('compaction_recovery %s', json.dumps({
                 'requested_model': request['model'], 'compactor_model': model, 'provider': provider,
-                'elapsed_ms': int((time.monotonic() - started) * 1000), 'outcome': category}))
+                'elapsed_ms': int((time.monotonic() - started) * 1000), 'outcome': category, **sizing}))
             if not retry:
                 break
         # Keep the original provider failure and attach only model/outcome metadata.

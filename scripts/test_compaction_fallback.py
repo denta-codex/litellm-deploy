@@ -13,8 +13,8 @@ os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
 os.environ['LITELLM_TELEMETRY'] = 'False'
 
 from claude_context import REQUEST
-from compaction_fallback import (AttemptError, CompactionResponses, candidates, fallback_request,
-                                 fits, portable_input, plain)
+from compaction_fallback import (AttemptError, CompactionResponses, assess_size, candidates,
+                                 declare_historical_search, fallback_request, fits, portable_input, plain)
 
 
 def row(name, priority=1, **extra):
@@ -75,6 +75,48 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c['model'] for c in self.calls], ['first/model'])
         self.assertEqual(events[-1]['type'], 'response.completed')
         self.assertEqual(events[-1]['response']['metadata']['compaction_model'], 'first/model')
+
+    async def test_image_heavy_search_history_reaches_unknown_tokenizer_provider(self):
+        image = {'type': 'input_image', 'image_url': 'data:image/png;base64,' + 'A' * 300000}
+        request = self.request | {'input': [
+            {'role': 'user', 'content': 'Remember MARKER. ' + 'History. ' * 50000},
+            {'type': 'web_search_call', 'id': 'ws_native', 'status': 'completed',
+             'action': {'type': 'search', 'query': 'readable transparent cards'}},
+            {'type': 'function_call_output', 'call_id': 'images', 'output': [image] * 35}]}
+        self.rows[2]['context_window'] = 1048576
+        self.catalog.write_text(json.dumps({'models': self.rows}))
+        with self.assertLogs('compaction_fallback', level='WARNING') as logs:
+            events = await self.events(self.integration({'first/model': AttemptError('UPSTREAM'),
+                                                        'other/model': complete}), request)
+        self.assertEqual([c['model'] for c in self.calls], ['first/model', 'other/model'])
+        portable = self.calls[-1]['input'][0]['content']
+        self.assertEqual(sum(part.get('type') == 'input_image' for part in portable), 35)
+        self.assertTrue(any('ws_native' in p.get('text', '') for p in portable))
+        sizing = json.loads(events[-1]['response']['metadata']['compaction_sizing'])
+        self.assertEqual(sizing['size_decision'], 'unknown')
+        self.assertEqual(sizing['image_count'], 35)
+        self.assertLess(sizing['estimated_tokens'], 600000)
+        self.assertNotIn('data:image', '\n'.join(logs.output))
+        self.assertNotIn('readable transparent cards', '\n'.join(logs.output))
+
+    async def test_provider_context_rejection_continues_to_next_candidate(self):
+        events = await self.events(self.integration({'first/model': AttemptError('FIRST'),
+            'other/model': AttemptError('Too large', code='context_length_exceeded', status=400),
+            'last/model': complete}))
+        self.assertEqual([c['model'] for c in self.calls], ['first/model', 'other/model', 'last/model'])
+        self.assertEqual(events[-1]['type'], 'response.completed')
+
+    async def test_exhaustion_records_provider_context_limit(self):
+        self.rows = self.rows[:3]
+        self.catalog.write_text(json.dumps({'models': self.rows}))
+        events = await self.events(self.integration({'first/model': AttemptError('ORIGINAL'),
+            'other/model': AttemptError('Too large', code='context_length_exceeded', status=400),
+            'first/second': AttemptError('Unavailable')}))
+        response = events[-1]['response']
+        self.assertEqual(response['error']['message'], 'ORIGINAL')
+        attempts = json.loads(response['metadata']['compaction_attempts'])
+        self.assertEqual(attempts[1]['outcome'], 'provider_context_limit')
+        self.assertEqual(attempts[1]['size_decision'], 'unknown')
 
     async def test_partial_failure_is_discarded_before_other_provider_recovers(self):
         async def interrupted():
@@ -156,7 +198,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(self.calls), 1)
             self.assertEqual(events[-1]['response']['error']['message'], 'DENIED')
 
-    async def test_candidate_rejection_skips_to_next_and_context_limit_is_preflight(self):
+    async def test_unknown_size_reaches_provider_and_candidate_rejection_continues(self):
         self.rows[1]['context_window'] = 100
         self.catalog.write_text(json.dumps({'models': self.rows}))
         events = await self.events(self.integration({'first/model': AttemptError('FIRST'),
@@ -172,7 +214,7 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.calls[-1]['input'], request['input'])
         self.assertEqual(events[-1]['type'], 'response.completed')
 
-    async def test_candidate_access_denial_and_too_small_window_skip_inference(self):
+    async def test_candidate_access_denial_skips_inference(self):
         self.rows[1]['context_window'] = 100
         self.catalog.write_text(json.dumps({'models': self.rows}))
         from compaction_fallback import UnusableHistory
@@ -182,6 +224,20 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         integration = self.integration({'first/model': AttemptError('FIRST'), 'last/model': complete}, authorize=authorize)
         await self.events(integration)
         self.assertEqual([c['model'] for c in self.calls], ['first/model', 'last/model'])
+
+    async def test_known_text_overflow_is_recorded_without_provider_attempt(self):
+        self.rows[2]['context_window'] = 100
+        self.catalog.write_text(json.dumps({'models': self.rows}))
+        with patch.dict('litellm.model_cost', {'other/model': {}}), \
+                patch('litellm.token_counter', return_value=1000), \
+                self.assertLogs('compaction_fallback', level='WARNING') as logs:
+            events = await self.events(self.integration({'first/model': AttemptError('FIRST'),
+                                                        'last/model': complete}))
+        self.assertEqual([c['model'] for c in self.calls], ['first/model', 'last/model'])
+        self.assertEqual(events[-1]['type'], 'response.completed')
+        rejected = json.loads(logs.output[1].partition('compaction_recovery ')[2])
+        self.assertEqual(rejected['outcome'], 'context_limit')
+        self.assertEqual(rejected['size_decision'], 'over_limit')
 
     async def test_timeout_keepalive_and_stream_cleanup(self):
         closed = asyncio.Event()
@@ -247,6 +303,26 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CatalogTests(unittest.TestCase):
+    def test_historical_search_declaration_is_specific_to_chatgpt_native_history(self):
+        original, available = candidates({'models': [row('chatgpt/a', comp_hash='1'),
+                                                    row('chatgpt/b', comp_hash='1'), row('other/c')]},
+                                         [route('chatgpt/a'), route('chatgpt/b'), route('other/c')], 'chatgpt/a')
+        request = {'model': 'chatgpt/a', 'tools': [], 'input': [
+            {'type': 'web_search_call', 'id': 'ws_historical', 'status': 'completed',
+             'action': {'type': 'search', 'query': 'Historical query'}}]}
+        routed = declare_historical_search(request, original)
+        self.assertEqual(routed['tools'], [{'type': 'web_search'}])
+        self.assertEqual(routed['tool_choice'], 'none')
+        self.assertFalse(routed['parallel_tool_calls'])
+        self.assertEqual(request['tools'], [])
+        self.assertEqual(declare_historical_search(routed, original), routed)
+        for target in available:
+            fallback = declare_historical_search(fallback_request(request, original, target), target)
+            self.assertEqual(bool(fallback['tools']), target.model == 'chatgpt/b')
+        ordinary = request | {'input': [{'role': 'user', 'content': 'No search history'}]}
+        self.assertIs(declare_historical_search(ordinary, original), ordinary)
+        self.assertIs(declare_historical_search(request, None), request)
+
     def test_priority_stability_hidden_inactive_duplicates_and_distinct_backends(self):
         rows = [row('first/original', 1), row('first/alternate', 2), row('other/b', 9), row('other/a', 9),
                 row('bedrock/same-maker', 5), row('alias/duplicate', 3), row('hidden', 0, visibility='hide'),
@@ -302,7 +378,55 @@ class CatalogTests(unittest.TestCase):
         image = {'input': [{'role': 'user', 'content': [{'type': 'input_image', 'image_url': 'https://example.com/image'}]}]}
         self.assertEqual(fits(image, target), (False, 'unsupported_modality'))
         target.metadata['context_window'] = 9000
-        self.assertEqual(fits({'input': 'X' * 10000}, target), (False, 'context_limit'))
+        self.assertEqual(fits({'input': 'X' * 10000}, target), (True, None))
+
+    def test_encoded_image_length_does_not_change_readable_size(self):
+        target = candidates({'models': [row('other/model')]}, [route('other/model')], 'other/model')[0]
+        small = {'input': [{'role': 'user', 'content': [
+            {'type': 'input_text', 'text': 'Describe the image'},
+            {'type': 'input_image', 'image_url': 'data:image/png;base64,AAAA'}]}]}
+        large = copy.deepcopy(small)
+        large['input'][0]['content'][1]['image_url'] += 'A' * 1200000
+        before, after = assess_size(small, target), assess_size(large, target)
+        self.assertEqual(before, after)
+        self.assertEqual(after.size_decision, 'unknown')
+        self.assertEqual(after.image_count, 1)
+
+    def test_native_tool_images_and_encrypted_state_are_not_counted_as_text(self):
+        target = candidates({'models': [row('other/model')]}, [route('other/model')], 'other/model')[0]
+        request = {'input': [
+            {'type': 'reasoning', 'encrypted_content': 'PRIVATE' * 200000,
+             'summary': [{'text': 'Readable finding'}]},
+            {'type': 'function_call_output', 'call_id': 'img', 'output': [
+                {'type': 'input_image', 'image_url': 'https://example.invalid/private-image'}]}]}
+        size = assess_size(request, target)
+        self.assertLess(size.estimated_tokens, 1000)
+        self.assertEqual(size.image_count, 1)
+        self.assertEqual(size.size_decision, 'unknown')
+        target.metadata['input_modalities'] = ['text']
+        self.assertEqual(fits(request, target), (False, 'unsupported_modality'))
+
+    def test_known_route_tokenizer_rejects_real_text_overflow(self):
+        target = candidates({'models': [row('picker/alias', context_window=9000)]},
+                            [route('picker/alias', 'openai/fixture-native')], 'picker/alias')[0]
+        with patch.dict('litellm.model_cost', {'fixture-native': {}}), \
+                patch('litellm.token_counter', return_value=10000) as counter:
+            size = assess_size({'input': 'Oversized text'}, target)
+        counter.assert_called_once()
+        self.assertEqual(counter.call_args.kwargs['model'], 'fixture-native')
+        self.assertEqual(size.size_decision, 'over_limit')
+        self.assertEqual(size.rejection, 'context_limit')
+
+    def test_missing_window_and_tokenizer_failures_defer_to_provider(self):
+        target = candidates({'models': [row('other/model')]}, [route('other/model')], 'other/model')[0]
+        target.metadata.pop('context_window')
+        self.assertEqual(assess_size({'input': 'History'}, target).size_decision, 'unknown')
+        target.metadata['context_window'] = 100
+        with patch.dict('litellm.model_cost', {'other/model': {}}), \
+                patch('litellm.token_counter', side_effect=ValueError('Tokenizer unavailable')):
+            size = assess_size({'input': 'History' * 10000}, target)
+        self.assertEqual(size.size_decision, 'unknown')
+        self.assertIsNone(size.rejection)
 
 
 if __name__ == '__main__':

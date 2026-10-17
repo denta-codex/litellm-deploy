@@ -35,6 +35,13 @@ class Backend(BaseHTTPRequestHandler):
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.server.requests.append((self.path, {k.lower(): v for k, v in self.headers.items()}, payload))
+        if (payload.get('prompt_cache_key') == 'historical-search-probe'
+                and not any(tool.get('type') == 'web_search' for tool in payload.get('tools', []))):
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+            self.wfile.write(b'{"error":{"message":"response protection is unavailable","type":"server_error"}}')
+            return
         compact = 'CONTEXT CHECKPOINT COMPACTION' in json.dumps(payload.get('input', []))
         if compact and payload['model'] != 'fixture-compactor':
             response = {'id': 'resp_failed_compaction', 'object': 'response', 'created_at': 1,
@@ -53,7 +60,7 @@ class Backend(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"error":{"message":"synthetic backend rejection","type":"invalid_request_error"}}')
             return
-        if payload.get('tools'):
+        if any(tool.get('type') == 'function' for tool in payload.get('tools', [])):
             item = {'type': 'function_call', 'id': 'fc_probe', 'call_id': 'call_probe',
                     'name': 'deployment_probe', 'arguments': '{}', 'status': 'completed'}
         else:
@@ -277,6 +284,27 @@ class StartupTests(unittest.TestCase):
         final = events[-1]['response']
         self.assertEqual(final['metadata']['compaction_model'], 'fixture/compactor')
         self.assertIn('COMPACTION_CONTEXT_OK', json.dumps(final['output']))
+
+    def test_compaction_declares_historical_search_without_executing_tools(self):
+        payload = self.payload(prompt_cache_key='historical-search-probe', tools=[], input=[
+            {'role': 'user', 'content': 'Remember SEARCH_HISTORY_OK'},
+            {'type': 'web_search_call', 'id': 'ws_historical', 'status': 'completed',
+             'action': {'type': 'search', 'query': 'synthetic historical query'}}])
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            self.request(payload)
+        self.assertEqual(caught.exception.code, 500)
+        self.assertIn('response protection is unavailable', caught.exception.read().decode())
+        caught.exception.close()
+        before = len(self.backend.requests)
+        events = self.request(payload,
+            headers={'x-codex-turn-metadata': '{"request_kind":"compaction"}'})
+        outgoing = [r[2] for r in self.backend.requests[before:]]
+        self.assertEqual(len(outgoing), 1)
+        self.assertEqual(outgoing[0]['model'], 'gpt-6-astra')
+        self.assertEqual(outgoing[0]['tools'], [{'type': 'web_search'}])
+        self.assertEqual(outgoing[0]['tool_choice'], 'none')
+        self.assertFalse(outgoing[0]['parallel_tool_calls'])
+        self.assertEqual(events[-1]['response']['metadata']['compaction_model'], 'chatgpt/gpt-6-astra')
 
     @unittest.skipUnless(os.environ.get('CODEX_COMPACTION_TEST_BINARY'),
                          'set CODEX_COMPACTION_TEST_BINARY for installed Codex acceptance')

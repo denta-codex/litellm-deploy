@@ -496,17 +496,28 @@ inactive, duplicate, unauthorized, and unsuitable context/modality routes are
 excluded. Each attempt has a 120-second timeout, with nested retries/fallbacks
 disabled; cancellation closes the active stream immediately.
 
+ChatGPT compaction with historical native search calls includes the required
+search declaration while explicitly disabling tool execution. Synthetic live
+comparison reproduced `response protection is unavailable` when the declaration
+was absent and succeeded with it present.
+
 Compaction summaries are buffered until completion, with SSE comment keepalives
 while waiting. Failed partial summaries never reach Codex. Compatible models can
 reuse native history; other backends receive quoted readable history and tool
 results with tool execution disabled, at standard speed. Opaque compaction
 checkpoints cannot be translated across backends, and unknown history items are
-rejected rather than dropped. Unrecognized tokenizers use a conservative byte
-estimate; smaller-context models may be skipped. On success, Codex persists its
+rejected rather than dropped. Size checks exclude encoded images and encrypted
+state from readable text. A known tokenizer can reject text that exceeds the
+advertised window; unknown tokenizers, image budgets, or context windows defer
+the decision to the provider. Provider context-limit errors continue recovery
+and are distinguished from preflight rejection in the diagnostics. On success,
+Codex persists its
 usual replacement checkpoint and continues with the selected working model. On
 exhaustion, the original error and model/outcome list are returned. Structured
-`compaction_recovery` logs and response metadata identify the actual compactor;
-they do not contain transcripts or credentials.
+`compaction_recovery` logs and response metadata identify the actual compactor.
+For fallback attempts, they also report the size decision, estimator, readable
+token estimate, context window, and image count. They do not contain transcripts
+or credentials.
 
 Offline validation includes the real proxy process and optional installed-Codex
 acceptance with a synthetic backend that fails compaction and recovers through a
