@@ -15,6 +15,7 @@ import urllib.request
 from unittest.mock import patch
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+import yaml
 
 import verify_review
 
@@ -34,6 +35,18 @@ class Backend(BaseHTTPRequestHandler):
     def do_POST(self):
         payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         self.server.requests.append((self.path, {k.lower(): v for k, v in self.headers.items()}, payload))
+        compact = 'CONTEXT CHECKPOINT COMPACTION' in json.dumps(payload.get('input', []))
+        if compact and payload['model'] != 'fixture-compactor':
+            response = {'id': 'resp_failed_compaction', 'object': 'response', 'created_at': 1,
+                        'model': payload['model'], 'status': 'failed', 'output': [],
+                        'error': {'code': 'server_error', 'message': 'response protection is unavailable'}}
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/event-stream')
+            self.end_headers()
+            self.wfile.write(('data: ' + json.dumps({'type': 'response.failed',
+                             'sequence_number': 0, 'response': response}) + '\n\n').encode())
+            self.wfile.flush()
+            return
         if payload.get('prompt_cache_key') == 'reject-probe':
             self.send_response(400)
             self.send_header('Content-Type', 'application/json')
@@ -45,6 +58,10 @@ class Backend(BaseHTTPRequestHandler):
                     'name': 'deployment_probe', 'arguments': '{}', 'status': 'completed'}
         else:
             text = '{"status":"REVIEW_ROUTE_OK"}' if payload['model'] == 'codex-auto-review' else 'STREAM_OK'
+            if payload['model'] == 'fixture-compactor':
+                text = 'The user asked to remember COMPACTION_CONTEXT_OK. Continue with that marker.'
+            elif 'COMPACTION_CONTEXT_OK' in json.dumps(payload.get('input', [])):
+                text = 'COMPACTION_CONTEXT_OK retained'
             if any(i.get('type') == 'function_call_output' for i in payload['input']):
                 text = 'TOOL_CONTINUATION_OK'
             item = {'type': 'message', 'id': 'msg_probe', 'role': 'assistant', 'status': 'completed',
@@ -66,7 +83,7 @@ class Backend(BaseHTTPRequestHandler):
         events += [{'type': 'response.output_item.done', 'output_index': 0, 'item': item},
                    {'type': 'response.completed', 'response': response | {
                        'status': 'completed', 'output': [item],
-                       'usage': {'input_tokens': 1, 'output_tokens': 1, 'total_tokens': 2}}}]
+                       'usage': {'input_tokens': 100, 'output_tokens': 10, 'total_tokens': 110}}}]
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
@@ -97,12 +114,23 @@ class StartupTests(unittest.TestCase):
         template = Environment(loader=FileSystemLoader(ROOT / 'deploy/templates'),
                                undefined=StrictUndefined).get_template('config.yaml.j2')
         config = root / 'config.yaml'
-        config.write_text(template.render(litellm_model='chatgpt/gpt-6-astra'))
+        settings = yaml.safe_load(template.render(litellm_model='chatgpt/gpt-6-astra'))
+        settings['model_list'].append({'model_name': 'fixture/compactor', 'model_info': {'mode': 'responses'},
+            'litellm_params': {'model': 'openai/fixture-compactor', 'api_key': 'synthetic-fixture',
+                              'api_base': f'http://127.0.0.1:{cls.backend.server_port}/v1'}})
+        config.write_text(yaml.safe_dump(settings))
+        cls.catalog = root / 'catalog.json'
+        cls.catalog.write_text(json.dumps({'models': [
+            {'slug': 'chatgpt/gpt-6-astra', 'visibility': 'list', 'priority': 1, 'context_window': 272000,
+             'comp_hash': '3000'},
+            {'slug': 'fixture/compactor', 'visibility': 'list', 'priority': 90, 'context_window': 1000000,
+             'input_modalities': ['text']}]}))
         cls.port = unused_port()
         cls.base = f'http://127.0.0.1:{cls.port}'
         env = dict(os.environ, CREDENTIALS_DIRECTORY=str(root), CHATGPT_TOKEN_DIR=str(root),
                    CHATGPT_API_BASE=f'http://127.0.0.1:{cls.backend.server_port}',
                    LITELLM_LOCAL_MODEL_COST_MAP='True', LITELLM_TELEMETRY='False',
+                   COMPACTION_FALLBACK_ENABLED='true', COMPACTION_MODEL_CATALOG=str(cls.catalog),
                    UV_OFFLINE='1', UV_PYTHON_DOWNLOADS='never', UV_CACHE_DIR=str(root / 'uv-cache'))
         cls.log = (root / 'server.log').open('w+')
         cls.addClassCleanup(cls.log.close)
@@ -130,10 +158,10 @@ class StartupTests(unittest.TestCase):
             cls.process.kill()
             cls.process.wait(timeout=5)
 
-    def request(self, payload):
+    def request(self, payload, headers=None):
         request = urllib.request.Request(self.base + '/v1/responses', data=json.dumps(payload).encode(),
                                          headers={'Content-Type': 'application/json',
-                                                  'Authorization': 'Bearer sk-isolated-proxy-key'})
+                                                  'Authorization': 'Bearer sk-isolated-proxy-key', **(headers or {})})
         with urllib.request.urlopen(request, timeout=30) as response:
             if 'text/event-stream' not in response.headers.get('Content-Type', ''):
                 return json.load(response)
@@ -228,6 +256,74 @@ class StartupTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 400)
         self.assertIn('synthetic backend rejection', caught.exception.read().decode())
         caught.exception.close()
+
+    def test_compaction_recovers_through_real_proxy_and_other_provider(self):
+        before = len(self.backend.requests)
+        events = self.request(self.payload(input=[{'role': 'user', 'content': 'CONTEXT CHECKPOINT COMPACTION'}]),
+                              headers={'x-codex-turn-metadata': '{"request_kind":"compaction"}'})
+        outgoing = [r[2] for r in self.backend.requests[before:]]
+        self.assertEqual([r['model'] for r in outgoing], ['gpt-6-astra', 'fixture-compactor'])
+        self.assertEqual(outgoing[-1]['tools'], [])
+        self.assertEqual(outgoing[-1]['tool_choice'], 'none')
+        self.assertEqual(sum(e['type'] == 'response.completed' for e in events), 1)
+        final = events[-1]['response']
+        self.assertEqual(final['metadata']['compaction_model'], 'fixture/compactor')
+        self.assertIn('COMPACTION_CONTEXT_OK', json.dumps(final['output']))
+
+    @unittest.skipUnless(os.environ.get('CODEX_COMPACTION_TEST_BINARY'),
+                         'set CODEX_COMPACTION_TEST_BINARY for installed Codex acceptance')
+    def test_installed_codex_compacts_and_resumes_with_selected_model(self):
+        # A repository-local disposable home avoids changing the desktop's sessions/auth.
+        with tempfile.TemporaryDirectory(prefix='.compaction-acceptance-', dir=ROOT) as temporary:
+            task_home = Path(temporary)
+            (task_home / 'config.toml').write_text(f'''model = "chatgpt/gpt-6-astra"
+model_provider = "fixture"
+model_auto_compact_token_limit = 1
+approval_policy = "never"
+sandbox_mode = "read-only"
+web_search = "disabled"
+[features]
+shell_snapshot = false
+[model_providers.fixture]
+name = "Offline compaction fixture"
+base_url = "{self.base}/v1"
+wire_api = "responses"
+env_key = "COMPACTION_FIXTURE_KEY"
+request_max_retries = 0
+stream_max_retries = 0
+''')
+            env = os.environ | {'CODEX_HOME': str(task_home), 'COMPACTION_FIXTURE_KEY': 'sk-isolated-proxy-key'}
+            binary = os.environ['CODEX_COMPACTION_TEST_BINARY']
+            def run(arguments):
+                completed = subprocess.run([binary, 'exec', *arguments], env=env,
+                                           capture_output=True, text=True, timeout=60)
+                if completed.returncode:
+                    self.log.flush()
+                    self.log.seek(0)
+                    logs = self.log.read()
+                    recovery = '\n'.join(line for line in logs.splitlines() if 'compaction_recovery' in line)
+                    headers = [{k: v for k, v in r[1].items() if 'codex' in k} for r in self.backend.requests[-4:]]
+                    kinds = [[{'type': i.get('type'), 'role': i.get('role'), 'keys': list(i)}
+                              for i in r[2].get('input', [])] for r in self.backend.requests[-4:]]
+                    self.fail(completed.stderr[-2000:] + completed.stdout[-2000:] + '\n' + recovery + '\n' + json.dumps(headers) + '\n' + json.dumps(kinds))
+                return [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+            first = run(['--skip-git-repo-check', '-C', temporary, '--json',
+                         'Remember COMPACTION_CONTEXT_OK and acknowledge it.'])
+            thread = next(e['thread_id'] for e in first if e['type'] == 'thread.started')
+            before = len(self.backend.requests)
+            second = run(['resume', thread, '--skip-git-repo-check', '--json',
+                          'Report the marker I asked you to remember.'])
+            self.assertTrue(any(e['type'] == 'turn.completed' for e in second), second)
+            self.assertIn('COMPACTION_CONTEXT_OK', json.dumps(second))
+            requests = [r[2] for r in self.backend.requests[before:]]
+            self.assertIn('fixture-compactor', [r['model'] for r in requests])
+            self.assertEqual(requests[-1]['model'], 'gpt-6-astra')
+            # Verify Codex actually persisted the replacement summary, not just a reply.
+            rollouts = list((task_home / 'sessions').rglob('*.jsonl'))
+            checkpoints = [json.loads(line) for path in rollouts for line in path.read_text().splitlines()
+                           if json.loads(line).get('type') == 'compacted']
+            self.assertTrue(checkpoints, 'Codex did not persist a compaction checkpoint')
+            self.assertIn('COMPACTION_CONTEXT_OK', json.dumps(checkpoints))
 
 
 if __name__ == '__main__':

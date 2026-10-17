@@ -466,6 +466,66 @@ isolated proxy. Check the desktop Fast toggle before declaring fast mode verifie
 Remove the forwarding override when a pinned upstream release preserves the tier
 and passes the same checks.
 
+### Compaction recovery
+
+`compaction_fallback_enabled` in the deployment inventory enables the repository's
+compaction-only recovery wrapper. Its owned systemd drop-in projects it as
+`COMPACTION_FALLBACK_ENABLED`; setting the inventory flag to `false` and repeating
+`deploy/deploy.yml --tags compaction-recovery` restores ordinary dispatch without changing Codex or model
+discovery. `COMPACTION_MODEL_CATALOG` points at the same saved catalog used by the
+desktop picker. The wrapper reloads that catalog for each compaction and intersects
+it with active router deployments, so existing model-refresh playbooks also update
+future fallback candidates without another list to maintain.
+
+`ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --tags compaction-recovery`
+installs only the compaction runtime, verifier, and service drop-in, then restarts
+LiteLLM and checks liveness. Use this tag to activate recovery independently of
+other pending runtime or provider updates. The tagged deployment inserts the
+compaction installation after shared search in the existing launcher, preserving
+other active integrations such as voice. Ordinary deployment installs the complete
+repository launcher, which already includes compaction recovery; the targeted
+insertion is only for this staged rollout.
+
+Only requests explicitly marked `request_kind=compaction` enter recovery. Current
+Codex transports that marker in `client_metadata["x-codex-turn-metadata"]`; the
+legacy HTTP header remains supported. Ordinary turns and `codex-auto-review` keep
+their existing routing. The requested compactor is always tried first. After an
+availability failure, models from other inference backends are tried in picker
+priority order, followed by remaining models on the original backend. Hidden,
+inactive, duplicate, unauthorized, and unsuitable context/modality routes are
+excluded. Each attempt has a 120-second timeout, with nested retries/fallbacks
+disabled; cancellation closes the active stream immediately.
+
+Compaction summaries are buffered until completion, with SSE comment keepalives
+while waiting. Failed partial summaries never reach Codex. Compatible models can
+reuse native history; other backends receive quoted readable history and tool
+results with tool execution disabled, at standard speed. Opaque compaction
+checkpoints cannot be translated across backends, and unknown history items are
+rejected rather than dropped. Unrecognized tokenizers use a conservative byte
+estimate; smaller-context models may be skipped. On success, Codex persists its
+usual replacement checkpoint and continues with the selected working model. On
+exhaustion, the original error and model/outcome list are returned. Structured
+`compaction_recovery` logs and response metadata identify the actual compactor;
+they do not contain transcripts or credentials.
+
+Offline validation includes the real proxy process and optional installed-Codex
+acceptance with a synthetic backend that fails compaction and recovers through a
+second provider:
+
+```sh
+uv run -m unittest discover -s scripts -p 'test_compaction_fallback.py'
+CODEX_COMPACTION_TEST_BINARY=/path/to/codex-0.159.2 uv run scripts/test_proxy_startup.py
+```
+
+After deployment, `uv run scripts/verify_compaction.py` checks the live proxy with
+a synthetic history and the selected working model. `--model` selects another
+active route. It uses the existing encrypted proxy credential in memory and reports
+only requested/actual model IDs and whether the marker survived; it does not
+operate on an existing desktop chat.
+
+Native OpenAI chats that bypass LiteLLM do not use this recovery path. No response
+security setting is changed.
+
 ### Grace Codex runtime
 
 The desktop's Fast controls require the host's genuine ChatGPT identity.
