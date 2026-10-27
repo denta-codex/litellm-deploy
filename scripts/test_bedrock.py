@@ -221,6 +221,9 @@ class BedrockActivationTests(unittest.TestCase):
         with patch('configure_bedrock.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
             self.refresh.validate()
         self.assertEqual(run.call_count, 7)
+        probes = [call.args[0] for call in run.call_args_list if any(str(arg).endswith('/verify.py') for arg in call.args[0])]
+        self.assertEqual(len(probes), 2)
+        self.assertTrue(all('--auto-tool-choice' in command for command in probes))
         self.refresh.finish()
         catalog = json.loads(self.refresh.paths['catalog'].read_text())
         self.assertEqual(catalog['models'][:4], self.catalog['models'])

@@ -81,7 +81,7 @@
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [launch.py, shared_search.py, bedrock_aws.py, bedrock-models.json, configure_bedrock.py, refresh_models.py, verify_bedrock.py]
+      loop: [launch.py, shared_search.py, bedrock_aws.py, bedrock-models.json, configure_bedrock.py, refresh_models.py, verify_bedrock.py, verify.py]
       notify: Restart LiteLLM
     - name: Create systemd drop-in directory
       ansible.builtin.file:

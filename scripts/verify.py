@@ -7,6 +7,7 @@ import urllib.request
 
 p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
+p.add_argument('--auto-tool-choice', action='store_true', help='Exercise providers that support automatic tool choice only')
 p.add_argument('--base-url', default='http://127.0.0.1:4000', help='Proxy origin, including an isolated test port')
 p.add_argument('--credential', default='/home/agent/.config/litellm/proxy-key.cred')
 p.add_argument('--service-tier', choices=['priority', 'default'],
@@ -68,17 +69,20 @@ def completed_response(payload):
                     return result
     raise RuntimeError('Response stream ended without completion')
 
+probe_tool = {'type': 'function', 'name': 'deployment_probe', 'description': 'Check deployment.',
+              'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False, 'required': []}}
+
 first = completed_response({
     'model': args.model,
     'input': [{'role': 'user', 'content': 'Call deployment_probe to check this deployment.'}],
-    'tools': [{'type': 'function', 'name': 'deployment_probe', 'description': 'Check deployment.',
-               'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False, 'required': []}}],
-    'tool_choice': {'type': 'function', 'name': 'deployment_probe'},
+    'tools': [probe_tool],
+    'tool_choice': 'auto' if args.auto_tool_choice else {'type': 'function', 'name': 'deployment_probe'},
 })
 calls = [item for item in first['output'] if item.get('type') == 'function_call']
 assert len(calls) == 1 and calls[0]['name'] == 'deployment_probe', 'tool call missing'
 second = completed_response({
     'model': args.model,
+    'tools': [probe_tool],
     'input': [{'role': 'user', 'content': 'Call deployment_probe, then report its result.'}]
     + first['output']
     + [{'type': 'function_call_output', 'call_id': calls[0]['call_id'], 'output': 'DEPLOYMENT_TOOL_OK'}],

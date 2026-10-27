@@ -1182,3 +1182,7 @@ subscription and other provider refreshes preserve the Bedrock routes.
 Bedrock effort levels are verified against the pinned adapter and live inference:
 Opus offers low, medium, high, and max; GPT offers low, medium, high, and xhigh.
 Opus xhigh is excluded because the pinned Bedrock adapter rejects it.
+
+Bedrock acceptance uses automatic tool choice because the Opus profile rejects
+forced tool selection. Tool-result continuations retain the tool definitions,
+as required by Bedrock Converse. Explicit forced choices are not silently changed.

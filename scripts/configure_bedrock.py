@@ -86,6 +86,7 @@ def generate(source, config, catalog, selected):
 class BedrockSetup(Refresh):
     prefix = PREFIX
     playbook = 'bedrock.yml'
+    verify_args = ('--auto-tool-choice',)
     generate = staticmethod(generate)
 
     def __init__(self, home, root, uv):

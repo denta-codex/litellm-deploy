@@ -163,6 +163,7 @@ def generate(source, config, catalog, selected):
 class Refresh:
     prefix = PREFIX
     playbook = 'refresh-models.yml'
+    verify_args = ()
     generate = staticmethod(generate)
 
     def __init__(self, home, root, uv):
@@ -306,7 +307,7 @@ class Refresh:
                     raise ValueError(f'{name}: validation failed\n{result.stdout[-1500:]}\n{result.stderr[-2000:]}')
                 return name
             commands = [
-                [self.uv, 'run', '--no-sync', '--project', str(self.root), str(Path(__file__).with_name('verify.py')), '--model', name],
+                [self.uv, 'run', '--no-sync', '--project', str(self.root), str(Path(__file__).with_name('verify.py')), '--model', name, *self.verify_args],
                 [self.uv, 'run', '--no-sync', '--project', str(self.root), str(Path(__file__).with_name('verify_codex.py')),
                  '--model', name, '--catalog', str(self.transaction / 'catalog.json')],
             ]
