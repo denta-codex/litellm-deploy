@@ -41,7 +41,7 @@
       tags: [compaction-recovery]
       ansible.builtin.assert:
         that: not pending_refresh.stat.exists
-        fail_msg: Recover the pending transaction with its original playbook (claude.yml, modal.yml or refresh-models.yml) -e refresh_action=rollback before deploying.
+        fail_msg: Recover the pending transaction with its original playbook (claude.yml, modal.yml, local.yml, bedrock.yml or refresh-models.yml) -e refresh_action=rollback before deploying.
     - name: Inspect existing model refresh utility
       ansible.builtin.stat:
         path: "{{ litellm_root }}/scripts/refresh_models.py"
@@ -63,6 +63,36 @@
       changed_when: false
       check_mode: false
       when: local_snapshot.stat.exists
+    - name: Inspect saved Bedrock snapshot
+      ansible.builtin.stat:
+        path: "{{ litellm_state }}/bedrock-models.json"
+      register: bedrock_snapshot
+    - name: Verify saved Bedrock routes with installed generator
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_bedrock.py", check-snapshot]
+      changed_when: false
+      check_mode: false
+      when: bedrock_snapshot.stat.exists
+    - name: Require enabled Bedrock credentials for retained routes
+      ansible.builtin.assert:
+        that: litellm_bedrock_enabled | default(false)
+      when: bedrock_snapshot.stat.exists
+    - name: Inspect encrypted Bedrock runtime credential
+      ansible.builtin.stat:
+        path: "{{ litellm_bedrock_credential }}"
+        get_checksum: false
+        get_mime: false
+      become: true
+      register: bedrock_credential
+      when: litellm_bedrock_enabled | default(false)
+    - name: Require the existing private Bedrock credential
+      ansible.builtin.assert:
+        that:
+          - bedrock_credential.stat.exists
+          - bedrock_credential.stat.isreg | default(false)
+          - bedrock_credential.stat.uid | default(-1) == 0
+          - bedrock_credential.stat.mode | default('') == '0600'
+      when: litellm_bedrock_enabled | default(false)
     - name: Inspect retained encrypted Modal inference credential
       ansible.builtin.stat:
         path: "{{ litellm_modal_credential }}"
@@ -103,7 +133,7 @@
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_session.py, claude_provider.py, shared_search.py, live_voice.py]
+      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_session.py, claude_provider.py, shared_search.py, live_voice.py, bedrock_aws.py]
       notify: Restart LiteLLM
     - name: Install compaction recovery runtime
       tags: [compaction-recovery]
@@ -165,7 +195,7 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py', 'live_voice.py', 'compaction_fallback.py']
+      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py', 'live_voice.py', 'bedrock_aws.py', 'compaction_fallback.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"

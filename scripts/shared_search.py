@@ -345,7 +345,7 @@ class SearchResponses:
 
     async def route(self, data, route_type, **kwargs):
         model = data.get('model', '')
-        eligible = model in ('claude/opus-5.5', 'local/qwen3.8-27b') or model.startswith('modal/')
+        eligible = model in ('claude/opus-5.5', 'local/qwen3.8-27b') or model.startswith(('modal/', 'bedrock/'))
         hosted = [t for t in data.get('tools', []) if t.get('type') in HOSTED]
         history = isinstance(data.get('input'), list) and any(i.get('type') == 'web_search_call' and i.get('id', '').startswith('ws_shared') for i in data['input'])
         if route_type != 'aresponses' or not eligible or not (hosted or history):

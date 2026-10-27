@@ -1,0 +1,8 @@
+- name: Install matching LiteLLM integration
+  ansible.builtin.import_playbook: deploy.yml
+  when: (refresh_action | default('refresh')) != 'rollback'
+
+- name: Activate Bedrock using existing model transaction
+  ansible.builtin.import_playbook: refresh-models.yml
+  vars:
+    refresh_script: configure_bedrock.py

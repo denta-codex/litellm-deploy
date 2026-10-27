@@ -1140,3 +1140,39 @@ Subsequent desktop evidence supplied by the user on October 4:
 The desktop microphone/speaker experience is therefore demonstrated for the
 local Mac chat; it remains unverified through Grace's installed gateway. Keep
 these two chats separate when assessing what has actually been deployed.
+
+
+## AWS Bedrock models
+
+Grace publishes exactly `bedrock/opus-5.5` and `bedrock/gpt-6.1-sol` through the
+US inference profiles in `scripts/bedrock-models.json`, using `us-east-1`.
+Both models must be discoverable and support streaming before activation.
+No substitute model is selected. The current Codex default stays selected.
+
+The runtime uses the retained IAM identity and encrypted credential at
+`/etc/credstore.encrypted/litellm-bedrock-aws`. Systemd supplies it to the launcher;
+AWS keys are parsed in memory and ambient credential sources are disabled.
+This workflow does not provision IAM users, rotate keys, or enroll models.
+
+Run from a clean, committed checkout:
+
+```sh
+uv run --no-sync scripts/configure_bedrock.py preview
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml --syntax-check
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml
+```
+
+The playbook installs the matching integration, then activates through the shared
+refresh transaction. Both models must pass hosted search, streaming, tool-result
+continuation, and stock Codex checks before the picker and discovery snapshot are
+published. Failed activation restores the previous routes and catalog. Recover an
+interrupted transaction with:
+
+```sh
+mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml -e refresh_action=rollback
+```
+
+After successful publication, restart Grace through the owning Codex desktop to
+reload the picker. Ordinary deployments verify the retained Bedrock snapshot;
+subscription and other provider refreshes preserve the Bedrock routes.

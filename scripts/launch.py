@@ -38,10 +38,27 @@ def main():
         if not key or any(c.isspace() for c in key):
             raise ValueError('Invalid LiteLLM proxy credential')
         token = modal_token((credentials / 'modal-inference-token').read_text())
+        bedrock_path = credentials / 'bedrock-aws-credentials'
+        bedrock = None
+        if bedrock_path.exists():
+            from bedrock_aws import credential_values
+            bedrock = credential_values(bedrock_path.read_text())
     except (KeyError, OSError, ValueError):
         sys.exit('Cannot load LiteLLM systemd credentials; check the encrypted credential files.')
     os.environ['LITELLM_MASTER_KEY'] = key
     os.environ['MODAL_API_KEY'] = token
+    for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_PROFILE',
+                 'AWS_DEFAULT_PROFILE', 'AWS_BEARER_TOKEN_BEDROCK', 'AWS_REGION_NAME', 'AWS_REGION', 'AWS_DEFAULT_REGION',
+                 'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_ARN', 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',
+                 'AWS_CONTAINER_CREDENTIALS_FULL_URI'):
+        os.environ.pop(name, None)
+    os.environ['AWS_SHARED_CREDENTIALS_FILE'] = '/dev/null'
+    os.environ['AWS_CONFIG_FILE'] = '/dev/null'
+    os.environ['AWS_EC2_METADATA_DISABLED'] = 'true'
+    if bedrock is not None:
+        os.environ['AWS_ACCESS_KEY_ID'] = bedrock['access_key_id']
+        os.environ['AWS_SECRET_ACCESS_KEY'] = bedrock['secret_access_key']
+        os.environ['AWS_REGION_NAME'] = bedrock['region']
     server = Path(__file__).with_name('serve.py')
     port = sys.argv[2] if len(sys.argv) > 2 else '4000'
     os.execv(sys.executable, [sys.executable, str(server), '--config', sys.argv[1], '--port', port])
