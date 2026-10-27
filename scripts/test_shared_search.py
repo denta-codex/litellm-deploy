@@ -201,6 +201,43 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(i['type'] == 'web_search_call' for i in result['output']))
         self.assertEqual(len(self.requests), 2)
 
+    async def test_bedrock_converse_search_and_provider_preserving_followup(self):
+        from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+        def upstream(request):
+            body = json.loads(request.content)
+            self.requests.append(body)
+            results = [part for message in body['messages'] for part in message['content'] if 'toolResult' in part]
+            if results:
+                self.assertIn('BLUE', str(results))
+                content = [{'text': 'BLUE: https://example.com/fact'}]
+                reason = 'end_turn'
+            else:
+                content = [{'toolUse': {'toolUseId': 'call_search', 'name': SEARCH_NAME,
+                                        'input': {'query': 'fixture fact'}}}]
+                reason = 'tool_use'
+            return httpx.Response(200, json={'output': {'message': {'role': 'assistant', 'content': content}},
+                'stopReason': reason, 'usage': {'inputTokens': 10, 'outputTokens': 5, 'totalTokens': 15},
+                'metrics': {'latencyMs': 1}})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            with patch.object(AsyncHTTPHandler, 'create_client', return_value=client):
+                handler = AsyncHTTPHandler()
+            handler.client = client
+            for slug, profile in (('opus-5.5', 'us.anthropic.claude-opus-5-5'),
+                                  ('gpt-6.1-sol', 'us.openai.gpt-6.1-sol')):
+                with self.subTest(model=slug):
+                    self.requests.clear()
+                    self.backend.queries.clear()
+                    self.router = litellm.Router(model_list=[{'model_name': 'bedrock/' + slug, 'litellm_params': {
+                        'model': 'bedrock/converse/' + profile, 'aws_access_key_id': 'AKIA' + 'A' * 16,
+                        'aws_secret_access_key': 'B' * 40, 'aws_region_name': 'us-east-1',
+                        'use_chat_completions_api': True, 'allowed_openai_params': ['tools', 'tool_choice']}}], num_retries=0)
+                    with patch('litellm.llms.bedrock.chat.converse_handler.get_async_httpx_client', return_value=handler):
+                        result = await self.call(model='bedrock/' + slug)
+                    self.assertEqual(self.backend.queries, ['fixture fact'])
+                    self.assertEqual(len(self.requests), 2)
+                    self.assertTrue(any(i['type'] == 'web_search_call' for i in result['output']))
+                    self.assertIn('BLUE', str(result['output']))
+
     async def test_stream_matches_json_and_real_progress(self):
         events = await self.call(stream=True)
         self.assertIn('response.web_search_call.searching', [e['type'] for e in events])

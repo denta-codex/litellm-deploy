@@ -212,7 +212,7 @@ class Turn:
 
 class SharedSearchInterceptor(WebSearchInterceptionLogger):
     def __init__(self):
-        super().__init__(enabled_providers=['openai', 'claudesdk'])
+        super().__init__(enabled_providers=['openai', 'claudesdk', 'bedrock', 'bedrock_converse'])
 
     async def async_pre_call_deployment_hook(self, kwargs, call_type):
         # The authenticated Responses boundary converts tools before the stock
@@ -224,7 +224,7 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
 
     async def async_should_run_agentic_loop(self, **kwargs):
         turn = CURRENT.get()
-        if turn is None or kwargs.get('custom_llm_provider') not in ('openai', 'claudesdk'):
+        if turn is None or kwargs.get('custom_llm_provider') not in ('openai', 'claudesdk', 'bedrock', 'bedrock_converse'):
             return False, {}
         return await super().async_should_run_chat_completion_agentic_loop(**kwargs)
 
@@ -289,6 +289,11 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
             await turn.queue.put(('reserve', reservations))
             # Reuse upstream search execution and follow-up parameter handling.
             plan = await super().async_build_chat_completion_agentic_loop_plan(**kwargs)
+            # The stripped Bedrock model still contains 'converse/', so upstream
+            # cannot infer its provider from the slash. Preserve it explicitly.
+            if kwargs.get('kwargs', {}).get('custom_llm_provider') in ('bedrock', 'bedrock_converse'):
+                model = kwargs['model']
+                plan.request_patch.model = model if model.startswith('bedrock/') else 'bedrock/' + model
             tool_messages = plan.request_patch.messages[len(kwargs['messages']) + 1:]
             canonical = Transform.transform_responses_api_input_to_messages(rendered['output'], responses_api_request={})
             plan.request_patch.messages = kwargs['messages'] + canonical + tool_messages
