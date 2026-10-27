@@ -494,8 +494,8 @@ class CompactionResponses:
 
 
 def install():
-    if version('litellm') != '1.102.1':
-        raise RuntimeError('Compaction recovery requires LiteLLM 1.102.1; revalidate before upgrading')
+    if version('litellm') != '1.106.5':
+        raise RuntimeError('Compaction recovery requires LiteLLM 1.106.5; revalidate before upgrading')
     from litellm.proxy import common_request_processing
     async def authorize(model, kwargs):
         auth = kwargs.get('user_api_key_dict')

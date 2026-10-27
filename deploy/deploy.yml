@@ -77,6 +77,36 @@
       ansible.builtin.assert:
         that: litellm_bedrock_enabled | default(false)
       when: bedrock_snapshot.stat.exists
+    - name: Inspect saved Vertex snapshot
+      ansible.builtin.stat:
+        path: "{{ litellm_state }}/vertex-models.json"
+      register: vertex_snapshot
+    - name: Verify retained Vertex routes
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_vertex.py", check-snapshot]
+      changed_when: false
+      check_mode: false
+      when: vertex_snapshot.stat.exists
+    - name: Require enabled Vertex credentials for retained routes
+      ansible.builtin.assert:
+        that: litellm_vertex_enabled | default(false)
+      when: vertex_snapshot.stat.exists
+    - name: Inspect encrypted Vertex runtime credential
+      ansible.builtin.stat:
+        path: "{{ litellm_vertex_credential }}"
+        get_checksum: false
+        get_mime: false
+      become: true
+      register: vertex_credential
+      when: litellm_vertex_enabled | default(false)
+    - name: Require the dedicated private Vertex credential
+      ansible.builtin.assert:
+        that:
+          - vertex_credential.stat.exists
+          - vertex_credential.stat.isreg | default(false)
+          - vertex_credential.stat.uid | default(-1) == 0
+          - vertex_credential.stat.mode | default('') == '0600'
+      when: litellm_vertex_enabled | default(false)
     - name: Inspect encrypted Bedrock runtime credential
       ansible.builtin.stat:
         path: "{{ litellm_bedrock_credential }}"
@@ -133,7 +163,7 @@
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_session.py, claude_provider.py, shared_search.py, live_voice.py, bedrock_aws.py]
+      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_session.py, claude_provider.py, shared_search.py, live_voice.py, bedrock_aws.py, vertex_google.py]
       notify: Restart LiteLLM
     - name: Install compaction recovery runtime
       tags: [compaction-recovery]
@@ -196,13 +226,20 @@
         mode: '0644'
       become: true
       notify: Restart LiteLLM
+    - name: Configure Vertex systemd credential
+      ansible.builtin.template:
+        src: vertex.conf.j2
+        dest: /etc/systemd/system/litellm.service.d/50-vertex.conf
+        mode: '0644'
+      become: true
+      notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
         src: "{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py', 'live_voice.py', 'bedrock_aws.py', 'compaction_fallback.py']
+      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py', 'live_voice.py', 'bedrock_aws.py', 'vertex_google.py', 'compaction_fallback.py']
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"

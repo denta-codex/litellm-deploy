@@ -215,8 +215,9 @@ class StartupTests(unittest.TestCase):
         for name in ('text', 'parallel_tool_calls', 'prompt_cache_key', 'service_tier'):
             self.assertNotIn(name, outgoing)
         result = self.request(self.payload(stream=False))
-        # The pinned ChatGPT provider forces streaming even for stream=False.
-        self.assertTrue(any(e['type'] == 'response.completed' for e in result))
+        # Upstream now aggregates its subscription stream for stream=False.
+        self.assertEqual(result['status'], 'completed')
+        self.assertTrue(result['output'])
 
     def test_streamed_tool_and_continuation(self):
         events = self.request(self.payload(

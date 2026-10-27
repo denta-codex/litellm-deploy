@@ -35,14 +35,14 @@ def verify(catalog, base_url):
             print('PASS ' + row['slug'] + ': image input', flush=True)
 
 
-def check(base_url, key, payload):
+def check(base_url, key, payload, expected='BEDROCK_CAPABILITY_OK'):
     request = urllib.request.Request(base_url.rstrip('/') + '/v1/responses',
         data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
     with urllib.request.urlopen(request, timeout=180) as response:
         value = json.load(response)
     text = ''.join(p.get('text', '') for item in value.get('output', [])
                    if item.get('type') == 'message' for p in item.get('content', []))
-    assert value.get('status') == 'completed' and 'BEDROCK_CAPABILITY_OK' in text, 'Capability probe did not complete'
+    assert value.get('status') == 'completed' and expected in text, 'Capability probe did not complete'
 
 
 if __name__ == '__main__':

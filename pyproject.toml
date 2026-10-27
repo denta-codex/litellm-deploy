@@ -4,8 +4,9 @@ version = "0.1.0"
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "claude-agent-sdk==0.2.161",
-    "litellm[proxy]==1.102.1",
+    "litellm[proxy]==1.106.5",
     "prisma==0.15.0",
+    "google-auth==2.62.0",
     "tomlkit>=0.15,<0.16",
 ]
 

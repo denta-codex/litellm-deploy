@@ -12,6 +12,8 @@ all:
       litellm_model: chatgpt/gpt-6-astra
       compaction_fallback_enabled: true
       litellm_bedrock_enabled: true
+      litellm_vertex_enabled: true
+      litellm_vertex_credential: /etc/credstore.encrypted/litellm-vertex-ai
       litellm_bedrock_credential: /etc/credstore.encrypted/litellm-bedrock-aws
       litellm_modal_credential: /etc/credstore.encrypted/codex-gateway-modal
       codex_version: 0.159.2

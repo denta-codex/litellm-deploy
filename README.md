@@ -1190,3 +1190,6 @@ as required by Bedrock Converse. Explicit forced choices are not silently change
 Both Bedrock entries use Codex Code Mode. Direct Opus tools expand connected-app
 names beyond Bedrock's 64-character tool-name limit; Code Mode exposes those tools
 through compatible entry points while retaining shell and hosted-search access.
+
+Google Vertex AI setup, separate runtime/provider activation, security review,
+and recovery: [docs/VERTEX.md](docs/VERTEX.md).

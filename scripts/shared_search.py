@@ -212,7 +212,7 @@ class Turn:
 
 class SharedSearchInterceptor(WebSearchInterceptionLogger):
     def __init__(self):
-        super().__init__(enabled_providers=['openai', 'claudesdk', 'bedrock', 'bedrock_converse'])
+        super().__init__(enabled_providers=['openai', 'claudesdk', 'bedrock', 'bedrock_converse', 'vertex_ai'])
 
     async def async_pre_call_deployment_hook(self, kwargs, call_type):
         # The authenticated Responses boundary converts tools before the stock
@@ -224,7 +224,7 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
 
     async def async_should_run_agentic_loop(self, **kwargs):
         turn = CURRENT.get()
-        if turn is None or kwargs.get('custom_llm_provider') not in ('openai', 'claudesdk', 'bedrock', 'bedrock_converse'):
+        if turn is None or kwargs.get('custom_llm_provider') not in ('openai', 'claudesdk', 'bedrock', 'bedrock_converse', 'vertex_ai'):
             return False, {}
         return await super().async_should_run_chat_completion_agentic_loop(**kwargs)
 
@@ -233,7 +233,7 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
         # plan executor and bypasses response_override. Use the latter once.
         return False, {}
 
-    async def _execute_search(self, query, kwargs=None):
+    async def _execute_search(self, query, kwargs=None, rich=None):
         turn = CURRENT.get()
         call = next(c for c in turn.calls if c['query'] == query and not c.get('started'))
         call['started'] = True
@@ -294,6 +294,9 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
             if kwargs.get('kwargs', {}).get('custom_llm_provider') in ('bedrock', 'bedrock_converse'):
                 model = kwargs['model']
                 plan.request_patch.model = model if model.startswith('bedrock/') else 'bedrock/' + model
+            elif kwargs.get('kwargs', {}).get('custom_llm_provider') == 'vertex_ai':
+                model = kwargs['model']
+                plan.request_patch.model = model if model.startswith('vertex_ai/') else 'vertex_ai/' + model
             tool_messages = plan.request_patch.messages[len(kwargs['messages']) + 1:]
             canonical = Transform.transform_responses_api_input_to_messages(rendered['output'], responses_api_request={})
             plan.request_patch.messages = kwargs['messages'] + canonical + tool_messages
@@ -350,7 +353,7 @@ class SearchResponses:
 
     async def route(self, data, route_type, **kwargs):
         model = data.get('model', '')
-        eligible = model in ('claude/opus-5.5', 'local/qwen3.8-27b') or model.startswith(('modal/', 'bedrock/'))
+        eligible = model in ('claude/opus-5.5', 'local/qwen3.8-27b', 'vertex/gemini-4-argon') or model.startswith(('modal/', 'bedrock/'))
         hosted = [t for t in data.get('tools', []) if t.get('type') in HOSTED]
         history = isinstance(data.get('input'), list) and any(i.get('type') == 'web_search_call' and i.get('id', '').startswith('ws_shared') for i in data['input'])
         if route_type != 'aresponses' or not eligible or not (hosted or history):
@@ -517,8 +520,8 @@ class SearchResponses:
 
 
 def install():
-    if version('litellm') != '1.102.1':
-        raise RuntimeError('Shared search requires LiteLLM 1.102.1; revalidate before upgrading')
+    if version('litellm') != '1.106.5':
+        raise RuntimeError('Shared search requires LiteLLM 1.106.5; revalidate before upgrading')
     from litellm.proxy import common_request_processing
     interceptor = SharedSearchInterceptor()
     litellm.callbacks.append(interceptor)

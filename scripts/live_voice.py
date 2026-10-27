@@ -1,4 +1,4 @@
-"""Narrow Codex 0.159.2 WebRTC adapter for LiteLLM 1.102.1.
+"""Narrow Codex 0.159.2 WebRTC adapter for LiteLLM 1.106.5.
 
 Protocol: openai/codex rust-v0.159.2 realtime_call.rs and realtime_websocket/.
 Upstream replacement: https://github.com/BerriAI/litellm/pull/40366
@@ -341,7 +341,7 @@ async def parse_offer(request):
 
 
 def install(app, gateway=None):
-    if version('litellm') != '1.102.1':
+    if version('litellm') != '1.106.5':
         raise RuntimeError('Revalidate or remove live_voice before upgrading LiteLLM')
     if getattr(app.state, 'subscription_voice', None):
         raise RuntimeError('Subscription voice already installed')

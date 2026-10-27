@@ -58,11 +58,11 @@ class BedrockTests(unittest.TestCase):
                 additional_drop_params=params['additional_drop_params'], prompt_cache_key='codex-session',
                 tools=[{'type': 'function', 'function': {'name': 'probe',
                     'parameters': {'type': 'object', 'properties': {}}}}],
-                tool_choice={'type': 'function', 'function': {'name': 'probe'}})
+                tool_choice='auto')
             self.assertNotIn('reasoning_effort', mapped)
             self.assertNotIn('parallel_tool_calls', mapped)
             self.assertNotIn('prompt_cache_key', mapped)
-            self.assertEqual(mapped['tool_choice'], {'tool': {'name': 'probe'}})
+            self.assertEqual(mapped['tool_choice'], {'auto': {}})
             if route['model_name'] == 'bedrock/opus-5.5':
                 self.assertEqual(mapped['thinking']['type'], 'adaptive')
                 self.assertEqual(mapped['output_config']['effort'], 'low')

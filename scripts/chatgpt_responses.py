@@ -66,6 +66,6 @@ class SubscriptionResponsesConfig(ChatGPTResponsesAPIConfig):
 
 def install():
     """ProviderConfigManager resolves this export when selecting ChatGPT."""
-    if version('litellm') != '1.102.1':
-        raise RuntimeError('ChatGPT customization requires LiteLLM 1.102.1; revalidate before upgrading')
+    if version('litellm') != '1.106.5':
+        raise RuntimeError('ChatGPT customization requires LiteLLM 1.106.5; revalidate before upgrading')
     litellm.ChatGPTResponsesAPIConfig = SubscriptionResponsesConfig

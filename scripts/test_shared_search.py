@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
 os.environ['LITELLM_TELEMETRY'] = 'False'
@@ -237,6 +237,38 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(len(self.requests), 2)
                     self.assertTrue(any(i['type'] == 'web_search_call' for i in result['output']))
                     self.assertIn('BLUE', str(result['output']))
+
+    async def test_vertex_search_keeps_project_credentials_and_provider_on_followup(self):
+        from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
+        from litellm.llms.vertex_ai.vertex_llm_base import VertexBase
+        from vertex_google import PROJECT, SLUG, MODEL
+        def upstream(request):
+            body = json.loads(request.content)
+            self.requests.append(body)
+            self.assertIn('/projects/' + PROJECT + '/locations/global/', str(request.url))
+            results = [p for c in body['contents'] for p in c.get('parts', []) if 'function_response' in p]
+            if results:
+                self.assertIn('BLUE', str(results))
+                parts = [{'text':'BLUE: https://example.com/fact'}]
+            else:
+                parts = [{'functionCall':{'name':SEARCH_NAME,'args':{'query':'fixture fact'}}}]
+            return httpx.Response(200,json={'candidates':[{'content':{'role':'model','parts':parts},
+                'finishReason':'STOP','index':0}], 'usageMetadata':{'promptTokenCount':10,
+                'candidatesTokenCount':5,'totalTokenCount':15},'modelVersion':MODEL})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(upstream)) as client:
+            with patch.object(AsyncHTTPHandler,'create_client',return_value=client):
+                handler=AsyncHTTPHandler()
+            handler.client=client
+            self.router=litellm.Router(model_list=[{'model_name':SLUG,'litellm_params':{
+                'model':'vertex_ai/'+MODEL,'vertex_project':PROJECT,'vertex_location':'global',
+                'vertex_credentials':'fixture-only','use_chat_completions_api':True}}],num_retries=0)
+            with patch.object(VertexBase,'_ensure_access_token_async',new=AsyncMock(return_value=('fixture-token',PROJECT))), \
+                    patch('litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini.get_async_httpx_client',return_value=handler):
+                result=await self.call(model=SLUG)
+            self.assertEqual(self.backend.queries,['fixture fact'])
+            self.assertEqual(len(self.requests),2)
+            self.assertTrue(any(i['type']=='web_search_call' for i in result['output']))
+            self.assertIn('BLUE',str(result['output']))
 
     async def test_stream_matches_json_and_real_progress(self):
         events = await self.call(stream=True)

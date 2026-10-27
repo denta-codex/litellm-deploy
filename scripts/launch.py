@@ -43,10 +43,21 @@ def main():
         if bedrock_path.exists():
             from bedrock_aws import credential_values
             bedrock = credential_values(bedrock_path.read_text())
+        vertex_path = credentials / 'vertex-ai-credentials'
+        if vertex_path.exists():
+            from vertex_google import credential_values as vertex_values
+            vertex_values(vertex_path.read_text())
     except (KeyError, OSError, ValueError):
         sys.exit('Cannot load LiteLLM systemd credentials; check the encrypted credential files.')
     os.environ['LITELLM_MASTER_KEY'] = key
     os.environ['MODAL_API_KEY'] = token
+    for name in ('GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
+                 'VERTEXAI_PROJECT', 'VERTEXAI_LOCATION', 'VERTEXAI_CREDENTIALS',
+                 'VERTEX_CREDENTIALS_PATH', 'GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_QUOTA_PROJECT'):
+        os.environ.pop(name, None)
+    if vertex_path.exists():
+        os.environ['VERTEX_CREDENTIALS_PATH'] = str(vertex_path)
+        os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = str(vertex_path)
     for name in ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN', 'AWS_PROFILE',
                  'AWS_DEFAULT_PROFILE', 'AWS_BEARER_TOKEN_BEDROCK', 'AWS_REGION_NAME', 'AWS_REGION', 'AWS_DEFAULT_REGION',
                  'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_ROLE_ARN', 'AWS_CONTAINER_CREDENTIALS_RELATIVE_URI',

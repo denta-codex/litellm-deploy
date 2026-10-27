@@ -1,0 +1,22 @@
+- name: Require the matching deployed Vertex runtime
+  hosts: grace
+  gather_facts: false
+  vars:
+    source_root: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Require enabled Vertex integration
+      ansible.builtin.assert:
+        that: litellm_vertex_enabled | default(false)
+      when: (refresh_action | default('refresh')) != 'rollback'
+    - name: Require matching deployed runtime files
+      ansible.builtin.command:
+        argv: [cmp, "{{ source_root }}/{{ item }}", "{{ litellm_root }}/{{ item }}"]
+      loop: [pyproject.toml, uv.lock, scripts/launch.py, scripts/shared_search.py, scripts/vertex_google.py]
+      changed_when: false
+      check_mode: false
+      when: (refresh_action | default('refresh')) != 'rollback'
+
+- name: Activate Argon with the shared recovery transaction
+  ansible.builtin.import_playbook: refresh-models.yml
+  vars:
+    refresh_script: configure_vertex.py

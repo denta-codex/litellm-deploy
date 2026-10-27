@@ -1,0 +1,4 @@
+[Service]
+{% if litellm_vertex_enabled | default(false) %}
+LoadCredentialEncrypted=vertex-ai-credentials:{{ litellm_vertex_credential }}
+{% endif %}
