@@ -50,6 +50,7 @@ def candidates(source):
         if path.is_file():result[str(ROOT/'scripts'/path.name)]={'text':path.read_text(),'mode':0o700}
     variables=yaml.safe_load((source/'deploy/inventory.yml').read_text())['all']['hosts']['grace']
     templates=Environment(loader=FileSystemLoader(source/'deploy/templates'),undefined=StrictUndefined,keep_trailing_newline=True,trim_blocks=True)
+    templates.filters.update({'bool':bool, 'ternary':lambda flag,yes,no:yes if flag else no})
     for template,target in [('litellm.service.j2','/etc/systemd/system/litellm.service'),
         ('compaction-recovery.conf.j2','/etc/systemd/system/litellm.service.d/30-compaction-recovery.conf'),
         ('bedrock.conf.j2','/etc/systemd/system/litellm.service.d/40-bedrock.conf'),

@@ -9,6 +9,15 @@ from unittest.mock import patch
 import runtime_rollout as runtime
 
 
+class RuntimeTemplates(unittest.TestCase):
+    def test_current_service_templates_can_be_rendered(self):
+        source=Path(__file__).resolve().parent.parent
+        result=runtime.candidates(source)
+        compaction=result['/etc/systemd/system/litellm.service.d/30-compaction-recovery.conf']['text']
+        self.assertIn('COMPACTION_FALLBACK_ENABLED=true',compaction)
+        self.assertIn('LoadCredentialEncrypted=vertex-ai-credentials:',
+            result['/etc/systemd/system/litellm.service.d/50-vertex.conf']['text'])
+
 class RuntimeRecovery(unittest.TestCase):
     def setUp(self):
         self.home=Path(self.enterContext(tempfile.TemporaryDirectory()))
