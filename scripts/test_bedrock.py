@@ -45,6 +45,28 @@ class BedrockTests(unittest.TestCase):
         self.assertEqual([r for r in refreshed['model_list'] if r['model_name'].startswith('bedrock/')], config['model_list'][1:])
         self.assertEqual([m for m in refreshed_catalog['models'] if m['slug'].startswith('bedrock/')], catalog['models'])
 
+    def test_pinned_provider_translates_reasoning_and_tools_without_raw_overrides(self):
+        from litellm import get_llm_provider
+        from litellm.utils import get_optional_params
+        config, _, _ = generate(fixture_source(), {}, {}, '')
+        for route in config['model_list']:
+            params = route['litellm_params']
+            model, provider, *_ = get_llm_provider(params['model'])
+            mapped = get_optional_params(model=model, custom_llm_provider=provider,
+                reasoning_effort='low', parallel_tool_calls=True,
+                allowed_openai_params=params['allowed_openai_params'],
+                tools=[{'type': 'function', 'function': {'name': 'probe',
+                    'parameters': {'type': 'object', 'properties': {}}}}],
+                tool_choice={'type': 'function', 'function': {'name': 'probe'}})
+            self.assertNotIn('reasoning_effort', mapped)
+            self.assertNotIn('parallel_tool_calls', mapped)
+            self.assertEqual(mapped['tool_choice'], {'tool': {'name': 'probe'}})
+            if route['model_name'] == 'bedrock/opus-5.5':
+                self.assertEqual(mapped['thinking']['type'], 'adaptive')
+                self.assertEqual(mapped['output_config']['effort'], 'low')
+            else:
+                self.assertEqual(mapped['reasoning'], {'effort': 'low'})
+
     def test_no_substitution_or_silent_selected_model_removal(self):
         for edit in ('unknown', 'substitute', 'duplicate', 'empty', 'no_streaming'):
             source = fixture_source()

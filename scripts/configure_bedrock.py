@@ -32,7 +32,7 @@ def generate(source, config, catalog, selected):
             'aws_access_key_id': 'os.environ/AWS_ACCESS_KEY_ID',
             'aws_secret_access_key': 'os.environ/AWS_SECRET_ACCESS_KEY',
             'use_chat_completions_api': True,
-            'allowed_openai_params': ['tools', 'tool_choice', 'reasoning_effort', 'parallel_tool_calls'],
+            'allowed_openai_params': ['tools', 'tool_choice'],
             'num_retries': 0,
         }})
         instructions = (Path(__file__).with_name('claude-instructions.md').read_text()
