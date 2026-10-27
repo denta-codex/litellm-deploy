@@ -67,6 +67,16 @@ class BedrockTests(unittest.TestCase):
             else:
                 self.assertEqual(mapped['reasoning'], {'effort': 'low'})
 
+    def test_every_advertised_effort_is_supported_by_pinned_adapter(self):
+        from litellm.utils import get_optional_params
+        for spec in json.loads(MANIFEST.read_text())['models']:
+            for effort in spec['reasoning_levels']:
+                with self.subTest(model=spec['slug'], effort=effort):
+                    params = get_optional_params(model='converse/' + spec['profile_id'],
+                        custom_llm_provider='bedrock', reasoning_effort=effort)
+                    self.assertNotIn('reasoning_effort', params)
+                    self.assertTrue('thinking' in params or 'reasoning' in params)
+
     def test_no_substitution_or_silent_selected_model_removal(self):
         for edit in ('unknown', 'substitute', 'duplicate', 'empty', 'no_streaming'):
             source = fixture_source()

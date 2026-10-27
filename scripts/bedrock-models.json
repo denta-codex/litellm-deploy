@@ -7,7 +7,7 @@
       "profile_id": "us.anthropic.claude-opus-5-5",
       "display_name": "Claude Opus 5.5 (AWS Bedrock)",
       "context_window": 200000,
-      "reasoning_levels": ["low", "medium", "high", "xhigh", "max"],
+      "reasoning_levels": ["low", "medium", "high", "max"],
       "default_reasoning_level": "high",
       "tool_mode": "direct"
     },

@@ -1178,3 +1178,7 @@ mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml -e refr
 After successful publication, restart Grace through the owning Codex desktop to
 reload the picker. Ordinary deployments verify the retained Bedrock snapshot;
 subscription and other provider refreshes preserve the Bedrock routes.
+
+Bedrock effort levels are verified against the pinned adapter and live inference:
+Opus offers low, medium, high, and max; GPT offers low, medium, high, and xhigh.
+Opus xhigh is excluded because the pinned Bedrock adapter rejects it.
