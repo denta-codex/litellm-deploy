@@ -1186,3 +1186,7 @@ Opus xhigh is excluded because the pinned Bedrock adapter rejects it.
 Bedrock acceptance uses automatic tool choice because the Opus profile rejects
 forced tool selection. Tool-result continuations retain the tool definitions,
 as required by Bedrock Converse. Explicit forced choices are not silently changed.
+
+Both Bedrock entries use Codex Code Mode. Direct Opus tools expand connected-app
+names beyond Bedrock's 64-character tool-name limit; Code Mode exposes those tools
+through compatible entry points while retaining shell and hosted-search access.

@@ -69,6 +69,13 @@ class BedrockTests(unittest.TestCase):
             else:
                 self.assertEqual(mapped['reasoning'], {'effort': 'low'})
 
+    def test_both_models_use_code_mode_for_full_codex_tool_catalog(self):
+        _, catalog, _ = generate(fixture_source(), {}, {}, '')
+        self.assertEqual(len(catalog['models']), 2)
+        for row in catalog['models']:
+            self.assertEqual(row['tool_mode'], 'code_mode_only')
+            self.assertTrue(row['supports_search_tool'])
+
     def test_every_advertised_effort_is_supported_by_pinned_adapter(self):
         from litellm.utils import get_optional_params
         for spec in json.loads(MANIFEST.read_text())['models']:

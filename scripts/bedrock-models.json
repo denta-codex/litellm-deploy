@@ -9,7 +9,7 @@
       "context_window": 200000,
       "reasoning_levels": ["low", "medium", "high", "max"],
       "default_reasoning_level": "high",
-      "tool_mode": "direct"
+      "tool_mode": "code_mode_only"
     },
     {
       "slug": "bedrock/gpt-6.1-sol",
