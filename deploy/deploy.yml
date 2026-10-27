@@ -189,6 +189,13 @@
         mode: '0644'
       become: true
       notify: Restart LiteLLM
+    - name: Configure Bedrock systemd credential
+      ansible.builtin.template:
+        src: bedrock.conf.j2
+        dest: /etc/systemd/system/litellm.service.d/40-bedrock.conf
+        mode: '0644'
+      become: true
+      notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
         src: "{{ item }}"

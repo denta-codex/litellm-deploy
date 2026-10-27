@@ -1163,7 +1163,9 @@ mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml --check
 mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml
 ```
 
-The playbook installs the matching integration, then activates through the shared
+The playbook installs only the Bedrock launcher, search, credential drop-in, and
+activation utilities, preserving pending voice acceptance and its runtime files.
+It requires matching installed dependency locks. It then activates through the shared
 refresh transaction. Both models must pass hosted search, streaming, tool-result
 continuation, and stock Codex checks before the picker and discovery snapshot are
 published. Failed activation restores the previous routes and catalog. Recover an

@@ -1,5 +1,8 @@
 """Validate every advertised Bedrock effort and image input through the live proxy."""
 import argparse
+import base64
+import struct
+import zlib
 import json
 from pathlib import Path
 import subprocess
@@ -18,8 +21,12 @@ def verify(catalog, base_url):
             check(base_url, key, payload)
             print('PASS ' + row['slug'] + ': effort=' + effort['effort'], flush=True)
         if 'image' in row['input_modalities']:
-            # Fixed one-pixel PNG fixture; no external asset or network fetch.
-            image = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aOuoAAAAASUVORK5CYII='
+            # Fixed red PNG fixture; no external asset or network fetch.
+            def chunk(kind, data):
+                return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data))
+            png = (b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', 8, 8, 8, 2, 0, 0, 0))
+                   + chunk(b'IDAT', zlib.compress((b'\x00' + b'\xff\x00\x00' * 8) * 8)) + chunk(b'IEND', b''))
+            image = base64.b64encode(png).decode()
             payload = {'model': row['slug'], 'stream': False,
                 'input': [{'role': 'user', 'content': [
                     {'type': 'input_text', 'text': 'Acknowledge this image by replying BEDROCK_CAPABILITY_OK.'},
