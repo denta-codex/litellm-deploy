@@ -55,5 +55,27 @@ class Recovery(unittest.TestCase):
         self.assertTrue(self.rollout.accepted.exists())
         self.assertFalse(self.rollout.journal.exists())
 
+    def test_owner_waiver_records_unvalidated_state_and_preserves_runtime(self):
+        self.rollout.prepare()
+        with self.assertRaises(RuntimeError):self.rollout.waive('')
+        self.assertTrue(self.rollout.journal.exists())
+        before = {n:self.rollout.read_file(n) for n in FILES}
+        config = self.rollout.config.read_text()
+        result = self.rollout.waive('Owner requested proceeding without voice testing')
+        self.assertFalse(result['accepted'])
+        record = json.loads(self.rollout.accepted.read_text())
+        self.assertEqual(record['status'], 'validation_waived')
+        self.assertFalse(record['desktop_validated'])
+        self.assertNotIn('receipt', record)
+        self.assertEqual(before, {n:self.rollout.read_file(n) for n in FILES})
+        self.assertEqual(config, self.rollout.config.read_text())
+        self.assertFalse(self.rollout.journal.exists())
+
+    def test_waiver_refuses_conflicting_runtime(self):
+        self.rollout.prepare()
+        (self.rollout.scripts/'serve.py').write_text('another edit')
+        with self.assertRaises(RuntimeError):self.rollout.waive('owner waiver')
+        self.assertTrue(self.rollout.journal.exists())
+
 
 if __name__=='__main__':unittest.main()

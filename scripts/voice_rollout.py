@@ -140,14 +140,27 @@ class Rollout:
         self.journal.unlink()
         return {'changed':True,'accepted':True}
 
+    def waive(self, reason):
+        """Close a rollout at the owner's request without asserting acceptance."""
+        if not reason or not reason.strip():
+            raise RuntimeError('An explicit owner waiver reason is required')
+        self.inspect()
+        journal = json.loads(self.journal.read_text())
+        write(self.accepted, json.dumps({'schema':1, 'commit':journal['commit'],
+            'status':'validation_waived', 'desktop_validated':False,
+            'reason':reason.strip(), 'settings':SETTINGS}, indent=2)+'\n')
+        self.journal.unlink()
+        return {'changed':True, 'accepted':False, 'validation_waived':True}
+
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['preview','prepare','verify','rollback','finish'])
+    parser.add_argument('action',choices=['preview','prepare','verify','rollback','finish','waive'])
     parser.add_argument('--home',type=Path,default=Path('/home/agent'))
     parser.add_argument('--source',type=Path,default=Path(__file__).resolve().parent.parent)
     parser.add_argument('--receipt',type=Path)
     parser.add_argument('--desktop-validated',action='store_true')
+    parser.add_argument('--waiver-reason')
     args=parser.parse_args()
     if args.action == 'finish' and args.receipt is None:
         parser.error('finish requires --receipt')
@@ -164,6 +177,7 @@ def main():
             result=rollout.prepare(commit)
         elif args.action=='verify':result=rollout.inspect()
         elif args.action=='rollback':result=rollout.rollback()
+        elif args.action=='waive':result=rollout.waive(args.waiver_reason)
         else:result=rollout.finish(args.receipt,args.desktop_validated)
     print(json.dumps(result))
 

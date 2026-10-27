@@ -219,3 +219,13 @@ while preserving the reference client and end-to-end checks. Update configuratio
 only where upstream requires it, deploy with targeted recovery, and record the
 replacement release and results here. Stock Codex and the client-facing protocol
 remain the boundary; no Dot changes should be required solely to retire the adapter.
+
+## Explicit owner waiver
+
+If the owner explicitly chooses to proceed without voice acceptance, use
+`deploy/voice.yml -e voice_action=waive` with a nonempty
+`voice_waiver_reason`. This verifies that the staged runtime/settings still
+match the journal, records `status: validation_waived` and
+`desktop_validated: false` in `voice-installed.json`, then closes the journal.
+It does not assert working audio, provide a test receipt, or restart a service.
+Use ordinary `finish` for a rollout that actually passes voice acceptance.
