@@ -55,11 +55,13 @@ class BedrockTests(unittest.TestCase):
             mapped = get_optional_params(model=model, custom_llm_provider=provider,
                 reasoning_effort='low', parallel_tool_calls=True,
                 allowed_openai_params=params['allowed_openai_params'],
+                additional_drop_params=params['additional_drop_params'], prompt_cache_key='codex-session',
                 tools=[{'type': 'function', 'function': {'name': 'probe',
                     'parameters': {'type': 'object', 'properties': {}}}}],
                 tool_choice={'type': 'function', 'function': {'name': 'probe'}})
             self.assertNotIn('reasoning_effort', mapped)
             self.assertNotIn('parallel_tool_calls', mapped)
+            self.assertNotIn('prompt_cache_key', mapped)
             self.assertEqual(mapped['tool_choice'], {'tool': {'name': 'probe'}})
             if route['model_name'] == 'bedrock/opus-5.5':
                 self.assertEqual(mapped['thinking']['type'], 'adaptive')
