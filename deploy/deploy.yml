@@ -195,6 +195,7 @@
       register: project_files
       notify: Restart LiteLLM
     - name: Install non-secret host settings for verification and recovery
+      tags: [host-settings]
       ansible.builtin.template:
         src: deployment.json.j2
         dest: "{{ litellm_config }}/deployment.json"
