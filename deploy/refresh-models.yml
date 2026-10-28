@@ -76,7 +76,7 @@
           changed_when: true
         - name: Report desktop reload requirement
           ansible.builtin.debug:
-            msg: "{{ 'Refresh complete. Restart Grace through the owning Codex desktop to load the updated model picker.' if (discovery.stdout | from_json).catalog_changed else 'Refresh complete. No desktop restart required.' }}"
+            msg: "{{ ('Refresh complete. Restart ' ~ inventory_hostname ~ ' through the owning Codex desktop when ready to load the updated model picker.') if (discovery.stdout | from_json).catalog_changed else 'Refresh complete. No desktop restart required.' }}"
       rescue:
         - name: Stop rejected local inference service
           ansible.builtin.systemd_service:
