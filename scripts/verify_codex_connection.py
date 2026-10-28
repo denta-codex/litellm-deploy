@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import base64
 from contextlib import asynccontextmanager
+from compression import zstd
 import hashlib
 import json
 import os
@@ -19,6 +20,23 @@ class CheckFailure(Exception):
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+
+
+def session_hashes(codex_home):
+    files = []
+    for directory in ('sessions', 'archived_sessions'):
+        group = []
+        for path in sorted((codex_home / directory).rglob('*')):
+            if path.name.endswith('.jsonl.zst'):
+                name = str(path.relative_to(codex_home))[:-4]
+                data = zstd.decompress(path.read_bytes())
+            elif path.suffix == '.jsonl':
+                name, data = str(path.relative_to(codex_home)), path.read_bytes()
+            else:
+                continue
+            group.append([name, hashlib.sha256(data).hexdigest()])
+        files.extend(sorted(group))
+    return files
 
 
 class Client:
@@ -214,10 +232,7 @@ async def verify(action, binary, home):
     auth = codex_home / 'auth.json'
     report = {name: digest(ids) for name, ids in inventory.items()}
     report['auth'] = hashlib.sha256(auth.read_bytes()).hexdigest()
-    files = []
-    for directory in ('sessions', 'archived_sessions'):
-        for path in sorted((codex_home / directory).rglob('*.jsonl')):
-            files.append([str(path.relative_to(codex_home)), hashlib.sha256(path.read_bytes()).hexdigest()])
+    files = session_hashes(codex_home)
     report['session_files'] = digest(files)
     history = codex_home / 'history.jsonl'
     report['history_file'] = hashlib.sha256(history.read_bytes()).hexdigest() if history.exists() else None

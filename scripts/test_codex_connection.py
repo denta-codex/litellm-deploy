@@ -1,12 +1,32 @@
 """Wire-level SSH proxy checks and an opt-in real pinned candidate restart."""
 import asyncio
+from compression import zstd
 import json
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
-from verify_codex_connection import Client, CheckFailure
+from verify_codex_connection import Client, CheckFailure, session_hashes
+
+
+class HistoryTests(unittest.TestCase):
+    def test_native_compression_preserves_comparable_history(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            paths = [home / 'sessions/older.jsonl', home / 'sessions/recent.jsonl',
+                     home / 'archived_sessions/archived.jsonl']
+            for path in paths:
+                path.parent.mkdir(exist_ok=True)
+                path.write_bytes(b'{"fixture":"' + path.stem.encode() + b'"}\n')
+            before = session_hashes(home)
+            for path in (paths[0], paths[2]):
+                path.with_suffix('.jsonl.zst').write_bytes(zstd.compress(path.read_bytes()))
+                path.unlink()
+            self.assertEqual(session_hashes(home), before)
+            paths[1].write_bytes(b'{"changed":true}\n')
+            self.assertNotEqual(session_hashes(home), before)
 
 
 class Writer:

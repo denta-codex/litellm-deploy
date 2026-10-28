@@ -115,6 +115,8 @@ scripts/verify_codex_connection.py baseline with --home set to Love's home and
 It stores only hashes of native authentication, project/thread IDs, and saved
 session files in ~/.local/state/litellm/codex-connection-baseline.json. Remove that
 baseline after successful runtime and config acceptance, or verified recovery.
+The check hashes decompressed content when pinned Codex compresses older rollouts,
+so its native storage migration does not invalidate history verification.
 
 1. Run `cutover.yml --limit love` to validate and prepare only the provider config.
 2. Run `codex-runtime.yml --limit love -e codex_runtime_action=apply` to stage the
