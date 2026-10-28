@@ -55,6 +55,8 @@ async def verify(version, socket, home=None):
             'cwd': str(home), 'ephemeral': True, 'approvalPolicy': 'never',
             'sandbox': 'read-only', 'serviceTier': 'default',
         })
+        if started.get('modelProvider') != 'litellm' or started.get('model') != 'chatgpt/gpt-6-astra':
+            raise RuntimeError('Live app server does not default to Astra through LiteLLM')
         thread = started['thread']['id']
         command = 'if test -z "${LITELLM_PROXY_KEY+x}"; then printf KEY_ABSENT; else printf KEY_PRESENT; fi'
         await rpc('turn/start', {'threadId': thread, 'serviceTier': 'default',
@@ -76,7 +78,8 @@ async def verify(version, socket, home=None):
         if not executed:
             raise RuntimeError('Live app server did not execute the shell isolation probe')
     print(json.dumps({'version': version, 'service': 'active', 'chatgpt_identity': True,
-                      'fast_capability': True, 'proxy_auth': True, 'tool_key_absent': True}, sort_keys=True))
+                      'fast_capability': True, 'provider': 'litellm', 'model': 'chatgpt/gpt-6-astra',
+                      'proxy_auth': True, 'tool_key_absent': True}, sort_keys=True))
 
 
 def main():
