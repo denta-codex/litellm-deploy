@@ -5,5 +5,4 @@
 - name: Activate Bedrock using existing model transaction
   ansible.builtin.import_playbook: refresh-models.yml
   vars:
-    supported_hosts: [grace]
     refresh_script: configure_bedrock.py

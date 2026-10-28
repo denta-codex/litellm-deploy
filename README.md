@@ -30,14 +30,14 @@ mounted volume. Both hosts run an independent loopback gateway on `127.0.0.1:400
 | Browser MCP package/skill/registration (`browser.yml`) | Supported | Follow-up |
 | Voice prepare/acceptance/recovery (`voice.yml`) | Supported | Follow-up; adapter disabled |
 | Modal (`modal.yml`) | Supported | Follow-up; credential not required |
-| AWS/Bedrock (`bedrock-runtime.yml`, `bedrock.yml`) | Supported | Follow-up |
+| AWS/Bedrock (`bedrock-runtime.yml`, `bedrock.yml`) | Supported | Supported with host-encrypted credentials |
 | Claude subscription (`claude.yml`) | Supported | Follow-up; adapter disabled |
-| Google Vertex (`vertex.yml`) | Supported | Follow-up |
+| Google Vertex (`vertex.yml`) | Supported | Supported with host-encrypted credentials |
 | Remove Grace's original `codex-gateway` (`finalize.yml`) | Supported | Unsupported; do not run on Love |
 
-Deferred activation playbooks reject Love explicitly before mutation. They are not
-made portable by changing an enable flag. Ordinary gateway deployment preserves
-Grace's existing optional providers and does not activate them on Love.
+The remaining deferred activation playbooks reject Love explicitly before mutation.
+Ordinary gateway deployment preserves existing provider routes; cloud activation
+publishes only after explicit capability checks.
 
 ### Prerequisites and preparation
 
@@ -1275,7 +1275,7 @@ these two chats separate when assessing what has actually been deployed.
 
 ## AWS Bedrock models
 
-Grace publishes exactly `bedrock/opus-5.5` and `bedrock/gpt-6.1-sol` through the
+Grace and Love publish exactly `bedrock/opus-5.5` and `bedrock/gpt-6.1-sol` through the
 US inference profiles in `scripts/bedrock-models.json`, using `us-east-1`.
 Both models must be discoverable and support streaming before activation.
 No substitute model is selected. The current Codex default stays selected.
@@ -1284,6 +1284,27 @@ The runtime uses the retained IAM identity and encrypted credential at
 `/etc/credstore.encrypted/litellm-bedrock-aws`. Systemd supplies it to the launcher;
 AWS keys are parsed in memory and ambient credential sources are disabled.
 This workflow does not provision IAM users, rotate keys, or enroll models.
+
+For Love's initial cloud setup, run on Grace:
+
+```sh
+mise exec -- uv run --no-sync scripts/provision_cloud.py --target love --provider bedrock
+mise exec -- uv run --no-sync scripts/provision_cloud.py --target love --provider vertex
+```
+
+This explicitly reuses the accepted restricted inference identities. It decrypts
+only in memory, sends plaintext over authenticated SSH into Love's systemd
+encryption process, and installs root-owned 0600 ciphertext with Love's host key.
+It never copies Grace ciphertext, cloud administrator credentials, or ChatGPT
+tokens. Existing Love credentials are validated without replacement. AWS retains
+its existing IAM username `litellm-grace`; both hosts charge the same credited
+account/project. Host-specific identity/key rotation can be performed separately.
+
+Then run the runtime recovery prepare, full deploy, and finish sequence locally
+on Love shown above. This loads both credential drop-ins without changing Codex's
+default. Run `bedrock.yml` and `vertex.yml` locally with `--limit love` to validate
+and publish the cloud entries. Both activation workflows preserve the other
+providers and use the existing model-refresh recovery transaction.
 
 Run from a clean, committed checkout:
 

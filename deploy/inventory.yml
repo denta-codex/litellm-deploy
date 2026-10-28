@@ -34,8 +34,10 @@ all:
       litellm_credential_mode: system
       compaction_fallback_enabled: true
       litellm_modal_enabled: false
-      litellm_bedrock_enabled: false
-      litellm_vertex_enabled: false
+      litellm_bedrock_enabled: true
+      litellm_vertex_enabled: true
+      litellm_vertex_credential: /etc/credstore.encrypted/litellm-vertex-ai
+      litellm_bedrock_credential: /etc/credstore.encrypted/litellm-bedrock-aws
       litellm_voice_enabled: false
       litellm_claude_enabled: false
       codex_forward_agent: false

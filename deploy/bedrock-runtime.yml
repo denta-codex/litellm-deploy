@@ -12,15 +12,13 @@
     - name: Validate the selected local host
       ansible.builtin.import_tasks: tasks/target.yml
       tags: [always]
-      vars:
-        supported_hosts: [grace]
   tasks:
     - name: Validate the existing target
       ansible.builtin.assert:
         that:
-          - ansible_facts.hostname == 'grace'
+          - ansible_facts.hostname == inventory_hostname
           - ansible_facts.user_id == litellm_user
-          - litellm_root == '/home/agent/.local/share/litellm'
+          - litellm_root == litellm_home ~ '/.local/share/litellm'
           - litellm_bedrock_enabled | default(false)
     - name: Inspect deployment source
       ansible.builtin.command: git status --porcelain
@@ -117,7 +115,7 @@
         url: http://127.0.0.1:4000/v1/live
         method: GET
         status_code: 405
-      when: not ansible_check_mode
+      when: not ansible_check_mode and litellm_voice_enabled
     - name: Inspect protected voice runtime and desktop state
       ansible.builtin.stat:
         path: "{{ item }}"
