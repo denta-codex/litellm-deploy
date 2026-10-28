@@ -23,6 +23,15 @@ path rather than the private key through the environment.
 
 ## Provision and activate
 
+The runtime and activation playbooks support Grace and Love. For Love, provision
+the accepted restricted service-account credential from Grace with
+uv run --no-sync scripts/provision_cloud.py --target love --provider vertex.
+This uses Love's own systemd host encryption, without copying host-bound
+ciphertext or the administrative Google login. Then run runtime recovery and
+deploy locally on Love with --host love and --limit love, followed by vertex.yml
+with --limit love. See the main README's cloud-provider sequence. Both hosts use
+the same credited Google project and the exact Argon allowlist.
+
 Run the following from committed source on Grace, using the repository's managed
 `uv` and Ansible toolchains:
 
