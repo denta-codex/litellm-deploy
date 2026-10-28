@@ -1,5 +1,6 @@
 """Install the request customization in the proxy server's process."""
 import argparse
+import os
 
 from chatgpt_responses import install
 
@@ -10,12 +11,18 @@ def main():
     parser.add_argument('--port', type=int, default=4000)
     args = parser.parse_args()
     install()
-    from claude_provider import install as install_claude
     from litellm.proxy.proxy_server import app
-    install_claude(app)
+    if os.environ.get('LITELLM_CLAUDE_ENABLED', 'true') == 'true':
+        from claude_provider import install as install_claude
+        install_claude(app)
+    else:
+        # Shared search/compaction and Responses errors also need request context.
+        from claude_context import CaptureRequest
+        app.add_middleware(CaptureRequest)
     # Temporary subscription signaling adapter; retirement steps: docs/VOICE.md.
-    from live_voice import install as install_voice
-    install_voice(app)
+    if os.environ.get('LITELLM_VOICE_ENABLED', 'true') == 'true':
+        from live_voice import install as install_voice
+        install_voice(app)
     from shared_search import install as install_search
     install_search()
     from compaction_fallback import install as install_compaction

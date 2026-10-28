@@ -1,14 +1,128 @@
-# Grace LiteLLM deployment
+# Grace and Love LiteLLM deployment
 
 > **Personal project:** This is my personal setup. I'm sharing the source in the
 > hope that it benefits others. I am not accepting outside pull requests at this time.
 
-LiteLLM 1.102.1 with a small repository-owned ChatGPT request customization,
+LiteLLM 1.106.5 with a small repository-owned ChatGPT request customization,
 uv, and systemd on Grace, for stock Codex through a named
 `litellm` Responses provider. Default model: `chatgpt/gpt-6-astra`. Discover subscription models with
-the explicit refresh command below. This is a private, single-host deployment.
+the explicit refresh command below. This is a private deployment with explicit, local-per-host operations on Grace and Love.
 
-## Deploy
+## Host selection and Love's first deployment
+
+Run Ansible **locally as `agent` on the selected machine**, from a clean committed
+checkout. Every entrypoint requires exactly `--limit grace` or `--limit love` and
+checks the real hostname, account, home, and application paths before changes.
+Omitting the limit, selecting both hosts, or selecting Love while running on Grace
+fails. Tags do not bypass these checks. No remote-controller deployment is provided.
+
+Grace uses `/home/agent`. Love uses
+`/mnt/HC_Volume_103914271/agent/home`; its application and Codex paths remain on that
+mounted volume. Both hosts run an independent loopback gateway on `127.0.0.1:4000`.
+
+| Workflow | Grace | Love in this release |
+| --- | --- | --- |
+| Basic LiteLLM gateway; ChatGPT catalog, search, review | Supported | Supported with its own LiteLLM login |
+| Pinned Codex installation and launcher/service management | Supported | Supported; install can stage without switching the server |
+| Provider switch and its config recovery (`cutover.yml`) | Supported | Supported; no legacy gateway cleanup |
+| LiteLLM runtime recovery | Supported | Supported, including failed first installation |
+| GPU runtime/model (`local-runtime.yml`, `local.yml`) | Supported | Excluded: Love has no GPU |
+| Browser MCP package/skill/registration (`browser.yml`) | Supported | Follow-up |
+| Voice prepare/acceptance/recovery (`voice.yml`) | Supported | Follow-up; adapter disabled |
+| Modal (`modal.yml`) | Supported | Follow-up; credential not required |
+| AWS/Bedrock (`bedrock-runtime.yml`, `bedrock.yml`) | Supported | Follow-up |
+| Claude subscription (`claude.yml`) | Supported | Follow-up; adapter disabled |
+| Google Vertex (`vertex.yml`) | Supported | Follow-up |
+| Remove Grace's original `codex-gateway` (`finalize.yml`) | Supported | Unsupported; do not run on Love |
+
+Deferred activation playbooks reject Love explicitly before mutation. They are not
+made portable by changing an enable flag. Ordinary gateway deployment preserves
+Grace's existing optional providers and does not activate them on Love.
+
+### Prerequisites and preparation
+
+Use each host's existing Mise installation and this repository's pinned Ansible
+and uv. Application Python must be 3.14; the inventory's `/usr/bin/python3` is only
+Ansible's target interpreter. The deployment checks Python availability before
+writing application files and disables implicit Python downloads. On Love,
+prepare the missing tools through existing Mise/uv (no OS upgrade, system Python
+replacement, or shell-startup edits):
+
+```sh
+mise trust
+mise install
+mise exec -- uv python install 3.14
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit love deploy/codex-runtime.yml -e codex_runtime_action=install
+```
+
+The `install` action adds the exact Codex version alongside the existing one; it
+leaves login, config, launchers, and the running server unchanged. Mise's global
+Codex selection is not changed. Installed gateway settings record the selected
+host and resolved tool paths without secrets.
+
+Love uses only the system-encrypted proxy credential, loaded by the systemd
+service. Validation commands decrypt it through noninteractive sudo into process
+memory. Its older systemd needs no user-scoped credential support. Grace retains
+its existing system/user credential pair. Never copy encrypted host credentials
+or saved ChatGPT tokens between machines.
+
+### Install before the later cutover
+
+```sh
+mise exec -- uv sync --locked
+mise exec -- uv run --no-sync scripts/runtime_rollout.py prepare --host love --source "$PWD"
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit love deploy/deploy.yml --syntax-check
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit love deploy/deploy.yml --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit love deploy/deploy.yml
+mise exec -- uv run --no-sync scripts/runtime_rollout.py finish --host love --source "$PWD"
+```
+
+Check mode cannot sync an absent environment or provision credentials, so a fresh
+host preview covers paths/templates and prerequisites rather than live readiness.
+The base service can be installed without a ChatGPT login; model discovery and
+inference require Love's own explicit authentication. Use the existing login
+procedure below with Love's home and tool paths. Do not change the shared native
+Codex login as part of gateway installation.
+
+Prepare recovery before both first installation and upgrades, as shown above,
+and finish after service acceptance. On failure, run
+`mise exec -- uv run --no-sync scripts/runtime_rollout.py rollback --host love --source "$PWD"`. Its
+rollback restores only changed application/service files and re-syncs the prior
+lock. For a failed first installation it stops/disables the new service, removes
+created managed files and the new environment, and does not restart a nonexistent
+old gateway. Encrypted credentials remain for retry. Recovery state is removed on
+successful finish or rollback; concurrent edits stop recovery instead of being
+overwritten.
+
+### Deliberate Codex cutover, after the shared-client test
+
+Keep Love's existing native login until its separately scheduled account rotation.
+First authenticate LiteLLM explicitly, refresh the subscription catalog with
+`refresh-models.yml --limit love`, and validate the gateway using the pinned binary
+in disposable Codex homes. No saved tokens are copied from Grace.
+
+Ensure the tailnet/Remote Codex workflow has installed
+`~/.local/libexec/remote-codex-checks/candidate-check.py` and `connection-check.py`.
+Runtime adoption requires those connection checks and stops if they are absent.
+
+After both desktop accounts pass the shared-server/history test:
+
+1. Run `cutover.yml --limit love` to validate and prepare only the provider config.
+2. Run `codex-runtime.yml --limit love -e codex_runtime_action=apply` to stage the
+   pinned launcher and service. It does not restart the running server.
+3. Restart Love through its owning desktop, then run runtime `verify` and `finish`
+   (the latter requires `-e codex_desktop_validated=true`).
+4. Finish the config transaction with `cutover.yml --limit love` using
+   `-e cutover_action=finish -e litellm_desktop_validated=true`. Never use
+   `finalize.yml` on Love.
+
+If acceptance fails, roll back the runtime transaction, then the config transaction,
+then restart through the owning desktop. Runtime rollback restores the prior
+launcher/service; config rollback restores the prior config only if no concurrent
+edit has occurred. Native authentication, projects, history, websites, and the
+separate tailnet workflow remain outside these transactions.
+
+## Deploy on Grace
 
 Use a clean committed checkout. Python 3.14 and uv use Grace's existing toolchain.
 The repository's `.mise.toml` selects Grace's already-installed Ansible and uv.
@@ -16,9 +130,9 @@ Trust that repo-local file with `mise trust` once after reviewing a new checkout
 no additional toolchain installation is needed on Grace.
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --syntax-check
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --syntax-check
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
 ```
 
 The proxy listens on `127.0.0.1:4000`. It runs with a locked uv environment and
@@ -77,9 +191,9 @@ Use Grace's managed Node 26.8.1, Chromium, and Ansible. No toolchain installer i
 run. The separate Ansible workflow defaults to preview:
 
 ```sh
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=stage --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=stage
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=stage --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=stage
 ```
 
 Stage installs a content-addressed release under `~/.local/share/codex-browser/`,
@@ -93,8 +207,8 @@ active conversations. Prepare selects the release, registers the skill and MCP,
 and reloads systemd configuration, but leaves the running app-server untouched:
 
 ```sh
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=prepare --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=prepare
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=prepare --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=prepare
 ```
 
 When ready, restart with `sudo systemctl restart codex-app-server.service`, or use
@@ -102,9 +216,9 @@ the activate action below. **Activation and rollback can restart the live
 app-server.** Activation also performs preparation if it was not done separately:
 
 ```sh
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=activate --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=activate
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=verify
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=activate --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=activate
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=verify
 ```
 
 Activation registers the skill and adds `40-browser.conf` to the systemd app-server
@@ -209,9 +323,9 @@ rather than generating a replacement that could desynchronize the clients.
 ## One-time cutover
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/cutover.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/cutover.yml
 # Restart Grace's connection using the owning desktop's Restart action.
-ansible-playbook -i deploy/inventory.yml deploy/cutover.yml -e cutover_action=check-restart
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/cutover.yml -e cutover_action=check-restart
 ```
 
 Prepare verifies authenticated streaming and a complete tool round trip, then
@@ -235,7 +349,7 @@ removed. Dynamic merged model discovery is not a cutover requirement.
 After desktop validation, uninstall the old gateway completely:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/finalize.yml \
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/finalize.yml \
   -e litellm_desktop_validated=true
 ```
 
@@ -249,7 +363,7 @@ source, not an installed fallback service. Repeat deploy.yml to check convergenc
 Before finalize:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/cutover.yml -e cutover_action=rollback
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/cutover.yml -e cutover_action=rollback
 # Restart Grace's connection using the desktop.
 ```
 
@@ -385,10 +499,10 @@ Validate in isolation, commit the implementation, deploy it, and activate the ro
 ```sh
 uv sync --locked
 uv run --no-sync scripts/verify_claude.py --isolated
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
-ansible-playbook -i deploy/inventory.yml deploy/claude.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/claude.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/claude.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/claude.yml
 ```
 
 The isolated check starts a disposable loopback proxy and Codex home. It uses the
@@ -477,7 +591,7 @@ desktop picker. The wrapper reloads that catalog for each compaction and interse
 it with active router deployments, so existing model-refresh playbooks also update
 future fallback candidates without another list to maintain.
 
-`ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --tags compaction-recovery`
+`ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --tags compaction-recovery`
 installs only the compaction runtime, verifier, and service drop-in, then restarts
 LiteLLM and checks liveness. Use this tag to activate recovery independently of
 other pending runtime or provider updates. The tagged deployment inserts the
@@ -571,11 +685,11 @@ scheduled upgrade.
 The runtime playbook has five explicit actions:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml
-ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=apply
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml -e codex_runtime_action=apply
 # Restart Grace through the owning desktop.
-ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=verify
-ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=finish -e codex_desktop_validated=true
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml -e codex_runtime_action=verify
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml -e codex_runtime_action=finish -e codex_desktop_validated=true
 ```
 
 The default action is read-only preview. `apply` validates the user-managed
@@ -602,7 +716,7 @@ To install updated runtime checking utilities without staging or restarting Code
 use the committed source and the same runtime playbook:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml \
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml \
   -e codex_runtime_action=apply --tags runtime-checks
 ```
 
@@ -615,7 +729,7 @@ that differ from the staged revision, restores the previous runtime together,
 leaves Grace's configuration untouched, and then requires Desktop Restart:
 
 ```console
-ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=rollback
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml -e codex_runtime_action=rollback
 ```
 
 After acceptance, the persistent installed manifest is the comparison baseline
@@ -638,8 +752,8 @@ failure, and throughput benchmarking is outside runtime acceptance.
 From a clean committed checkout on Grace:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml
 ```
 
 This fetches the account's current Codex catalog using LiteLLM's existing
@@ -703,7 +817,7 @@ restarts restored routes when necessary, and checks liveness. One private recove
 directory is kept only during unfinished work. If the command is interrupted:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml -e refresh_action=rollback
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml -e refresh_action=rollback
 ```
 
 Recovery refuses to overwrite concurrent edits. In that case inspect
@@ -823,10 +937,10 @@ Validate and activate with the existing model refresh transactions:
 ```sh
 uv run --no-sync scripts/test_shared_search.py
 uv run --no-sync scripts/verify_shared_search.py --isolated --all-efforts
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
-ansible-playbook -i deploy/inventory.yml deploy/modal.yml
-ansible-playbook -i deploy/inventory.yml deploy/claude.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/claude.yml
 ```
 
 Deployment validates installed discovery with the installed generators before
@@ -876,9 +990,9 @@ and the manifest entry once upstream accepts mid-conversation system messages
 From a clean committed checkout on Grace:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/local.yml --syntax-check
-ansible-playbook -i deploy/inventory.yml deploy/local.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/local.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/local.yml --syntax-check
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/local.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/local.yml
 ```
 
 Preview renders managed settings but skips large downloads, extraction, and live
@@ -892,7 +1006,7 @@ validation consumes subscription usage.
 systemctl status llama-local.service
 sudo systemctl stop llama-local.service
 sudo systemctl start llama-local.service
-ansible-playbook -i deploy/inventory.yml deploy/local.yml -e refresh_action=rollback
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/local.yml -e refresh_action=rollback
 ```
 
 Rollback recovers an **unfinished** activation and stops/disables the local
@@ -959,12 +1073,12 @@ From a clean committed checkout on Grace, first update the launcher and service,
 then preview and activate the Modal routes:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --syntax-check
-ansible-playbook -i deploy/inventory.yml deploy/modal.yml --syntax-check
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
-ansible-playbook -i deploy/inventory.yml deploy/modal.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/modal.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --syntax-check
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml --syntax-check
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml
 ```
 
 The preview reads the checked-in manifest and installed Codex version. It does
@@ -985,7 +1099,7 @@ Unchanged activation performs no inference or restart. A failed activation resto
 the previous routes and picker. To recover an interrupted Modal activation:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/modal.yml -e refresh_action=rollback
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml -e refresh_action=rollback
 ```
 
 Recovery refuses concurrent file edits and retains
@@ -1019,10 +1133,10 @@ checkout containing this fix, run refresh **before** ordinary deployment: the
 deployment snapshot check intentionally rejects the old, incomplete routing.
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
 uv run --no-sync scripts/verify_review.py
 ```
 
@@ -1158,9 +1272,9 @@ Run from a clean, committed checkout:
 
 ```sh
 uv run --no-sync scripts/configure_bedrock.py preview
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml --syntax-check
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/bedrock.yml --syntax-check
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/bedrock.yml --check --diff
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/bedrock.yml
 ```
 
 The playbook installs only the Bedrock launcher, search, credential drop-in, and
@@ -1172,7 +1286,7 @@ published. Failed activation restores the previous routes and catalog. Recover a
 interrupted transaction with:
 
 ```sh
-mise exec -- ansible-playbook -i deploy/inventory.yml deploy/bedrock.yml -e refresh_action=rollback
+mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/bedrock.yml -e refresh_action=rollback
 ```
 
 After successful publication, restart Grace through the owning Codex desktop to

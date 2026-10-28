@@ -4,10 +4,11 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+import shutil
 
 script = Path(__file__).with_name('cutover.py')
 project = script.parent.parent
-uv = '/home/agent/.local/share/mise/installs/uv/0.12.11/.mise-bins/uv'
+uv = shutil.which('uv')
 with tempfile.TemporaryDirectory(prefix='litellm-cutover-test-') as tmp:
     home = Path(tmp)
     config = home / '.codex/config.toml'
@@ -30,7 +31,9 @@ enabled = true
     run('prepare')
     prepared = config.read_text()
     assert 'enabled = true' in prepared and '48766' not in prepared
-    assert 'systemd-creds' in prepared and 'env_key' not in prepared
+    assert 'systemd-creds' not in prepared and 'env_key = "LITELLM_PROXY_KEY"' in prepared
+    assert 'requires_openai_auth = true' in prepared
+    assert 'exclude = ["LITELLM_PROXY_KEY"]' in prepared
     assert str(catalog) in prepared and 'web_search = "live"' in prepared
     run('prepare')
     run('check-restart', False)

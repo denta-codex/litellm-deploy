@@ -1,0 +1,34 @@
+- name: Require one explicit local target
+  tags: [always]
+  ansible.builtin.assert:
+    that:
+      - ansible_limit | default('') in ['grace', 'love']
+      - ansible_play_hosts_all | length == 1
+      - inventory_hostname == ansible_limit
+      - ansible_connection == 'local'
+      - ansible_facts.hostname == inventory_hostname
+      - ansible_facts.user_id == litellm_user
+      - ansible_facts.user_dir == litellm_home
+      - litellm_root == litellm_home ~ '/.local/share/litellm'
+      - litellm_config == litellm_home ~ '/.config/litellm'
+      - litellm_state == litellm_home ~ '/.local/state/litellm'
+      - inventory_hostname in (supported_hosts | default(['grace', 'love']))
+    fail_msg: >-
+      Run locally as agent with exactly --limit grace or --limit love.
+      This workflow supports {{ supported_hosts | default(['grace', 'love']) | join(', ') }}.
+      The selected hostname, account, home, and application paths must match.
+
+- name: Resolve the existing managed uv binary
+  tags: [always]
+  ansible.builtin.command:
+    argv: ["{{ codex_mise }}", which, uv]
+    chdir: "{{ playbook_dir }}/.."
+  register: managed_uv
+  changed_when: false
+  check_mode: false
+
+- name: Select managed tool paths
+  tags: [always]
+  ansible.builtin.set_fact:
+    litellm_uv: "{{ managed_uv.stdout | trim }}"
+    litellm_codex: "{{ litellm_home }}/.local/share/mise/installs/codex/{{ codex_version }}/bin/codex"

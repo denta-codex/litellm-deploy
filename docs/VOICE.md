@@ -122,9 +122,9 @@ Use the repository's existing managed toolchain and encrypted credentials.
 `deploy/voice.yml` owns this initial cutover. From committed source:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/voice.yml
-ansible-playbook -i deploy/inventory.yml deploy/voice.yml -e voice_action=prepare
-ansible-playbook -i deploy/inventory.yml deploy/voice.yml -e voice_action=verify
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml -e voice_action=prepare
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml -e voice_action=verify
 ```
 
 Preparation copies only `serve.py` and `live_voice.py`, sets the two root voice
@@ -141,14 +141,14 @@ Rollback restores only the managed files/settings, refuses conflicting edits,
 and restarts the gateway:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/voice.yml -e voice_action=rollback
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml -e voice_action=rollback
 ```
 
 After the remote reference client, regression checks and real desktop voice test
 pass, finish with the recorded receipt and actual desktop confirmation:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/voice.yml -e voice_action=finish \
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml -e voice_action=finish \
   -e voice_desktop_validated=true -e voice_receipt=/absolute/path/tool-receipt.json
 ```
 

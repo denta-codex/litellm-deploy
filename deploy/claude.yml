@@ -1,4 +1,5 @@
 - name: Configure Claude using the shared model activation and recovery workflow
   ansible.builtin.import_playbook: refresh-models.yml
   vars:
+    supported_hosts: [grace]
     refresh_script: configure_claude.py

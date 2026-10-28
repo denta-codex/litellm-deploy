@@ -1,7 +1,7 @@
 """Verify local authentication, subscription streaming, and a complete tool loop."""
 import argparse
 import json
-import subprocess
+from deployment import proxy_key
 import urllib.error
 import urllib.request
 
@@ -9,14 +9,11 @@ p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
 p.add_argument('--auto-tool-choice', action='store_true', help='Exercise providers that support automatic tool choice only')
 p.add_argument('--base-url', default='http://127.0.0.1:4000', help='Proxy origin, including an isolated test port')
-p.add_argument('--credential', default='/home/agent/.config/litellm/proxy-key.cred')
+p.add_argument('--credential', default=None)
 p.add_argument('--service-tier', choices=['priority', 'default'],
                help='Request this tier and report the returned tier separately')
 args = p.parse_args()
-key = subprocess.check_output([
-    '/usr/bin/systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
-    args.credential, '-',
-], text=True).strip()
+key = proxy_key(args.credential)
 base = args.base_url.rstrip('/')
 
 def verify_tier(response):

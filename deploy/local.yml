@@ -9,5 +9,6 @@
 - name: Activate local route using existing model transaction
   ansible.builtin.import_playbook: refresh-models.yml
   vars:
+    supported_hosts: [grace]
     refresh_script: configure_local.py
     refresh_failure_service: llama-local.service

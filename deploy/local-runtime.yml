@@ -1,10 +1,16 @@
 - name: Install and validate Grace local inference
-  hosts: grace
+  hosts: all
   gather_facts: true
   vars:
     source_root: "{{ playbook_dir }}/.."
     local_root: "{{ litellm_home }}/.local/share/llama-local"
     local_model: "{{ lookup('file', source_root + '/scripts/local-model.json') | from_json }}"
+  pre_tasks:
+    - name: Validate the selected local host
+      ansible.builtin.import_tasks: tasks/target.yml
+      tags: [always]
+      vars:
+        supported_hosts: [grace]
   tasks:
     - name: Check destination
       ansible.builtin.assert:

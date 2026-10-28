@@ -1,21 +1,46 @@
 #!/usr/bin/env bash
 # Root only. Plaintext passes through pipes/process memory, never disk or argv.
+set +x
 set -euo pipefail
-system_credential=/etc/credstore.encrypted/litellm-proxy-key
-user_credential=/home/agent/.config/litellm/proxy-key.cred
-if [[ -e "$system_credential" || -e "$user_credential" ]]; then
-    [[ -f "$system_credential" && -f "$user_credential" ]] || {
-        echo 'Incomplete credential pair; refusing to replace either credential.' >&2
+litellm_home=${1:?Expected home}
+litellm_user=${2:?Expected account}
+credential_mode=${3:?Expected user or system credential mode}
+system_credential=${4:?Expected system credential path}
+user_credential="$litellm_home/.config/litellm/proxy-key.cred"
+[[ $(id -u) == 0 && "$system_credential" == /etc/credstore.encrypted/litellm-proxy-key ]]
+[[ "$credential_mode" == user || "$credential_mode" == system ]]
+[[ $(getent passwd "$litellm_user" | cut -d: -f6) == "$litellm_home" ]]
+if [[ -e "$system_credential" || -L "$system_credential" || -e "$user_credential" || -L "$user_credential" ]]; then
+    [[ -f "$system_credential" && ! -L "$system_credential" && $(stat -c '%u:%a' "$system_credential") == 0:600 ]] || {
+        echo 'Invalid or incomplete system credential; refusing to replace it.' >&2
         exit 1
     }
+    if [[ "$credential_mode" == user ]]; then
+        [[ -f "$user_credential" && ! -L "$user_credential" && $(stat -c '%u:%a' "$user_credential") == "$(id -u "$litellm_user"):600" ]] || {
+            echo 'Incomplete user credential pair; restore it before deployment.' >&2
+            exit 1
+        }
+    fi
     exit 0
 fi
 umask 077
 install -d -m 0700 /etc/credstore.encrypted
+system_stage_dir=$(mktemp -d /etc/credstore.encrypted/.litellm-proxy-key.XXXXXX)
+system_stage="$system_stage_dir/credential"
+user_stage_dir=
+# Staging contains ciphertext only; remove it on success or failure.
+trap 'rm -f "$system_stage"; rmdir "$system_stage_dir"; if [[ -n "$user_stage_dir" ]]; then rm -f "$user_stage_dir/credential"; rmdir "$user_stage_dir"; fi' EXIT
 proxy_key="sk-$(openssl rand -hex 32)"
-systemd-creds encrypt --with-key=host --name=litellm-proxy-key - "$system_credential" <<<"$proxy_key"
-systemd-creds encrypt --user --uid=agent --with-key=host --name=litellm-proxy-key - "$user_credential" <<<"$proxy_key"
+systemd-creds encrypt --with-key=host --name=litellm-proxy-key - "$system_stage" <<<"$proxy_key"
+if [[ "$credential_mode" == user ]]; then
+    user_stage_dir=$(mktemp -d "$litellm_home/.config/litellm/.proxy-key.XXXXXX")
+    user_stage="$user_stage_dir/credential"
+    systemd-creds encrypt --user --uid="$litellm_user" --with-key=host --name=litellm-proxy-key - "$user_stage" <<<"$proxy_key"
+    chown "$litellm_user:$litellm_user" "$user_stage"
+    chmod 0600 "$user_stage"
+    mv -T "$user_stage" "$user_credential"
+fi
 unset proxy_key
-chown agent:agent "$user_credential"
-chmod 0600 "$system_credential" "$user_credential"
+chmod 0600 "$system_stage"
+mv -T "$system_stage" "$system_credential"
 printf 'created\n'

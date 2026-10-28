@@ -1,20 +1,40 @@
 all:
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: /usr/bin/python3
+    litellm_user: agent
+    litellm_model: chatgpt/gpt-6-astra
+    codex_version: 0.159.2
+    litellm_system_credential: /etc/credstore.encrypted/litellm-proxy-key
   hosts:
     grace:
-      ansible_connection: local
-      ansible_python_interpreter: /usr/bin/python3
       litellm_home: /home/agent
-      litellm_user: agent
       litellm_root: /home/agent/.local/share/litellm
       litellm_config: /home/agent/.config/litellm
       litellm_state: /home/agent/.local/state/litellm
-      litellm_uv: /home/agent/.local/share/mise/installs/uv/0.12.11/.mise-bins/uv
-      litellm_model: chatgpt/gpt-6-astra
+      codex_mise: /usr/bin/mise
+      litellm_credential_mode: user
       compaction_fallback_enabled: true
+      litellm_modal_enabled: true
       litellm_bedrock_enabled: true
       litellm_vertex_enabled: true
       litellm_vertex_credential: /etc/credstore.encrypted/litellm-vertex-ai
       litellm_bedrock_credential: /etc/credstore.encrypted/litellm-bedrock-aws
       litellm_modal_credential: /etc/credstore.encrypted/codex-gateway-modal
-      codex_version: 0.159.2
-      codex_mise: /usr/bin/mise
+      litellm_voice_enabled: true
+      litellm_claude_enabled: true
+      codex_forward_agent: true
+    love:
+      litellm_home: /mnt/HC_Volume_103914271/agent/home
+      litellm_root: /mnt/HC_Volume_103914271/agent/home/.local/share/litellm
+      litellm_config: /mnt/HC_Volume_103914271/agent/home/.config/litellm
+      litellm_state: /mnt/HC_Volume_103914271/agent/home/.local/state/litellm
+      codex_mise: /mnt/HC_Volume_103914271/agent/home/.local/bin/mise
+      litellm_credential_mode: system
+      compaction_fallback_enabled: true
+      litellm_modal_enabled: false
+      litellm_bedrock_enabled: false
+      litellm_vertex_enabled: false
+      litellm_voice_enabled: false
+      litellm_claude_enabled: false
+      codex_forward_agent: false

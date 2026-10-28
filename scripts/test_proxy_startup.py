@@ -101,6 +101,7 @@ class Backend(BaseHTTPRequestHandler):
 
 
 class StartupTests(unittest.TestCase):
+    basic_gateway = False
     def test_voice_route_is_registered_by_production_startup(self):
         # A healthy text proxy can still have lost its voice startup hook.
         # GET never creates a call; a registered POST route returns 405, not 404.
@@ -121,7 +122,8 @@ class StartupTests(unittest.TestCase):
         cls.addClassCleanup(cls.backend.server_close)
         cls.addClassCleanup(cls.backend.shutdown)
         (root / 'litellm-proxy-key').write_text('sk-isolated-proxy-key')
-        (root / 'modal-inference-token').write_text('WK_SECRET=wk-isolated\nWS_SECRET=ws-isolated\n')
+        if not cls.basic_gateway:
+            (root / 'modal-inference-token').write_text('WK_SECRET=wk-isolated\nWS_SECRET=ws-isolated\n')
         (root / 'auth.json').write_text(json.dumps({
             'access_token': 'isolated-backend-token', 'account_id': 'isolated-account',
             'expires_at': time.time() + 3600,
@@ -147,6 +149,8 @@ class StartupTests(unittest.TestCase):
                    LITELLM_LOCAL_MODEL_COST_MAP='True', LITELLM_TELEMETRY='False',
                    COMPACTION_FALLBACK_ENABLED='true', COMPACTION_MODEL_CATALOG=str(cls.catalog),
                    UV_OFFLINE='1', UV_PYTHON_DOWNLOADS='never', UV_CACHE_DIR=str(root / 'uv-cache'))
+        env.update(LITELLM_VOICE_ENABLED=str(not cls.basic_gateway).lower(),
+                   LITELLM_CLAUDE_ENABLED=str(not cls.basic_gateway).lower())
         cls.log = (root / 'server.log').open('w+')
         cls.addClassCleanup(cls.log.close)
         cls.process = subprocess.Popen([
@@ -257,7 +261,7 @@ class StartupTests(unittest.TestCase):
             request.full_url = request.full_url.replace('http://127.0.0.1:4000', self.base)
             return original_open(request, **kwargs)
 
-        with patch('verify_review.subprocess.check_output', return_value='sk-isolated-proxy-key'), \
+        with patch('verify_review.proxy_key', return_value='sk-isolated-proxy-key'), \
                 patch('verify_review.urllib.request.urlopen', side_effect=isolated_open):
             verify_review.verify(Path('/unused-isolated-credential'))
         outgoing = self.backend.requests[-1][2]
@@ -361,6 +365,16 @@ stream_max_retries = 0
                            if json.loads(line).get('type') == 'compacted']
             self.assertTrue(checkpoints, 'Codex did not persist a compaction checkpoint')
             self.assertIn('COMPACTION_CONTEXT_OK', json.dumps(checkpoints))
+
+
+class LoveStartupTests(StartupTests):
+    basic_gateway = True
+
+    def test_voice_route_is_registered_by_production_startup(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(self.base + '/v1/live', timeout=5)
+        self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
 
 
 if __name__ == '__main__':

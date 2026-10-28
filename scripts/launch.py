@@ -37,7 +37,8 @@ def main():
         key = (credentials / 'litellm-proxy-key').read_text().strip()
         if not key or any(c.isspace() for c in key):
             raise ValueError('Invalid LiteLLM proxy credential')
-        token = modal_token((credentials / 'modal-inference-token').read_text())
+        modal_path = credentials / 'modal-inference-token'
+        token = modal_token(modal_path.read_text()) if modal_path.exists() else None
         bedrock_path = credentials / 'bedrock-aws-credentials'
         bedrock = None
         if bedrock_path.exists():
@@ -50,7 +51,9 @@ def main():
     except (KeyError, OSError, ValueError):
         sys.exit('Cannot load LiteLLM systemd credentials; check the encrypted credential files.')
     os.environ['LITELLM_MASTER_KEY'] = key
-    os.environ['MODAL_API_KEY'] = token
+    os.environ.pop('MODAL_API_KEY', None)
+    if token is not None:
+        os.environ['MODAL_API_KEY'] = token
     for name in ('GOOGLE_APPLICATION_CREDENTIALS', 'GOOGLE_API_KEY', 'GEMINI_API_KEY',
                  'VERTEXAI_PROJECT', 'VERTEXAI_LOCATION', 'VERTEXAI_CREDENTIALS',
                  'VERTEX_CREDENTIALS_PATH', 'GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_QUOTA_PROJECT'):

@@ -1,5 +1,5 @@
 - name: Stage, prepare, activate, verify, or roll back Grace's browser capability
-  hosts: grace
+  hosts: all
   gather_facts: true
   vars:
     codex_browser_action: preview
@@ -10,6 +10,12 @@
     browser_node: "{{ litellm_home }}/.local/share/mise/installs/node/26.8.1/bin/node"
     browser_npm: "{{ litellm_home }}/.local/share/mise/installs/node/26.8.1/bin/npm"
     browser_dropin: /etc/systemd/system/codex-app-server.service.d/40-browser.conf
+  pre_tasks:
+    - name: Validate the selected local host
+      ansible.builtin.import_tasks: tasks/target.yml
+      tags: [always]
+      vars:
+        supported_hosts: [grace]
   tasks:
     - name: Validate target and action
       ansible.builtin.assert:

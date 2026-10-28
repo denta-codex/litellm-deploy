@@ -5,13 +5,12 @@ import struct
 import zlib
 import json
 from pathlib import Path
-import subprocess
+from deployment import proxy_key
 import urllib.request
 
 
 def verify(catalog, base_url):
-    key = subprocess.check_output(['/usr/bin/systemd-creds', 'decrypt', '--user',
-        '--name=litellm-proxy-key', str(Path.home() / '.config/litellm/proxy-key.cred'), '-'], text=True).strip()
+    key = proxy_key()
     rows = [r for r in json.loads(catalog.read_text())['models'] if r['slug'].startswith('bedrock/')]
     assert {r['slug'] for r in rows} == {'bedrock/opus-5.5', 'bedrock/gpt-6.1-sol'}
     for row in rows:

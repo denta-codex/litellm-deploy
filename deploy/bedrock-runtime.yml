@@ -1,5 +1,5 @@
 - name: Install Bedrock integration without changing pending voice or local runtime
-  hosts: grace
+  hosts: all
   gather_facts: true
   vars:
     source_root: "{{ playbook_dir }}/.."
@@ -8,6 +8,12 @@
       - "{{ litellm_root }}/scripts/live_voice.py"
       - "{{ litellm_home }}/.codex/config.toml"
       - "{{ litellm_state }}/voice-rollout.json"
+  pre_tasks:
+    - name: Validate the selected local host
+      ansible.builtin.import_tasks: tasks/target.yml
+      tags: [always]
+      vars:
+        supported_hosts: [grace]
   tasks:
     - name: Validate the existing target
       ansible.builtin.assert:

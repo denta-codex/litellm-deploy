@@ -10,7 +10,7 @@ import tomlkit
 
 p = argparse.ArgumentParser()
 p.add_argument('action', choices=['prepare', 'rollback', 'check-restart', 'finish'])
-p.add_argument('--home', type=Path, default=Path('/home/agent'))
+p.add_argument('--home', type=Path, default=Path.home())
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
 args = p.parse_args()
 os.umask(0o077)
@@ -42,7 +42,7 @@ if args.action == 'prepare':
     if state.exists():
         pending = json.loads(state.read_text())
         assert digest(original) == pending['prepared_sha256'], 'Pending cutover differs; review before retry'
-        print('Cutover already prepared; restart Grace through the owning desktop.')
+        print('Cutover already prepared; stage the launcher and restart the selected host through the owning desktop.')
     else:
         cleaned = re.sub(r'^# BEGIN CODEX GATEWAY MANAGED\n.*?^# END CODEX GATEWAY MANAGED\n', '', original, flags=re.M | re.S)
         doc = tomlkit.parse(cleaned)
@@ -55,29 +55,33 @@ if args.action == 'prepare':
         assert 'model_catalog_json' not in doc, 'Existing custom model catalog requires review'
         doc['model_catalog_json'] = str(catalog)
         doc['web_search'] = 'live'
+        doc['service_tier'] = 'default'
+        doc.setdefault('features', tomlkit.table())['shell_snapshot'] = False
+        policy = doc.setdefault('shell_environment_policy', tomlkit.table())
+        exclusions = list(policy.get('exclude', []))
+        if 'LITELLM_PROXY_KEY' not in exclusions:
+            exclusions.append('LITELLM_PROXY_KEY')
+        policy['exclude'] = exclusions
         providers = doc.setdefault('model_providers', tomlkit.table())
         if 'litellm' in providers:
             raise RuntimeError('An unmanaged litellm provider already exists; refusing to overwrite')
         providers['litellm'] = {
             'name': 'LiteLLM', 'base_url': 'http://127.0.0.1:4000/v1',
             'wire_api': 'responses', 'supports_websockets': False,
-            'auth': {'command': '/usr/bin/systemd-creds',
-                     'args': ['decrypt', '--user', '--name=litellm-proxy-key',
-                              str(args.home / '.config/litellm/proxy-key.cred'), '-'],
-                     'refresh_interval_ms': 0},
+            'requires_openai_auth': True, 'env_key': 'LITELLM_PROXY_KEY',
         }
         prepared = tomlkit.dumps(doc)
         tomlkit.parse(prepared)
         write(state, json.dumps({'original': original, 'prepared_sha256': digest(prepared),
                                 'socket_before': identity(), 'model': args.model}))
         write(config, prepared)
-        print('Prepared. Restart Grace through the owning desktop, then validate before finalize.')
+        print('Prepared. Stage the pinned launcher with codex-runtime.yml before restarting through the owning desktop.')
 elif args.action == 'rollback':
     pending = json.loads(state.read_text())
     assert digest(config.read_text()) == pending['prepared_sha256'], 'Config changed since prepare; refusing to overwrite newer edits'
     write(config, pending['original'])
     state.unlink()
-    print('Restored prior config. Restart Grace through the owning desktop.')
+    print('Restored prior config. Restore the prior runtime before restarting through the owning desktop.')
 else:
     pending = json.loads(state.read_text())
     current = tomlkit.parse(config.read_text())
@@ -86,6 +90,7 @@ else:
     assert current['model_providers']['litellm']['base_url'] == 'http://127.0.0.1:4000/v1'
     assert identity() is not None and identity() != pending['socket_before'], 'Owning desktop has not replaced the app server'
     if args.action == 'finish':
+        assert digest(config.read_text()) == pending['prepared_sha256'], 'Config changed since prepare; review before finishing'
         state.unlink()
         print('Removed completed cutover recovery state.')
     else:

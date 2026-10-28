@@ -1,9 +1,15 @@
 - name: Deploy or recover subscription voice on Grace
-  hosts: grace
+  hosts: all
   gather_facts: true
   vars:
     voice_action: preview
     source_root: "{{ playbook_dir }}/.."
+  pre_tasks:
+    - name: Validate the selected local host
+      ansible.builtin.import_tasks: tasks/target.yml
+      tags: [always]
+      vars:
+        supported_hosts: [grace]
   tasks:
     - name: Validate destination and action
       ansible.builtin.assert:

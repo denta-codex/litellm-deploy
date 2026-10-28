@@ -30,18 +30,18 @@ Run the following from committed source on Grace, using the repository's managed
 uv sync --locked
 uv run --no-sync scripts/provision_vertex.py
 uv run --no-sync scripts/configure_vertex.py preview
-uv run --no-sync scripts/runtime_rollout.py prepare
-ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+uv run --no-sync scripts/runtime_rollout.py prepare --host grace
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
 # Run the existing provider acceptance checks against the upgraded service.
-uv run --no-sync scripts/runtime_rollout.py finish
-ansible-playbook -i deploy/inventory.yml deploy/vertex.yml
+uv run --no-sync scripts/runtime_rollout.py finish --host grace
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/vertex.yml
 ```
 
 The runtime and provider activation are separate checkpoints. Runtime preparation
 saves only changed managed scripts, dependency manifests, and systemd files,
 plus the protected configuration used to detect concurrent changes. It never
 copies a Python environment or credentials. If runtime deployment/acceptance
-fails, run `uv run --no-sync scripts/runtime_rollout.py rollback` with this
+fails, run `uv run --no-sync scripts/runtime_rollout.py rollback --host grace` with this
 checkout's tested environment; it restores the saved files, syncs the saved
 lock, and restarts/checks the previous service. The recovery journal is retained
 on failure and deleted on successful finish or recovery.
@@ -57,7 +57,7 @@ the previously accepted runtime; Bedrock is preserved.
 Recover an interrupted Vertex activation with:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml deploy/vertex.yml -e refresh_action=rollback
+ansible-playbook -i deploy/inventory.yml --limit grace deploy/vertex.yml -e refresh_action=rollback
 ```
 
 After successful publication, reconnect Grace from the owning desktop to load

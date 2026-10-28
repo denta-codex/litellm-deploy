@@ -1,18 +1,21 @@
-- name: Explicitly configure Grace model routes and picker
-  hosts: grace
+- name: Explicitly configure the selected host model routes and picker
+  hosts: all
   gather_facts: true
   vars:
     source_root: "{{ playbook_dir }}/.."
     refresh_action: refresh
     refresh_script: refresh_models.py
     refresh_command: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/{{ refresh_script }}"]
+  pre_tasks:
+    - name: Validate the selected local host
+      ansible.builtin.import_tasks: tasks/target.yml
+      tags: [always]
   tasks:
     - name: Check target and operation
       ansible.builtin.assert:
         that:
-          - ansible_facts.hostname == 'grace'
+          - ansible_facts.hostname == inventory_hostname
           - ansible_facts.user_id == litellm_user
-          - litellm_home == '/home/agent'
           - refresh_action in ['refresh', 'rollback']
     - name: Inspect deployment source
       ansible.builtin.command: git status --porcelain

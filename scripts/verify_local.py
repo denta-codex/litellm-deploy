@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import subprocess
+from deployment import proxy_key
 import threading
 import time
 
@@ -37,8 +38,7 @@ class Probe:
         self.headers = {}
         self.metrics = []
         if proxy:
-            key = subprocess.check_output(['systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
-                                           str(Path.home() / '.config/litellm/proxy-key.cred'), '-'], text=True).strip()
+            key = proxy_key()
             self.headers['Authorization'] = 'Bearer ' + key
 
     def request(self, messages, tools=None, forced=False):

@@ -12,7 +12,7 @@ import litellm
 from litellm.llms.chatgpt.responses.transformation import ChatGPTResponsesAPIConfig
 
 
-OBSERVATION = Path('/home/agent/.local/state/litellm/fast-observation.jsonl')
+OBSERVATION = Path.home() / '.local/state/litellm/fast-observation.jsonl'
 
 
 def observe_tier(request):

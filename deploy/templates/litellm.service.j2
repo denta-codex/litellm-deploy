@@ -2,6 +2,7 @@
 Description=LiteLLM subscription and Modal proxy
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor={{ litellm_home }}
 
 [Service]
 Type=simple
@@ -15,8 +16,12 @@ Environment=LITELLM_LOCAL_MODEL_COST_MAP=True
 Environment=LITELLM_TELEMETRY=False
 Environment=UV_OFFLINE=1
 Environment=UV_PYTHON_DOWNLOADS=never
-LoadCredentialEncrypted=litellm-proxy-key:/etc/credstore.encrypted/litellm-proxy-key
+Environment=LITELLM_VOICE_ENABLED={{ litellm_voice_enabled | bool | ternary('true', 'false') }}
+Environment=LITELLM_CLAUDE_ENABLED={{ litellm_claude_enabled | bool | ternary('true', 'false') }}
+LoadCredentialEncrypted=litellm-proxy-key:{{ litellm_system_credential }}
+{% if litellm_modal_enabled %}
 LoadCredentialEncrypted=modal-inference-token:{{ litellm_modal_credential }}
+{% endif %}
 ExecStart={{ litellm_root }}/scripts/start-litellm {{ litellm_uv }} {{ litellm_root }} {{ litellm_config }}/config.yaml
 Restart=on-failure
 RestartSec=3

@@ -7,7 +7,11 @@ saved dependency lock, and restart the service; never copy an entire environment
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
+import pwd
+import shutil
+import socket
 import subprocess
 import time
 import urllib.request
@@ -20,6 +24,35 @@ HOME = Path('/home/agent')
 ROOT = HOME/'.local/share/litellm'
 STATE = HOME/'.local/state/litellm'
 JOURNAL = STATE/'runtime-upgrade.json'
+HOST = 'grace'
+UV = shutil.which('uv')
+
+
+def inventory(source, host):
+    data = yaml.safe_load((source/'deploy/inventory.yml').read_text())['all']
+    if host not in data['hosts']:
+        raise ValueError('Unknown deployment host')
+    return data.get('vars', {}) | data['hosts'][host]
+
+
+def configure(source, host):
+    global HOME, ROOT, STATE, JOURNAL, HOST, UV
+    variables = inventory(source, host)
+    home = Path(variables['litellm_home'])
+    account = pwd.getpwnam(variables['litellm_user'])
+    if socket.gethostname().split('.')[0] != host or os.geteuid() != account.pw_uid or Path(account.pw_dir) != home:
+        raise ValueError('Run locally as agent on the explicitly selected inventory host')
+    UV = subprocess.check_output([variables['codex_mise'], 'which', 'uv'], cwd=source, text=True).strip()
+    HOST, HOME = host, home
+    ROOT, STATE = Path(variables['litellm_root']), Path(variables['litellm_state'])
+    JOURNAL = STATE/'runtime-upgrade.json'
+
+
+def service_state():
+    def state(operation):
+        result = subprocess.run(['systemctl', operation, 'litellm.service'], capture_output=True, text=True)
+        return result.stdout.strip()
+    return {'active': state('is-active') == 'active', 'enabled': state('is-enabled') == 'enabled'}
 
 
 def record(path):
@@ -48,14 +81,21 @@ def candidates(source):
     result={str(ROOT/name):{'text':(source/name).read_text(),'mode':0o600} for name in ('pyproject.toml','uv.lock')}
     for path in (source/'scripts').iterdir():
         if path.is_file():result[str(ROOT/'scripts'/path.name)]={'text':path.read_text(),'mode':0o700}
-    variables=yaml.safe_load((source/'deploy/inventory.yml').read_text())['all']['hosts']['grace']
+    variables=inventory(source, HOST)
+    variables.update(litellm_uv=UV, litellm_codex=str(HOME/f'.local/share/mise/installs/codex/{variables["codex_version"]}/bin/codex'), inventory_hostname=HOST)
     templates=Environment(loader=FileSystemLoader(source/'deploy/templates'),undefined=StrictUndefined,keep_trailing_newline=True,trim_blocks=True)
     templates.filters.update({'bool':bool, 'ternary':lambda flag,yes,no:yes if flag else no})
+    templates.filters['to_nice_json'] = lambda value: json.dumps(value, indent=4, sort_keys=True)
     for template,target in [('litellm.service.j2','/etc/systemd/system/litellm.service'),
         ('compaction-recovery.conf.j2','/etc/systemd/system/litellm.service.d/30-compaction-recovery.conf'),
         ('bedrock.conf.j2','/etc/systemd/system/litellm.service.d/40-bedrock.conf'),
         ('vertex.conf.j2','/etc/systemd/system/litellm.service.d/50-vertex.conf')]:
         result[target]={'text':templates.get_template(template).render(**variables),'mode':0o644}
+    result[str(HOME/'.config/litellm/deployment.json')] = {
+        'text': templates.get_template('deployment.json.j2').render(**variables), 'mode':0o600}
+    config = HOME/'.config/litellm/config.yaml'
+    if not config.exists():
+        result[str(config)] = {'text':templates.get_template('config.yaml.j2').render(**variables), 'mode':0o600}
     return result
 
 
@@ -63,7 +103,8 @@ def protected():
     paths=[HOME/'.codex/config.toml',HOME/'.config/litellm/config.yaml',HOME/'.config/litellm/codex-models.json']
     paths.extend(STATE/name for name in ('subscription-models.json','modal-models.json','claude-models.json',
         'local-model.json','bedrock-models.json','vertex-models.json','voice-installed.json'))
-    return {str(p):record(p) for p in paths}
+    # A new installation creates its bootstrap config as a managed candidate.
+    return {str(p):record(p) for p in paths if p != HOME/'.config/litellm/config.yaml' or p.exists()}
 
 
 def prepare(source):
@@ -74,13 +115,21 @@ def prepare(source):
         raise ValueError('Runtime deployment requires committed source')
     after={name:value for name,value in candidates(source).items() if record(Path(name))!=value}
     journal={'schema':1,'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),
+        'host':HOST, 'uv':UV, 'service':service_state(), 'environment_existed':(ROOT/'.venv').exists(),
         'before':{name:record(Path(name)) for name in after},'after':after,'protected':protected()}
     write(JOURNAL,json.dumps(journal))
     return {'prepared':True,'changed_files':len(after),'recovery':str(JOURNAL)}
 
 
-def finish():
+def load_journal():
     journal=json.loads(JOURNAL.read_text())
+    if journal.get('host', 'grace') != HOST:
+        raise ValueError('Recovery journal belongs to a different host')
+    return journal
+
+
+def finish():
+    journal=load_journal()
     assert_records(journal['protected']);assert_records(journal['after'])
     write(STATE/'runtime-installed.json',json.dumps({'schema':1,'commit':journal['commit'],
         'lock_sha256':hashlib.sha256((ROOT/'uv.lock').read_bytes()).hexdigest()},indent=2)+'\n')
@@ -89,17 +138,32 @@ def finish():
 
 
 def rollback():
-    journal=json.loads(JOURNAL.read_text())
+    journal=load_journal()
     assert_records(journal['protected'])
     for name,before in journal['before'].items():
         if record(Path(name)) not in (before,journal['after'][name]):
             raise ValueError('Concurrent edit; recovery retained: '+name)
-    subprocess.run(['sudo','-n','systemctl','stop','litellm.service'],check=True)
+    service = journal.get('service', {'active':True, 'enabled':True})
+    subprocess.run(['sudo','-n','systemctl','stop','litellm.service'],check=service['active'])
+    if not service['enabled']:
+        subprocess.run(['sudo','-n','systemctl','disable','litellm.service'],check=False)
     restore(journal['before'])
-    uv=str(HOME/'.local/share/mise/installs/uv/0.12.11/.mise-bins/uv')
-    subprocess.run([uv,'sync','--locked','--project',str(ROOT)],check=True)
+    if (ROOT/'uv.lock').exists():
+        subprocess.run([journal.get('uv', UV),'sync','--locked','--project',str(ROOT)],check=True)
+    elif not journal.get('environment_existed', True) and (ROOT/'.venv').exists():
+        shutil.rmtree(ROOT/'.venv')
     subprocess.run(['sudo','-n','systemctl','daemon-reload'],check=True)
-    subprocess.run(['sudo','-n','systemctl','restart','litellm.service'],check=True)
+    if service['enabled']:
+        subprocess.run(['sudo','-n','systemctl','enable','litellm.service'],check=True)
+    if service['active']:
+        subprocess.run(['sudo','-n','systemctl','restart','litellm.service'],check=True)
+        wait_for_health()
+    assert_records(journal['before'])
+    JOURNAL.unlink()
+    return {'restored':True}
+
+
+def wait_for_health():
     for attempt in range(30):
         try:
             with urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness',timeout=1) as response:
@@ -107,15 +171,14 @@ def rollback():
         except OSError:pass
         time.sleep(1)
     else:raise ValueError('Restored runtime is not healthy; recovery retained')
-    assert_records(journal['before'])
-    JOURNAL.unlink()
-    return {'restored':True}
 
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action',choices=['prepare','finish','rollback'])
     parser.add_argument('--source',type=Path,default=Path(__file__).resolve().parent.parent)
+    parser.add_argument('--host', choices=['grace', 'love'], required=True)
     args=parser.parse_args()
+    configure(args.source, args.host)
     result=prepare(args.source) if args.action=='prepare' else finish() if args.action=='finish' else rollback()
     print(json.dumps(result))

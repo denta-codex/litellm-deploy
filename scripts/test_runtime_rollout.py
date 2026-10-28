@@ -20,6 +20,7 @@ class RuntimeTemplates(unittest.TestCase):
 
 class RuntimeRecovery(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch.object(runtime,'service_state',return_value={'active':True,'enabled':True}))
         self.home=Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.root=self.home/'runtime';self.root.mkdir()
         self.state=self.home/'state';self.state.mkdir()
@@ -62,7 +63,33 @@ class RuntimeRecovery(unittest.TestCase):
         self.assertEqual(self.lock.read_text(),'old lock')
         self.assertEqual(self.config.read_text(),'Bedrock routes')
         self.assertTrue(any('sync' in c.args[0] and '--locked' in c.args[0] for c in run.call_args_list))
+
+    def test_failed_first_install_does_not_sync_or_restart_a_missing_previous_runtime(self):
+        self.lock.unlink()
+        journal=json.loads(runtime.JOURNAL.read_text())
+        journal['before'][str(self.lock)]=None
+        journal['service']={'active':False,'enabled':False}
+        journal['environment_existed']=False
+        runtime.JOURNAL.write_text(json.dumps(journal))
+        (self.root/'.venv').mkdir()
+        runtime.restore(self.after)
+        with patch('runtime_rollout.subprocess.run',return_value=subprocess.CompletedProcess([],0)) as run:
+            runtime.rollback()
+        self.assertFalse(self.lock.exists())
+        self.assertFalse((self.root/'.venv').exists())
+        self.assertFalse(any('sync' in call.args[0] or 'restart' in call.args[0] for call in run.call_args_list))
         self.assertFalse(runtime.JOURNAL.exists())
+
+    def test_journal_from_another_host_is_rejected_before_mutation(self):
+        journal=json.loads(runtime.JOURNAL.read_text())
+        journal['host']='love'
+        runtime.JOURNAL.write_text(json.dumps(journal))
+        with patch('runtime_rollout.subprocess.run') as run:
+            for action in (runtime.finish, runtime.rollback):
+                with self.assertRaisesRegex(ValueError, 'different host'):
+                    action()
+            run.assert_not_called()
+        self.assertTrue(runtime.JOURNAL.exists())
 
 
 if __name__=='__main__':unittest.main()

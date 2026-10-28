@@ -1,8 +1,14 @@
 - name: Require the matching deployed Vertex runtime
-  hosts: grace
-  gather_facts: false
+  hosts: all
+  gather_facts: true
   vars:
     source_root: "{{ playbook_dir }}/.."
+  pre_tasks:
+    - name: Validate the selected local host
+      ansible.builtin.import_tasks: tasks/target.yml
+      tags: [always]
+      vars:
+        supported_hosts: [grace]
   tasks:
     - name: Require enabled Vertex integration
       ansible.builtin.assert:
@@ -19,4 +25,5 @@
 - name: Activate Argon with the shared recovery transaction
   ansible.builtin.import_playbook: refresh-models.yml
   vars:
+    supported_hosts: [grace]
     refresh_script: configure_vertex.py

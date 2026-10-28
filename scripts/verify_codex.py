@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from deployment import codex_binary, proxy_key
 import tempfile
 
 import tomlkit
@@ -14,8 +15,9 @@ p.add_argument('--base-url', default='http://127.0.0.1:4000', help='Proxy origin
 p.add_argument('--catalog', type=Path, default=Path.home() / '.config/litellm/codex-models.json')
 p.add_argument('--skip-search', action='store_true', help='Validate tools/context without advertising unsupported search')
 p.add_argument('--service-tier', choices=['priority', 'default'], help='Exercise Codex with an explicit service tier')
-p.add_argument('--launcher', type=Path, default=Path.home() / '.local/bin/codex')
+p.add_argument('--launcher', type=Path, default=None)
 args = p.parse_args()
+args.launcher = args.launcher or codex_binary()
 metadata = next(m for m in json.loads(args.catalog.read_text())['models'] if m['slug'] == args.model)
 efforts = [r['effort'] for r in metadata.get('supported_reasoning_levels', [])]
 effort = 'low' if 'low' in efforts else metadata.get('default_reasoning_level', 'medium')
@@ -50,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='codex-probe-', dir=state) as temporary:
         doc['service_tier'] = args.service_tier
         doc['features']['fast_mode'] = True
     (home / 'config.toml').write_text(tomlkit.dumps(doc))
-    env = os.environ | {'CODEX_HOME': str(home)}
+    env = os.environ | {'CODEX_HOME': str(home), 'LITELLM_PROXY_KEY': proxy_key()}
 
     def run(arguments):
         result = subprocess.run([str(args.launcher), 'exec', *arguments], env=env,

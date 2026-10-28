@@ -8,6 +8,7 @@ import secrets
 import shutil
 import socket
 import subprocess
+from deployment import proxy_key
 import sys
 import tempfile
 
@@ -78,8 +79,7 @@ async def main(args):
                     raise RuntimeError('Disposable proxy startup timed out')
         else:
             base = args.base_url
-            key = subprocess.check_output(['/usr/bin/systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
-                str(Path.home() / '.config/litellm/proxy-key.cred'), '-'], text=True).strip()
+            key = proxy_key()
         for model in models:
             home = directory / ('codex-' + str(models.index(model)))
             home.mkdir(mode=0o700)

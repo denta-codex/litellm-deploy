@@ -10,14 +10,15 @@ import subprocess
 from websockets.asyncio.client import unix_connect
 
 
-async def verify(version, socket):
+async def verify(version, socket, home=None):
+    home = Path(home) if home is not None else Path.home()
     pid = int(subprocess.check_output(
         ['systemctl', 'show', 'codex-app-server.service', '--property=MainPID', '--value'],
         text=True,
     ).strip())
     if pid <= 0:
         raise RuntimeError('codex-app-server.service has no running process')
-    expected = Path(f'/home/agent/.local/share/mise/installs/codex/{version}/bin/codex').resolve()
+    expected = (home / f'.local/share/mise/installs/codex/{version}/bin/codex').resolve()
     actual = Path(f'/proc/{pid}/exe').resolve()
     if actual != expected:
         raise RuntimeError(f'Running app server uses {actual}, expected pinned Codex {version}')
@@ -51,7 +52,7 @@ async def verify(version, socket):
             raise RuntimeError('Live Astra metadata does not advertise Fast')
 
         started = await rpc('thread/start', {
-            'cwd': '/home/agent', 'ephemeral': True, 'approvalPolicy': 'never',
+            'cwd': str(home), 'ephemeral': True, 'approvalPolicy': 'never',
             'sandbox': 'read-only', 'serviceTier': 'default',
         })
         thread = started['thread']['id']
@@ -81,11 +82,12 @@ async def verify(version, socket):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--version', required=True)
+    parser.add_argument('--home', type=Path, default=Path.home())
     parser.add_argument('--socket', type=Path,
-                        default=Path('/home/agent/.codex/app-server-control/app-server-control.sock'))
+                        default=None)
     args = parser.parse_args()
     try:
-        asyncio.run(verify(args.version, args.socket))
+        asyncio.run(verify(args.version, args.socket or args.home / '.codex/app-server-control/app-server-control.sock', args.home))
     except (OSError, RuntimeError, subprocess.SubprocessError, TimeoutError) as error:
         raise SystemExit(str(error)) from None
 

@@ -4,7 +4,7 @@ import base64
 import json
 from pathlib import Path
 import struct
-import subprocess
+from deployment import proxy_key
 import zlib
 
 from verify_bedrock import check
@@ -14,8 +14,7 @@ from vertex_google import SLUG
 def verify(catalog, base_url):
     rows = [r for r in json.loads(catalog.read_text())['models'] if r['slug'].startswith('vertex/')]
     assert [r['slug'] for r in rows] == [SLUG]
-    key = subprocess.check_output(['/usr/bin/systemd-creds','decrypt','--user',
-        '--name=litellm-proxy-key',str(Path.home()/'.config/litellm/proxy-key.cred'),'-'],text=True).strip()
+    key = proxy_key()
     for effort in rows[0]['supported_reasoning_levels']:
         check(base_url,key,{'model':SLUG, 'input':'Reply exactly VERTEX_CAPABILITY_OK.',
             'reasoning':{'effort':effort['effort']}, 'stream':False},'VERTEX_CAPABILITY_OK')

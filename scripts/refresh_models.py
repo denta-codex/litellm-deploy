@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
 
 from catalog_enrichment import enrich_catalog, fetch_sources, stock_catalog
+from deployment import codex_binary
 
 PREFIX = 'chatgpt/'
 REVIEW_MODEL = 'codex-auto-review'
@@ -385,6 +386,8 @@ def main(refresh_type=Refresh):
     args = p.parse_args()
     os.umask(0o077)
     refresh = refresh_type(args.home, args.root, args.uv)
+    if args.action in ('preview', 'prepare', 'validate'):
+        refresh.codex = Path(codex_binary(args.home))
     if args.action in ('preview', 'prepare'):
         result = refresh.prepare(preview=args.action == 'preview')
     elif args.action == 'cleanup-rollback':

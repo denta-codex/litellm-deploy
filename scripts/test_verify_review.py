@@ -22,7 +22,7 @@ class ReviewProbeTests(unittest.TestCase):
         stream = io.BytesIO(b'event: response.created\n' + b''.join(
             b'data: ' + json.dumps(event).encode() + b'\n\n' for event in events) + b'data: [DONE]\n')
         output = io.StringIO()
-        with patch('verify_review.subprocess.check_output', return_value='test-key\n'), \
+        with patch('verify_review.proxy_key', return_value='test-key'), \
                 patch('verify_review.urllib.request.urlopen', return_value=stream) as send, \
                 contextlib.redirect_stdout(output):
             verify(Path('/test/proxy-key.cred'))

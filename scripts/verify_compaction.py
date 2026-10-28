@@ -2,7 +2,7 @@
 import argparse
 import json
 from pathlib import Path
-import subprocess
+from deployment import proxy_key
 import tomllib
 import urllib.request
 import uuid
@@ -11,8 +11,7 @@ import uuid
 def verify(model=None, base_url='http://127.0.0.1:4000'):
     selected = model or tomllib.loads((Path.home() / '.codex/config.toml').read_text())['model']
     # Existing repository-owned encrypted credential; keep its plaintext in memory.
-    key = subprocess.check_output(['systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
-        str(Path.home() / '.config/litellm/proxy-key.cred'), '-'], text=True).strip()
+    key = proxy_key()
     task_id = str(uuid.uuid4())
     marker = 'LITELLM_COMPACTION_OK'
     payload = {'model': selected, 'stream': True, 'store': False, 'tools': [], 'tool_choice': 'none',

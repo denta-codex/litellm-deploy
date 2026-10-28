@@ -5,17 +5,14 @@ This checks the inference transport, not Codex's approval policy or decisions.
 import argparse
 import json
 from pathlib import Path
-import subprocess
+from deployment import proxy_key
 import urllib.request
 
 from refresh_models import REVIEW_MODEL
 
 
 def verify(credential):
-    key = subprocess.check_output([
-        '/usr/bin/systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
-        str(credential), '-',
-    ], text=True).strip()
+    key = proxy_key(credential)
     payload = {
         'model': REVIEW_MODEL,
         'instructions': 'Return only the requested JSON object for this deployment transport probe.',

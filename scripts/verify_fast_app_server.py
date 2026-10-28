@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+from deployment import codex_binary, proxy_key
 import tempfile
 
 from aiohttp import ClientSession, ClientTimeout, web
@@ -20,8 +21,7 @@ async def verify(args, home):
     native['tokens']['refresh_token'] = ''
     native['OPENAI_API_KEY'] = None
     (home / 'auth.json').write_text(json.dumps(native))
-    key = subprocess.check_output(['/usr/bin/systemd-creds', 'decrypt', '--user',
-        '--name=litellm-proxy-key', str(Path.home() / '.config/litellm/proxy-key.cred'), '-'], text=True).strip()
+    key = proxy_key()
     observed = []
     async with ClientSession(timeout=ClientTimeout(total=240)) as session:
         async def relay(request):
@@ -70,8 +70,8 @@ async def verify(args, home):
         }
         doc['model_providers']['litellm']['base_url'] = f'http://127.0.0.1:{port}/v1'
         (home / 'config.toml').write_text(tomlkit.dumps(doc))
-        process = await asyncio.create_subprocess_exec(str(args.launcher), '-c', 'features.code_mode_host=true', 'app-server',
-            env=os.environ | {'CODEX_HOME': str(home)}, stdin=asyncio.subprocess.PIPE,
+        process = await asyncio.create_subprocess_exec(str(args.launcher or codex_binary()), '-c', 'features.code_mode_host=true', 'app-server',
+            env=os.environ | {'CODEX_HOME': str(home), 'LITELLM_PROXY_KEY': key}, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         counter = 0
         async def receive():
@@ -139,7 +139,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--model', default='chatgpt/gpt-6-astra')
     parser.add_argument('--base-url', default='http://127.0.0.1:4000')
-    parser.add_argument('--launcher', type=Path, default=Path.home() / '.local/bin/codex')
+    parser.add_argument('--launcher', type=Path, default=None)
     args = parser.parse_args()
     os.umask(0o077)
     state = Path.home() / '.local/state/litellm'

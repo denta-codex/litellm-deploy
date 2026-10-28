@@ -1,6 +1,12 @@
 - name: Finalize validated LiteLLM cutover and uninstall codex-gateway
-  hosts: grace
+  hosts: all
   gather_facts: true
+  pre_tasks:
+    - name: Validate the selected local host
+      ansible.builtin.import_tasks: tasks/target.yml
+      tags: [always]
+      vars:
+        supported_hosts: [grace]
   tasks:
     - name: Require completed desktop validation
       ansible.builtin.assert:

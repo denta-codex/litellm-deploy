@@ -1,4 +1,4 @@
-"""Manage Grace's stock Codex runtime as one recoverable transaction."""
+"""Manage the selected host's stock Codex runtime as one recoverable transaction."""
 
 import argparse
 import base64
@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import shlex
 import stat
 import subprocess
 import tempfile
@@ -33,14 +34,22 @@ def sha256(data):
 
 
 def render_launcher(version, credential='/home/agent/.config/litellm/proxy-key.cred',
-                    binary=None, decrypt='/usr/bin/systemd-creds'):
-    binary = binary or f'/home/agent/.local/share/mise/installs/codex/{version}/bin/codex'
+                    binary=None, decrypt='/usr/bin/systemd-creds', home=Path('/home/agent'),
+                    credential_mode='user', system_credential='/etc/credstore.encrypted/litellm-proxy-key'):
+    binary = binary or str(home / f'.local/share/mise/installs/codex/{version}/bin/codex')
+    if credential_mode not in ('user', 'system'):
+        raise ValueError('Unknown credential mode')
+    load = shlex.join([decrypt, 'decrypt', '--user', '--name=litellm-proxy-key', str(credential), '-'])
+    if credential_mode == 'system':
+        load = shlex.join(['sudo', '-n', decrypt, 'decrypt', '--name=litellm-proxy-key', system_credential, '-'])
+        load = ('if [[ -n "${CREDENTIALS_DIRECTORY:-}" && -r "$CREDENTIALS_DIRECTORY/litellm-proxy-key" ]]; '
+                'then cat "$CREDENTIALS_DIRECTORY/litellm-proxy-key"; else ' + load + '; fi')
     return f'''#!/bin/bash
-# Repository-managed launcher for Grace's Codex runtime.
+# Repository-managed launcher for the selected host's Codex runtime.
 set +x
 set -euo pipefail
 unset LITELLM_PROXY_KEY
-if ! LITELLM_PROXY_KEY=$({decrypt} decrypt --user --name=litellm-proxy-key {credential} - 2>/dev/null); then
+if ! LITELLM_PROXY_KEY=$({load} 2>/dev/null); then
     echo 'Codex: cannot decrypt the LiteLLM proxy credential.' >&2
     exit 1
 fi
@@ -49,28 +58,30 @@ if [[ -z "$LITELLM_PROXY_KEY" || "$LITELLM_PROXY_KEY" =~ [[:space:]] ]]; then
     exit 1
 fi
 export LITELLM_PROXY_KEY
-exec {binary} "$@"
+exec {shlex.quote(str(binary))} "$@"
 '''
 
 
-def render_service():
-    return '''[Unit]
+def render_service(home=Path('/home/agent'), credential_mode='user', forward_agent=True):
+    credential = ('LoadCredentialEncrypted=litellm-proxy-key:/etc/credstore.encrypted/litellm-proxy-key\n'
+                  if credential_mode == 'system' else '')
+    forwarding = f'Environment=SSH_AUTH_SOCK={home}/.codex/app-server-control/forwarded-ssh-agent.sock\n' if forward_agent else ''
+    return f'''[Unit]
 Description=Codex app server for agent
 Wants=network-online.target
 After=network-online.target
-RequiresMountsFor=/home/agent
+RequiresMountsFor={home}
 StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=agent
 Group=agent
-WorkingDirectory=/home/agent
-Environment=HOME=/home/agent
-Environment=CODEX_HOME=/home/agent/.codex
-Environment=PATH=/home/agent/.local/share/mise/shims:/home/agent/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=SSH_AUTH_SOCK=/home/agent/.codex/app-server-control/forwarded-ssh-agent.sock
-ExecStart=/home/agent/.local/share/litellm/scripts/codex-launcher -c features.code_mode_host=true app-server --listen unix://
+WorkingDirectory={home}
+Environment=HOME={home}
+Environment=CODEX_HOME={home}/.codex
+Environment=PATH={home}/.local/share/mise/shims:{home}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+{credential}{forwarding}ExecStart={home}/.local/share/litellm/scripts/codex-launcher -c features.code_mode_host=true app-server --listen unix://
 Restart=always
 RestartSec=5
 TimeoutStopSec=120
@@ -132,16 +143,24 @@ def config_errors(doc):
 
 
 class Runtime:
-    def __init__(self, version, root=Path('/'), home=Path('/home/agent')):
+    def __init__(self, version, root=Path('/'), home=Path('/home/agent'),
+                 credential_mode='user', forward_agent=True, uv=None):
         if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?', version):
             raise RuntimeError('Codex version must be an exact release identifier')
         self.version = version
         self.root = root
-        self.home = home
+        self.home = Path(home)
+        self.credential_mode = credential_mode
+        self.forward_agent = forward_agent
+        self.uv = uv or str(self.home / '.local/share/mise/shims/uv')
+        self.managed_paths = tuple(name.replace('/home/agent', str(self.home)) for name in MANAGED_PATHS)
+        self.config_path = str(self.home / '.codex/config.toml')
         self.agent = pwd.getpwnam('agent') if root == Path('/') else None
+        if self.agent and Path(self.agent.pw_dir) != self.home:
+            raise RuntimeError('The selected home differs from the agent account home')
         self.uid = self.agent.pw_uid if self.agent else os.getuid()
         self.gid = self.agent.pw_gid if self.agent else os.getgid()
-        self.state_dir = self.path('/home/agent/.local/state/litellm')
+        self.state_dir = self.path(self.home / '.local/state/litellm')
         self.transaction = self.state_dir / 'codex-runtime.json'
         self.installed = self.state_dir / 'codex-runtime-installed.json'
         self.observation = self.state_dir / 'fast-observation.jsonl'
@@ -151,13 +170,14 @@ class Runtime:
         return absolute if self.root == Path('/') else self.root / absolute.relative_to('/')
 
     def binary(self):
-        return self.path(f'/home/agent/.local/share/mise/installs/codex/{self.version}/bin/codex')
+        return self.path(self.home / f'.local/share/mise/installs/codex/{self.version}/bin/codex')
 
     def desired(self):
         return {
-            '/home/agent/.local/share/litellm/scripts/codex-launcher': self.file(render_launcher(self.version), 0o700, self.uid, self.gid),
-            '/home/agent/.local/bin/codex': {'kind': 'symlink', 'target': '/home/agent/.local/share/litellm/scripts/codex-launcher'},
-            '/etc/systemd/system/codex-app-server.service': self.file(render_service(), 0o644, 0 if self.root == Path('/') else self.uid, 0 if self.root == Path('/') else self.gid),
+            str(self.home / '.local/share/litellm/scripts/codex-launcher'): self.file(render_launcher(self.version,
+                credential=str(self.home / '.config/litellm/proxy-key.cred'), home=self.home, credential_mode=self.credential_mode), 0o700, self.uid, self.gid),
+            str(self.home / '.local/bin/codex'): {'kind': 'symlink', 'target': str(self.home / '.local/share/litellm/scripts/codex-launcher')},
+            '/etc/systemd/system/codex-app-server.service': self.file(render_service(self.home, self.credential_mode, self.forward_agent), 0o644, 0 if self.root == Path('/') else self.uid, 0 if self.root == Path('/') else self.gid),
             '/etc/profile.d/codex-app-server.sh': self.file(render_profile(), 0o644, 0 if self.root == Path('/') else self.uid, 0 if self.root == Path('/') else self.gid),
             '/etc/systemd/system/codex-app-server.service.d/20-litellm-launcher.conf': {'kind': 'absent'},
         }
@@ -220,9 +240,10 @@ class Runtime:
             if path.is_symlink() or path.exists():
                 path.unlink()
             return
-        parent_uid = self.uid if name.startswith('/home/agent/') else 0
-        parent_gid = self.gid if name.startswith('/home/agent/') else 0
-        self.ensure_dir(path.parent, 0o700 if parent_uid == self.uid else 0o755, parent_uid, parent_gid)
+        user_path = name.startswith(str(self.home) + '/')
+        parent_uid = self.uid if user_path or self.root != Path('/') else 0
+        parent_gid = self.gid if user_path or self.root != Path('/') else 0
+        self.ensure_dir(path.parent, 0o700 if user_path else 0o755, parent_uid, parent_gid)
         if entry['kind'] == 'symlink':
             temporary = path.parent / ('.' + path.name + '.new')
             if temporary.is_symlink() or temporary.exists():
@@ -241,25 +262,25 @@ class Runtime:
             raise RuntimeError(f'Managed binary did not report codex-cli {self.version}')
 
     def validate_config(self):
-        config = self.path(CONFIG_PATH)
+        config = self.path(self.config_path)
         if config.is_symlink() or not config.exists():
-            raise RuntimeError(f'Grace\'s user-managed Codex config must be a regular file at {CONFIG_PATH}.')
+            raise RuntimeError(f'the host\'s user-managed Codex config must be a regular file at {self.config_path}.')
         info = config.stat()
         if not stat.S_ISREG(info.st_mode):
-            raise RuntimeError(f'Grace\'s user-managed Codex config must be a regular file at {CONFIG_PATH}.')
+            raise RuntimeError(f'the host\'s user-managed Codex config must be a regular file at {self.config_path}.')
         errors = []
         if info.st_uid != self.uid or info.st_gid != self.gid:
-            errors.append(f'Run chown agent:agent {CONFIG_PATH}.')
+            errors.append(f'Run chown agent:agent {self.config_path}.')
         if stat.S_IMODE(info.st_mode) != 0o600:
-            errors.append(f'Run chmod 600 {CONFIG_PATH}.')
+            errors.append(f'Run chmod 600 {self.config_path}.')
         doc = tomlkit.parse(config.read_text())
         errors.extend(config_errors(doc))
         if errors:
-            raise RuntimeError('Grace\'s user-managed Codex config is incompatible:\n- ' + '\n- '.join(errors))
+            raise RuntimeError('the host\'s user-managed Codex config is incompatible:\n- ' + '\n- '.join(errors))
         return doc
 
     def validate_catalog(self, config):
-        catalog = self.path('/home/agent/.config/litellm/codex-models.json')
+        catalog = self.path(self.home / '.config/litellm/codex-models.json')
         if not catalog.is_file():
             raise RuntimeError('Existing Codex model catalog is missing')
         self.ensure_dir(self.state_dir, 0o700, self.uid, self.gid)
@@ -279,16 +300,16 @@ class Runtime:
             raise RuntimeError('Pinned Codex returned an invalid catalog probe') from error
 
     def current_fingerprints(self):
-        return {name: self.fingerprint(self.snapshot(name, include_content=False)) for name in MANAGED_PATHS}
+        return {name: self.fingerprint(self.snapshot(name, include_content=False)) for name in self.managed_paths}
 
     def assert_matches(self, expected, label):
         actual = self.current_fingerprints()
-        mismatches = [name for name in MANAGED_PATHS if actual[name] != expected[name]]
+        mismatches = [name for name in self.managed_paths if actual[name] != expected[name]]
         if mismatches:
             raise RuntimeError(f'{label} differs at: ' + ', '.join(mismatches))
 
     def socket_identity(self):
-        socket = self.path('/home/agent/.codex/app-server-control/app-server-control.sock')
+        socket = self.path(self.home / '.codex/app-server-control/app-server-control.sock')
         if not socket.exists():
             return None
         info = socket.stat()
@@ -309,19 +330,19 @@ class Runtime:
             raise RuntimeError('A different Codex runtime transaction is pending')
         if transaction.get('schema') == SCHEMA:
             return transaction, False
-        legacy_paths = set(MANAGED_PATHS) | {CONFIG_PATH}
+        legacy_paths = set(self.managed_paths) | {self.config_path}
         required = {'before', 'before_fingerprints', 'after'}
         if transaction.get('schema') != LEGACY_SCHEMA or not required.issubset(transaction):
             raise RuntimeError('Unsupported pending Codex runtime state; expected the known schema-1 transaction')
         if any(set(transaction[name]) != legacy_paths for name in required):
-            raise RuntimeError('Pending schema-1 transaction does not match Grace\'s known runtime state')
+            raise RuntimeError('Pending schema-1 transaction does not match the host\'s known runtime state')
         converted = dict(transaction)
         converted['schema'] = SCHEMA
         for name in required:
             converted[name] = {path: entry for path, entry in transaction[name].items()
-                               if path != CONFIG_PATH}
+                               if path != self.config_path}
         actual = self.current_fingerprints()
-        mismatches = [name for name in MANAGED_PATHS if actual[name] != converted['after'][name]]
+        mismatches = [name for name in self.managed_paths if actual[name] != converted['after'][name]]
         if mismatches:
             raise RuntimeError('Pending schema-1 runtime is not fully staged at: ' + ', '.join(mismatches))
         if write:
@@ -340,7 +361,7 @@ class Runtime:
         current = self.current_fingerprints()
         installed = self.load_installed() if self.installed.exists() else None
         pending, pending_cutover = self.cutover_pending(write=False) if self.transaction.exists() else (None, False)
-        changes = [name for name in MANAGED_PATHS if current[name] != desired[name]]
+        changes = [name for name in self.managed_paths if current[name] != desired[name]]
         return {
             'action': 'preview', 'target_version': self.version,
             'binary_installed': self.binary().is_file(),
@@ -362,7 +383,7 @@ class Runtime:
         if self.transaction.exists():
             transaction, cutover = self.cutover_pending(write=True, require_version=True)
             actual = self.current_fingerprints()
-            for name in MANAGED_PATHS:
+            for name in self.managed_paths:
                 if actual[name] not in (transaction['before_fingerprints'][name], transaction['after'][name]):
                     raise RuntimeError(f'Intervening edit at {name}; refusing to continue')
             if actual == transaction['after']:
@@ -377,7 +398,7 @@ class Runtime:
                     return {'action': 'apply', 'changed': False, 'target_version': self.version,
                             'config': 'valid and user-managed',
                             'restart_required': False}
-            before = {name: self.snapshot(name) for name in MANAGED_PATHS}
+            before = {name: self.snapshot(name) for name in self.managed_paths}
             transaction = {
                 'schema': SCHEMA, 'target_version': self.version, 'created_at': time.time(),
                 'socket_before': self.socket_identity(), 'before': before,
@@ -386,7 +407,7 @@ class Runtime:
             }
             self.ensure_dir(self.state_dir, 0o700, self.uid, self.gid)
             self.write_json(self.transaction, transaction)
-        for name in MANAGED_PATHS:
+        for name in self.managed_paths:
             self.install_entry(name, desired[name])
         self.assert_matches(desired_fingerprints, 'Prepared Codex runtime')
         return {'action': 'apply', 'changed': True, 'target_version': self.version,
@@ -394,10 +415,10 @@ class Runtime:
                 'restart_required': self.socket_identity() == transaction['socket_before']}
 
     def run_remote_check(self, name, arguments=()):
-        checker = self.path(f'/home/agent/.local/libexec/remote-codex-checks/{name}')
+        checker = self.path(self.home / f'.local/libexec/remote-codex-checks/{name}')
         if not checker.is_file():
             raise RuntimeError('Deploy Remote Codex connection checks before changing or accepting the runtime')
-        argv = ['/home/agent/.local/share/mise/shims/uv', 'run', '--no-project', str(checker), *arguments]
+        argv = [self.uv, 'run', '--no-project', str(checker), *arguments]
         if os.geteuid() != self.uid:
             argv = ['/usr/sbin/runuser', '-u', 'agent', '--', *argv]
         try:
@@ -448,7 +469,7 @@ class Runtime:
             return {'action': 'rollback', 'changed': False, 'message': 'no pending transaction'}
         transaction, _ = self.cutover_pending(write=True)
         self.assert_matches(transaction['after'], 'Prepared Codex runtime')
-        for name in MANAGED_PATHS:
+        for name in self.managed_paths:
             self.install_entry(name, transaction['before'][name])
         self.assert_matches(transaction['before_fingerprints'], 'Restored Codex runtime')
         self.transaction.unlink()
@@ -474,9 +495,13 @@ def main():
     parser.add_argument('action', choices=['preview', 'apply', 'verify', 'rollback', 'finish'])
     parser.add_argument('--version', required=True)
     parser.add_argument('--root', type=Path, default=Path('/'))
+    parser.add_argument('--home', type=Path, default=Path.home())
+    parser.add_argument('--credential-mode', choices=['user', 'system'], required=True)
+    parser.add_argument('--forward-agent', action='store_true')
+    parser.add_argument('--uv')
     args = parser.parse_args()
     os.umask(0o077)
-    runtime = Runtime(args.version, args.root)
+    runtime = Runtime(args.version, args.root, args.home, args.credential_mode, args.forward_agent, args.uv)
     try:
         result = runtime.summary() if args.action == 'preview' else getattr(runtime, args.action)()
     except (OSError, RuntimeError, subprocess.SubprocessError, tomlkit.exceptions.ParseError) as error:
