@@ -5,8 +5,8 @@
     codex_runtime_action: preview
     source_root: "{{ playbook_dir }}/.."
     runtime_script: "{{ litellm_root }}/scripts/codex_runtime.py"
-    runtime_options: "{{ ['--version', codex_version, '--home', litellm_home, '--credential-mode', litellm_credential_mode, '--uv', litellm_uv] + (['--forward-agent'] if codex_forward_agent else []) }}"
-    runtime_command: "{{ [litellm_root ~ '/.venv/bin/python', runtime_script, codex_runtime_action, '--version', codex_version, '--home', litellm_home, '--credential-mode', litellm_credential_mode, '--uv', litellm_uv] + (['--forward-agent'] if codex_forward_agent else []) }}"
+    runtime_options: "{{ ['--version', codex_version, '--home', litellm_home, '--credential-mode', litellm_credential_mode, '--uv', litellm_uv, '--connection-mode', codex_connection_mode] + (['--forward-agent'] if codex_forward_agent else []) }}"
+    runtime_command: "{{ [litellm_root ~ '/.venv/bin/python', runtime_script, codex_runtime_action] + runtime_options }}"
   pre_tasks:
     - name: Validate the selected local host
       ansible.builtin.import_tasks: tasks/target.yml
@@ -19,7 +19,7 @@
           - ansible_facts.hostname == inventory_hostname
           - ansible_facts.user_id == litellm_user
           - codex_runtime_action in ['install', 'preview', 'apply', 'verify', 'rollback', 'finish']
-          - codex_runtime_action != 'finish' or (codex_desktop_validated | default(false) | bool)
+          - codex_runtime_action != 'finish' or codex_connection_mode == 'ssh' or (codex_desktop_validated | default(false) | bool)
 
     - name: Inspect deployment source
       tags: [always]
@@ -72,6 +72,7 @@
       loop:
         - codex_runtime.py
         - verify_codex_runtime.py
+        - verify_codex_connection.py
         - verify_fast_app_server.py
         - verify_codex.py
         - verify.py
@@ -84,7 +85,7 @@
       become: true
       register: runtime_result
       changed_when: "(runtime_result.stdout | from_json).changed | default(false)"
-      when: codex_runtime_action not in ['preview', 'install'] and not ansible_check_mode
+      when: codex_runtime_action not in ['preview', 'install', 'finish'] and not ansible_check_mode
 
     - name: Remove retired Fast-only migration utilities after adoption
       ansible.builtin.file:
@@ -124,7 +125,7 @@
           - "{{ litellm_home }}"
       become: true
       changed_when: false
-      when: codex_runtime_action == 'verify' and not ansible_check_mode
+      when: codex_runtime_action in ['verify', 'finish'] and not ansible_check_mode
 
     - name: Verify subscription streaming and tool continuation
       ansible.builtin.command:
@@ -151,4 +152,17 @@
     - name: Report runtime action
       ansible.builtin.debug:
         msg: "{{ runtime_result.stdout | from_json }}"
-      when: codex_runtime_action not in ['preview', 'install'] and not ansible_check_mode
+      when: codex_runtime_action not in ['preview', 'install', 'finish'] and not ansible_check_mode
+
+    - name: Accept the runtime only after live inference and connection checks
+      ansible.builtin.command:
+        argv: "{{ runtime_command }}"
+      become: true
+      register: runtime_finish
+      changed_when: "(runtime_finish.stdout | from_json).changed | default(false)"
+      when: codex_runtime_action == 'finish' and not ansible_check_mode
+
+    - name: Report runtime acceptance
+      ansible.builtin.debug:
+        msg: "{{ runtime_finish.stdout | from_json }}"
+      when: codex_runtime_action == 'finish' and not ansible_check_mode

@@ -24,6 +24,7 @@ all:
       litellm_voice_enabled: true
       litellm_claude_enabled: true
       codex_forward_agent: true
+      codex_connection_mode: forwarder
     love:
       litellm_home: /mnt/HC_Volume_103914271/agent/home
       litellm_root: /mnt/HC_Volume_103914271/agent/home/.local/share/litellm
@@ -38,3 +39,4 @@ all:
       litellm_voice_enabled: false
       litellm_claude_enabled: false
       codex_forward_agent: false
+      codex_connection_mode: ssh

@@ -14,7 +14,20 @@
           - ansible_facts.hostname == inventory_hostname
           - ansible_facts.user_id == 'agent'
           - cutover_action in ['prepare', 'rollback', 'check-restart', 'finish']
-          - cutover_action != 'finish' or (litellm_desktop_validated | default(false) | bool)
+          - cutover_action != 'finish' or codex_connection_mode == 'ssh' or (litellm_desktop_validated | default(false) | bool)
+    - name: Check the live SSH server before accepting the provider change
+      ansible.builtin.command:
+        argv: ["{{ litellm_root }}/.venv/bin/python", "{{ litellm_root }}/scripts/verify_codex_runtime.py",
+               --version, "{{ codex_version }}", --home, "{{ litellm_home }}"]
+      become: true
+      changed_when: false
+      when: cutover_action == 'finish' and codex_connection_mode == 'ssh' and not ansible_check_mode
+    - name: Check both SSH proxy clients before accepting the provider change
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-project, "{{ litellm_root }}/scripts/verify_codex_connection.py",
+               live, --codex-binary, "{{ litellm_codex }}", --home, "{{ litellm_home }}"]
+      changed_when: false
+      when: cutover_action == 'finish' and codex_connection_mode == 'ssh' and not ansible_check_mode
     - name: Validate subscription before switching
       ansible.builtin.command:
         argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/verify.py", --model, "{{ litellm_model }}"]

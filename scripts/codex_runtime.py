@@ -144,7 +144,7 @@ def config_errors(doc):
 
 class Runtime:
     def __init__(self, version, root=Path('/'), home=Path('/home/agent'),
-                 credential_mode='user', forward_agent=True, uv=None):
+                 credential_mode='user', forward_agent=True, uv=None, connection_mode='forwarder'):
         if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?', version):
             raise RuntimeError('Codex version must be an exact release identifier')
         self.version = version
@@ -153,6 +153,9 @@ class Runtime:
         self.credential_mode = credential_mode
         self.forward_agent = forward_agent
         self.uv = uv or str(self.home / '.local/share/mise/shims/uv')
+        if connection_mode not in ('forwarder', 'ssh'):
+            raise RuntimeError('Unknown Codex connection mode')
+        self.connection_mode = connection_mode
         self.managed_paths = tuple(name.replace('/home/agent', str(self.home)) for name in MANAGED_PATHS)
         self.config_path = str(self.home / '.codex/config.toml')
         self.agent = pwd.getpwnam('agent') if root == Path('/') else None
@@ -432,10 +435,31 @@ class Runtime:
             raise RuntimeError('Remote Codex acceptance failed; keep recovery state and inspect the connection checks')
 
     def check_remote_candidate(self):
-        self.run_remote_check('candidate-check.py', ['--codex-binary', str(self.binary())])
+        if self.connection_mode == 'ssh':
+            self.run_ssh_check('candidate')
+        else:
+            self.run_remote_check('candidate-check.py', ['--codex-binary', str(self.binary())])
 
     def check_remote_connection(self):
-        self.run_remote_check('connection-check.py')
+        if self.connection_mode == 'ssh':
+            self.run_ssh_check('live')
+        else:
+            self.run_remote_check('connection-check.py')
+
+    def run_ssh_check(self, action):
+        checker = self.path(self.home / '.local/share/litellm/scripts/verify_codex_connection.py')
+        argv = [self.uv, 'run', '--no-project', str(checker), action,
+                '--codex-binary', str(self.binary()), '--home', str(self.home)]
+        if os.geteuid() != self.uid:
+            argv = ['/usr/sbin/runuser', '-u', 'agent', '--', *argv]
+        try:
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=180)
+            report = json.loads(result.stdout)
+            accepted = result.returncode == 0 and isinstance(report, dict) and report.get('ok') is True
+        except (OSError, ValueError, subprocess.SubprocessError):
+            accepted = False
+        if not accepted:
+            raise RuntimeError('Codex SSH proxy acceptance failed; keep recovery state')
 
     def check_running_version(self):
         result = subprocess.run(['systemctl', 'show', 'codex-app-server.service', '-p', 'MainPID', '--value'],
@@ -499,9 +523,10 @@ def main():
     parser.add_argument('--credential-mode', choices=['user', 'system'], required=True)
     parser.add_argument('--forward-agent', action='store_true')
     parser.add_argument('--uv')
+    parser.add_argument('--connection-mode', choices=['forwarder', 'ssh'], required=True)
     args = parser.parse_args()
     os.umask(0o077)
-    runtime = Runtime(args.version, args.root, args.home, args.credential_mode, args.forward_agent, args.uv)
+    runtime = Runtime(args.version, args.root, args.home, args.credential_mode, args.forward_agent, args.uv, args.connection_mode)
     try:
         result = runtime.summary() if args.action == 'preview' else getattr(runtime, args.action)()
     except (OSError, RuntimeError, subprocess.SubprocessError, tomlkit.exceptions.ParseError) as error:

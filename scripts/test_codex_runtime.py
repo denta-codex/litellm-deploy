@@ -10,6 +10,9 @@ from unittest.mock import patch
 
 from codex_runtime import CONFIG_PATH, MANAGED_PATHS, Runtime, render_launcher
 
+CANDIDATE_CHECK = Runtime.check_remote_candidate
+CONNECTION_CHECK = Runtime.check_remote_connection
+
 
 CONFIG = '''model_provider = "litellm"
 model = "chatgpt/gpt-6-astra"
@@ -119,6 +122,30 @@ class RuntimeTests(unittest.TestCase):
                 self.runtime.run_remote_check('connection-check.py')
         self.assertNotIn('private-value', str(caught.exception))
         self.assertEqual(run.call_args.args[0][:4], ['/usr/sbin/runuser', '-u', 'agent', '--'])
+
+    def test_transport_selects_candidate_and_live_checks(self):
+        for mode in ('forwarder', 'ssh'):
+            runtime = Runtime(self.version, self.root, connection_mode=mode)
+            with patch.object(runtime, 'run_ssh_check') as ssh, patch.object(runtime, 'run_remote_check') as forwarder:
+                CANDIDATE_CHECK(runtime)
+                CONNECTION_CHECK(runtime)
+            if mode == 'ssh':
+                self.assertEqual([call.args for call in ssh.call_args_list], [('candidate',), ('live',)])
+                forwarder.assert_not_called()
+            else:
+                ssh.assert_not_called()
+                self.assertEqual([call.args[0] for call in forwarder.call_args_list],
+                                 ['candidate-check.py', 'connection-check.py'])
+
+    def test_ssh_check_runs_as_agent_and_redacts_failed_rpc(self):
+        result = subprocess.CompletedProcess([], 1, 'private-value', 'private-value')
+        runtime = Runtime(self.version, self.root, connection_mode='ssh')
+        with patch('codex_runtime.os.geteuid', return_value=runtime.uid + 1), patch('codex_runtime.subprocess.run', return_value=result) as run:
+            with self.assertRaises(RuntimeError) as caught:
+                runtime.run_ssh_check('live')
+        self.assertNotIn('private-value', str(caught.exception))
+        self.assertEqual(run.call_args.args[0][:4], ['/usr/sbin/runuser', '-u', 'agent', '--'])
+        self.assertIn('live', run.call_args.args[0])
 
     def write(self, path, content, mode):
         target = self.path(path)

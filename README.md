@@ -94,30 +94,42 @@ old gateway. Encrypted credentials remain for retry. Recovery state is removed o
 successful finish or rollback; concurrent edits stop recovery instead of being
 overwritten.
 
-### Deliberate Codex cutover, after the shared-client test
+### Deliberate Codex cutover
 
 Keep Love's existing native login until its separately scheduled account rotation.
 First authenticate LiteLLM explicitly, refresh the subscription catalog with
 `refresh-models.yml --limit love`, and validate the gateway using the pinned binary
 in disposable Codex homes. No saved tokens are copied from Grace.
 
-Ensure the tailnet/Remote Codex workflow has installed
+Grace's forwarder transport requires
 `~/.local/libexec/remote-codex-checks/candidate-check.py` and `connection-check.py`.
-Runtime adoption requires those connection checks and stops if they are absent.
+Love uses stock Codex over SSH. Its repository-owned connection check runs two
+proxy clients against the same home, reads shared projects/history, and tests an
+isolated candidate restart. It does not require Grace's forwarder helpers.
 
-After both desktop accounts pass the shared-server/history test:
+After gateway validation, schedule the brief server interruption:
+
+Before changing the provider, run the source script
+scripts/verify_codex_connection.py baseline with --home set to Love's home and
+--codex-binary set to the pinned binary. Invoke it with managed uv run --no-project.
+It stores only hashes of native authentication, project/thread IDs, and saved
+session files in ~/.local/state/litellm/codex-connection-baseline.json. Remove that
+baseline after successful runtime and config acceptance, or verified recovery.
 
 1. Run `cutover.yml --limit love` to validate and prepare only the provider config.
 2. Run `codex-runtime.yml --limit love -e codex_runtime_action=apply` to stage the
    pinned launcher and service. It does not restart the running server.
 3. Restart Love through its owning desktop, then run runtime `verify` and `finish`
-   (the latter requires `-e codex_desktop_validated=true`).
+   or use a direct systemd restart. Love's finish action verifies the actual
+   live server and SSH proxy clients automatically; desktop UI acceptance can
+   follow separately. Grace still requires its desktop validation flag.
 4. Finish the config transaction with `cutover.yml --limit love` using
-   `-e cutover_action=finish -e litellm_desktop_validated=true`. Never use
+   `-e cutover_action=finish`. Love verifies the live server and both proxy
+   clients before finishing. Never use
    `finalize.yml` on Love.
 
 If acceptance fails, roll back the runtime transaction, then the config transaction,
-then restart through the owning desktop. Runtime rollback restores the prior
+then restart the service. Runtime rollback restores the prior
 launcher/service; config rollback restores the prior config only if no concurrent
 edit has occurred. Native authentication, projects, history, websites, and the
 separate tailnet workflow remain outside these transactions.
@@ -700,15 +712,18 @@ requires a replaced app-server socket, checks the live systemd process uses the
 pinned executable and proxy credential, and runs a real shell turn proving the
 key is absent from tools. It then checks subscription streaming, tool
 continuation, native search/resume, and the reserved reviewer route. `finish`
-reruns the running-version and authenticated Remote Codex WSS checks before
+reruns a live inference/tool turn, the running-version check, and the selected
+transport's connection checks before
 recording the accepted version and managed-file digests or deleting recovery state.
 
-Remote Codex must first deploy its checks to
+On Grace, Remote Codex must first deploy its checks to
 `~/.local/libexec/remote-codex-checks/`. Runtime `apply` tests the exact candidate
 with the installed forwarder under its actual systemd sandbox, using an isolated
 Codex home and synthetic credential. It also tests an isolated candidate restart.
 This happens before runtime selection changes. Both `verify` and `finish` require
 the phone-facing authenticated WSS route to initialize and list projects/tasks.
+Love instead checks stock SSH proxy clients against its shared app-server socket;
+its baseline compares native login, projects and saved history across the restart.
 Missing checks or a failed gate stop the operation and preserve recovery state;
 there is no automatic retry or rollback.
 
