@@ -542,7 +542,7 @@ security setting is changed.
 The desktop's Fast controls require the host's genuine ChatGPT identity.
 Grace's `~/.codex/config.toml` is user-managed. The runtime deployment validates
 that its LiteLLM provider uses `requires_openai_auth = true`,
-`env_key = "LITELLM_PROXY_KEY"`, the local endpoint, standard speed, disabled
+`env_key = "LITELLM_PROXY_KEY"`, the local endpoint, standard or Fast speed, disabled
 shell snapshots, and proxy-key exclusion. It reports exact corrections when
 those prerequisites are missing, but never rewrites, snapshots, digest-locks,
 or restores the file. The native ChatGPT login, catalog, model, plugins, and
@@ -560,7 +560,7 @@ the live stock-Codex probe found that snapshots could restore the startup key
 after exclusion. Disabling them also prevents persisting that startup environment.
 No key is written to TOML, logs, or shell startup files.
 
-The inventory pins Codex `0.159.2`. Ordinary LiteLLM deployment does not install,
+The inventory pins Codex `0.166.0`. Ordinary LiteLLM deployment does not install,
 select, or restart Codex. An explicit runtime update installs its committed
 version alongside existing Mise versions, validates the current catalog with
 that exact binary, and stages the runtime without interrupting active tasks.

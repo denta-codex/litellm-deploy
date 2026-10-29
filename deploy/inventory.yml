@@ -14,5 +14,5 @@ all:
       litellm_bedrock_enabled: true
       litellm_bedrock_credential: /etc/credstore.encrypted/litellm-bedrock-aws
       litellm_modal_credential: /etc/credstore.encrypted/codex-gateway-modal
-      codex_version: 0.159.2
+      codex_version: 0.166.0
       codex_mise: /usr/bin/mise
