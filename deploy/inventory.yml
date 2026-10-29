@@ -4,7 +4,7 @@ all:
     ansible_python_interpreter: /usr/bin/python3
     litellm_user: agent
     litellm_model: chatgpt/gpt-6-astra
-    codex_version: 0.159.2
+    codex_version: 0.166.0
     litellm_system_credential: /etc/credstore.encrypted/litellm-proxy-key
   hosts:
     grace:
