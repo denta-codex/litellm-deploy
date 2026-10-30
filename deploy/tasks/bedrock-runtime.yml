@@ -15,6 +15,18 @@
 - name: Require committed source
   ansible.builtin.assert:
     that: source_status.stdout == ''
+- name: Inspect overlapping deployment transactions
+  ansible.builtin.stat:
+    path: "{{ litellm_state }}/{{ item }}"
+  loop: [codex-runtime.json, voice-rollout.json, cutover.json]
+  register: overlapping_transactions
+- name: Require completed overlapping deployments before preview or installation
+  ansible.builtin.assert:
+    that: not item.stat.exists
+    fail_msg: "Resolve {{ item.item }} through its owning deployment before Bedrock cutover."
+  loop: "{{ overlapping_transactions.results }}"
+  loop_control:
+    label: "{{ item.item }}"
 - name: Inspect pending model refresh
   ansible.builtin.stat:
     path: "{{ litellm_state }}/model-refresh"
