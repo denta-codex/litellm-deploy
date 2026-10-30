@@ -26,6 +26,9 @@ STATE = HOME/'.local/state/litellm'
 JOURNAL = STATE/'runtime-upgrade.json'
 HOST = 'grace'
 UV = shutil.which('uv')
+SCOPE = 'full'
+BEDROCK_FILES = ('launch.py', 'shared_search.py', 'bedrock_aws.py', 'bedrock-models.json', 'deployment.py',
+    'configure_bedrock.py', 'refresh_models.py', 'verify_bedrock.py', 'verify_bedrock_codex.py', 'verify.py')
 
 
 def inventory(source, host):
@@ -78,6 +81,15 @@ def restore(records):
 
 
 def candidates(source):
+    if SCOPE == 'bedrock':
+        result = {str(ROOT/'scripts'/name): {'text': (source/'scripts'/name).read_text(), 'mode': 0o700}
+                  for name in BEDROCK_FILES}
+        variables = inventory(source, HOST)
+        templates = Environment(loader=FileSystemLoader(source/'deploy/templates'),
+            undefined=StrictUndefined, keep_trailing_newline=True, trim_blocks=True)
+        result['/etc/systemd/system/litellm.service.d/40-bedrock.conf'] = {
+            'text': templates.get_template('bedrock.conf.j2').render(**variables), 'mode': 0o644}
+        return result
     result={str(ROOT/name):{'text':(source/name).read_text(),'mode':0o600} for name in ('pyproject.toml','uv.lock')}
     for path in (source/'scripts').iterdir():
         if path.is_file():result[str(ROOT/'scripts'/path.name)]={'text':path.read_text(),'mode':0o700}
@@ -104,7 +116,41 @@ def protected():
     paths.extend(STATE/name for name in ('subscription-models.json','modal-models.json','claude-models.json',
         'local-model.json','bedrock-models.json','vertex-models.json','voice-installed.json'))
     # A new installation creates its bootstrap config as a managed candidate.
+    if SCOPE == 'bedrock':
+        # The model-refresh journal owns these three files. All other provider
+        # state remains protected by this journal, including the selected model.
+        paths = [p for p in paths if p not in (HOME/'.config/litellm/config.yaml',
+            HOME/'.config/litellm/codex-models.json', STATE/'bedrock-models.json')]
+        paths.extend(ROOT/name for name in ('pyproject.toml', 'uv.lock', 'scripts/serve.py', 'scripts/live_voice.py'))
     return {str(p):record(p) for p in paths if p != HOME/'.config/litellm/config.yaml' or p.exists()}
+
+
+def unrelated_models():
+    """Allow only Bedrock entries to change during the paired model transaction."""
+    values = {}
+    for name, field, key, parse in [('config.yaml', 'model_list', 'model_name', yaml.safe_load),
+                                  ('codex-models.json', 'models', 'slug', json.loads)]:
+        path = HOME/'.config/litellm'/name
+        if not path.exists():
+            raise ValueError('Bedrock update requires existing model files')
+        value = parse(path.read_text())
+        if name == 'codex-models.json':
+            # Shared catalog enrichment refreshes timestamped price metadata;
+            # it does not alter the stock catalog or provider routes.
+            from catalog_enrichment import stock_catalog
+            value = stock_catalog(value)
+        value[field] = sorted([r for r in value.get(field, []) if not r.get(key, '').startswith('bedrock/')],
+                              key=lambda r: r[key])
+        values[name] = value
+    return values
+
+
+def assert_protected(journal):
+    assert_records(journal['protected'])
+    if journal.get('scope') == 'bedrock' and unrelated_models() != journal['unrelated_models']:
+        raise ValueError('Unrelated model configuration changed; recovery retained')
+    if (STATE/'model-refresh').exists():
+        raise ValueError('Restore or finish model routes/catalog before runtime recovery')
 
 
 def prepare(source):
@@ -115,8 +161,12 @@ def prepare(source):
         raise ValueError('Runtime deployment requires committed source')
     after={name:value for name,value in candidates(source).items() if record(Path(name))!=value}
     journal={'schema':1,'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),
-        'host':HOST, 'uv':UV, 'service':service_state(), 'environment_existed':(ROOT/'.venv').exists(),
+        'host':HOST, 'scope':SCOPE, 'uv':UV, 'service':service_state(), 'environment_existed':(ROOT/'.venv').exists(),
         'before':{name:record(Path(name)) for name in after},'after':after,'protected':protected()}
+    if SCOPE == 'bedrock':
+        journal['unrelated_models'] = unrelated_models()
+        journal['model_before'] = {str(p): record(p) for p in
+            (HOME/'.config/litellm/config.yaml', HOME/'.config/litellm/codex-models.json', STATE/'bedrock-models.json')}
     write(JOURNAL,json.dumps(journal))
     return {'prepared':True,'changed_files':len(after),'recovery':str(JOURNAL)}
 
@@ -125,13 +175,16 @@ def load_journal():
     journal=json.loads(JOURNAL.read_text())
     if journal.get('host', 'grace') != HOST:
         raise ValueError('Recovery journal belongs to a different host')
+    if journal.get('scope', 'full') != SCOPE:
+        raise ValueError('Recovery journal belongs to a different runtime scope')
     return journal
 
 
 def finish():
     journal=load_journal()
-    assert_records(journal['protected']);assert_records(journal['after'])
-    write(STATE/'runtime-installed.json',json.dumps({'schema':1,'commit':journal['commit'],
+    assert_protected(journal);assert_records(journal['after'])
+    manifest = 'bedrock-runtime-installed.json' if SCOPE == 'bedrock' else 'runtime-installed.json'
+    write(STATE/manifest,json.dumps({'schema':1,'commit':journal['commit'],
         'lock_sha256':hashlib.sha256((ROOT/'uv.lock').read_bytes()).hexdigest()},indent=2)+'\n')
     JOURNAL.unlink()
     return {'finished':True}
@@ -139,7 +192,9 @@ def finish():
 
 def rollback():
     journal=load_journal()
-    assert_records(journal['protected'])
+    assert_protected(journal)
+    if journal.get('scope') == 'bedrock':
+        assert_records(journal['model_before'])
     for name,before in journal['before'].items():
         if record(Path(name)) not in (before,journal['after'][name]):
             raise ValueError('Concurrent edit; recovery retained: '+name)
@@ -148,7 +203,9 @@ def rollback():
     if not service['enabled']:
         subprocess.run(['sudo','-n','systemctl','disable','litellm.service'],check=False)
     restore(journal['before'])
-    if (ROOT/'uv.lock').exists():
+    if SCOPE == 'bedrock':
+        pass  # Targeted script recovery must not sync or replace the environment.
+    elif (ROOT/'uv.lock').exists():
         subprocess.run([journal.get('uv', UV),'sync','--locked','--project',str(ROOT)],check=True)
     elif not journal.get('environment_existed', True) and (ROOT/'.venv').exists():
         shutil.rmtree(ROOT/'.venv')
@@ -173,12 +230,30 @@ def wait_for_health():
     else:raise ValueError('Restored runtime is not healthy; recovery retained')
 
 
+def recover_bedrock(source):
+    """Restore model files first, then matching scripts with the existing journals."""
+    if SCOPE != 'bedrock':
+        raise ValueError('Bedrock recovery requires the Bedrock runtime scope')
+    load_journal()  # Verify host/scope before touching either journal.
+    if (STATE/'model-refresh').exists():
+        from configure_bedrock import BedrockSetup
+        refresh = BedrockSetup(HOME, ROOT, UV)
+        refresh.rollback()
+        if refresh.originals() != refresh.journal()['originals']:
+            raise ValueError('Model recovery failed; runtime recovery retained')
+        shutil.rmtree(refresh.transaction)
+    return rollback()
+
+
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('action',choices=['prepare','finish','rollback'])
+    parser.add_argument('action',choices=['prepare','finish','rollback','recover-bedrock'])
     parser.add_argument('--source',type=Path,default=Path(__file__).resolve().parent.parent)
     parser.add_argument('--host', choices=['grace', 'love'], required=True)
+    parser.add_argument('--scope', choices=['full', 'bedrock'], default='full')
     args=parser.parse_args()
+    SCOPE = args.scope
     configure(args.source, args.host)
-    result=prepare(args.source) if args.action=='prepare' else finish() if args.action=='finish' else rollback()
+    result = (prepare(args.source) if args.action == 'prepare' else finish() if args.action == 'finish'
+              else recover_bedrock(args.source) if args.action == 'recover-bedrock' else rollback())
     print(json.dumps(result))

@@ -1,8 +1,58 @@
-- name: Install matching LiteLLM integration
-  ansible.builtin.import_playbook: bedrock-runtime.yml
-  when: (refresh_action | default('refresh')) != 'rollback'
-
-- name: Activate Bedrock using existing model transaction
-  ansible.builtin.import_playbook: refresh-models.yml
+- name: Transactionally update Bedrock scripts and native Responses routes
+  hosts: all
+  gather_facts: true
   vars:
+    source_root: "{{ playbook_dir }}/.."
+    refresh_action: refresh
     refresh_script: configure_bedrock.py
+    refresh_command: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/{{ refresh_script }}"]
+    runtime_command: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/runtime_rollout.py"]
+    runtime_options: [--scope, bedrock, --host, "{{ inventory_hostname }}", --source, "{{ source_root }}"]
+    protected_paths:
+      - "{{ litellm_root }}/scripts/serve.py"
+      - "{{ litellm_root }}/scripts/live_voice.py"
+      - "{{ litellm_home }}/.codex/config.toml"
+      - "{{ litellm_state }}/voice-rollout.json"
+  pre_tasks:
+    - name: Validate the selected local host
+      ansible.builtin.import_tasks: tasks/target.yml
+      tags: [always]
+    - name: Require a supported operation
+      ansible.builtin.assert:
+        that: refresh_action in ['refresh', 'rollback']
+  tasks:
+    - name: Recover interrupted Bedrock model files then runtime files
+      ansible.builtin.command:
+        argv: "{{ runtime_command + ['recover-bedrock'] + runtime_options }}"
+      when: refresh_action == 'rollback' and not ansible_check_mode
+    - name: Prepare narrow runtime recovery before copying any scripts
+      ansible.builtin.command:
+        argv: "{{ runtime_command + ['prepare'] + runtime_options }}"
+      when: refresh_action == 'refresh' and not ansible_check_mode
+    - name: Install validate and publish one Bedrock integration
+      when: refresh_action == 'refresh'
+      block:
+        - name: Install matching runtime with retained credential
+          ansible.builtin.import_tasks: tasks/bedrock-runtime.yml
+        - name: Activate and validate routes before publication
+          ansible.builtin.import_tasks: tasks/refresh-models.yml
+        - name: Commit accepted narrow runtime and remove recovery journal
+          ansible.builtin.command:
+            argv: "{{ runtime_command + ['finish'] + runtime_options }}"
+          when: not ansible_check_mode
+      rescue:
+        - name: Restore model files before their matching runtime
+          ansible.builtin.command:
+            argv: "{{ runtime_command + ['recover-bedrock'] + runtime_options }}"
+          when: not ansible_check_mode
+        - name: Report rejected Bedrock update
+          ansible.builtin.fail:
+            msg: Bedrock update rejected; completed recovery is removed, failed recovery journals are retained.
+  handlers:
+    - name: Restart LiteLLM
+      ansible.builtin.systemd_service:
+        name: litellm.service
+        state: restarted
+        daemon_reload: true
+      become: true
+      when: not ansible_check_mode

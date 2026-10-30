@@ -206,8 +206,9 @@ class Turn:
 
     def add_usage(self, response):
         usage = plain(response).get('usage') or {}
-        for key in ('prompt_tokens', 'completion_tokens', 'total_tokens'):
-            self.usage[key] = self.usage.get(key, 0) + (usage.get(key) or 0)
+        for key, native in (('prompt_tokens', 'input_tokens'), ('completion_tokens', 'output_tokens'),
+                            ('total_tokens', 'total_tokens')):
+            self.usage[key] = self.usage.get(key, 0) + (usage.get(key, usage.get(native)) or 0)
 
 
 class SharedSearchInterceptor(WebSearchInterceptionLogger):
@@ -226,6 +227,8 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
         turn = CURRENT.get()
         if turn is None or kwargs.get('custom_llm_provider') not in ('openai', 'claudesdk', 'bedrock', 'bedrock_converse', 'vertex_ai'):
             return False, {}
+        if kwargs.get('kwargs', {}).get('_agentic_loop_api_surface') == 'responses':
+            return await super().async_should_run_responses_agentic_loop(**kwargs)
         return await super().async_should_run_chat_completion_agentic_loop(**kwargs)
 
     async def async_should_run_chat_completion_agentic_loop(self, **kwargs):
@@ -328,6 +331,59 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
             turn.failure = exc
             raise
 
+    async def async_build_responses_agentic_loop_plan(self, **kwargs):
+        """Keep native Responses history intact, including signed reasoning and image outputs."""
+        turn = CURRENT.get()
+        response = kwargs['response']
+        rendered = plain(response)
+        items = rendered.get('output', [])
+        searches = [i for i in items if i.get('type') == 'function_call' and i.get('name') == SEARCH_NAME]
+        clients = [i for i in items if i.get('type') in ('function_call', 'custom_tool_call')
+                   and i.get('name') != SEARCH_NAME]
+        try:
+            for item in searches:
+                args = json.loads(item['arguments'])
+                query = args.get('query')
+                if not isinstance(query, str) or not query.strip() or len(query) > 8000:
+                    raise ValueError('Invalid shared search query')
+                turn.calls.append({'call_id': item['call_id'], 'id': 'ws_shared' + uuid.uuid4().hex, 'query': query})
+            turn.rounds += 1
+            reservations = [next(c['id'] for c in turn.calls if c['call_id'] == i['call_id'])
+                            if i in searches else i['id'] for i in items]
+            await turn.queue.put(('reserve', reservations))
+            plan = await super().async_build_responses_agentic_loop_plan(**kwargs)
+            results = [i for i in plan.request_patch.messages[len(self._normalize_responses_input(kwargs['messages'])):]
+                       if i.get('type') == 'function_call_output']
+            # Upstream replays only search calls. Replay the complete assistant
+            # batch before its results; never convert these items into Chat messages.
+            plan.request_patch.messages = self._normalize_responses_input(kwargs['messages']) + copy.deepcopy(items) + results
+            plan.request_patch.optional_params['store'] = False
+            turn.add_usage(response)
+            for item in items:
+                if item in searches:
+                    call = next(c for c in turn.calls if c['call_id'] == item['call_id'])
+                    result = call['result']
+                    result_item = next(i for i in results if i['call_id'] == item['call_id'])
+                    turn.journal.write(turn.caller, call['id'], {
+                        'call': item, 'result': result_item, 'sources': result.sources,
+                        'helper_usage': result.usage, 'batch_ids': reservations,
+                        'pending': [c['call_id'] for c in clients]})
+                    public = {'type': 'web_search_call', 'id': call['id'],
+                              'status': 'failed' if result.error else 'completed',
+                              'action': {'type': 'search', 'query': call['query'],
+                                         'sources': [{'type': 'url', **s} for s in result.sources]}}
+                    turn.output.append(public)
+                    turn.searches[call['id']] = public
+                else:
+                    turn.output.append(copy.deepcopy(item))
+            if clients:
+                turn.mixed = True
+                return AgenticLoopPlan(response_override=response)
+            return plan
+        except Exception as exc:
+            turn.failure = exc
+            raise
+
 
 def cite(output, sources):
     """Only annotate literal source URLs in the selected model's own text."""
@@ -353,6 +409,9 @@ class SearchResponses:
 
     async def route(self, data, route_type, **kwargs):
         model = data.get('model', '')
+        if route_type == 'aresponses' and model == 'bedrock/gpt-6.1-sol':
+            data = copy.deepcopy(data)
+            data['store'] = False
         eligible = model in ('claude/opus-5.5', 'local/qwen3.8-27b', 'vertex/gemini-4-argon') or model.startswith(('modal/', 'bedrock/'))
         hosted = [t for t in data.get('tools', []) if t.get('type') in HOSTED]
         history = isinstance(data.get('input'), list) and any(i.get('type') == 'web_search_call' and i.get('id', '').startswith('ws_shared') for i in data['input'])

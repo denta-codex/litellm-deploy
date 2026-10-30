@@ -1280,6 +1280,38 @@ US inference profiles in `scripts/bedrock-models.json`, using `us-east-1`.
 Both models must be discoverable and support streaming before activation.
 No substitute model is selected. The current Codex default stays selected.
 
+GPT uses `bedrock/us.openai.gpt-6.1-sol` in native Responses mode; Opus retains
+its working Converse route. GPT never translates Responses history into Chat
+messages. Native search continuations preserve reasoning items, client tool
+calls, and image-bearing tool outputs. Both routes retain their public slugs.
+GPT requests explicitly use `store: false` and client-replayed history.
+
+The IAM runtime policy generator includes a separate `bedrock:InvokeModel`
+statement for the account's `us-east-1:project/default`, constrained by
+`ArnEquals` on `bedrock:ModelArn` to the exact GPT inference profile. Existing
+installed IAM policies are **not** changed by the playbook: an authorized
+administrator must reconcile that statement before native acceptance. Do not
+grant stored-response management, IAM administration, or wildcard model access
+to the runtime identity. See the [AWS Responses authorization contract](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-responses-api.html).
+
+Image acceptance requires a correct visual answer for both a streamed user
+attachment and a streamed `view_image` function result with its tool declaration.
+The expected answer is absent from the prompt. Stream errors, incomplete streams,
+and incorrect answers reject activation. Before deploying, prove the native
+streamed tool-image path in isolation, then validate Grace before Love. Do not
+cut over while another runtime transaction is pending. The Bedrock playbook
+journals only its managed scripts and credential drop-in using the existing
+runtime recovery mechanism. Restore model routes/catalog first, then their
+matching runtime files, without syncing dependencies or touching credentials.
+Acceptance requires a real stock-Codex search, followed by local image viewing,
+then shell execution retaining the image and search context on both models.
+
+Run one transaction through `bedrock.yml`. The runtime entry point invokes that
+same transaction; runtime-only copying is no longer a deployment path.
+Interrupted recovery uses `bedrock.yml -e refresh_action=rollback` with the
+original committed source. Pending Codex/voice/model transactions block
+preparation. Accepted deployment or completed recovery removes the journals.
+
 The runtime uses the retained IAM identity and encrypted credential at
 `/etc/credstore.encrypted/litellm-bedrock-aws`. Systemd supplies it to the launcher;
 AWS keys are parsed in memory and ambient credential sources are disabled.
