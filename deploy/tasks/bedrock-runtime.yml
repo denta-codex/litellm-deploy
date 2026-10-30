@@ -47,6 +47,8 @@
   loop: [refresh_models.py, configure_modal.py, configure_claude.py]
   changed_when: false
   check_mode: false
+  environment:
+    PYTHONPATH: "{{ source_root }}/scripts"
 - name: Inspect saved Bedrock snapshot
   ansible.builtin.stat:
     path: "{{ litellm_state }}/bedrock-models.json"
@@ -56,6 +58,8 @@
     argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_bedrock.py", check-snapshot]
   changed_when: false
   check_mode: false
+  environment:
+    PYTHONPATH: "{{ source_root }}/scripts"
   when: bedrock_snapshot.stat.exists
 - name: Inspect encrypted Bedrock runtime credential
   ansible.builtin.stat:
@@ -82,7 +86,7 @@
     src: "{{ source_root }}/scripts/{{ item }}"
     dest: "{{ litellm_root }}/scripts/{{ item }}"
     mode: '0700'
-  loop: [launch.py, shared_search.py, bedrock_aws.py, bedrock-models.json, configure_bedrock.py, refresh_models.py, verify_bedrock.py, verify_bedrock_codex.py, verify.py]
+  loop: [launch.py, shared_search.py, bedrock_aws.py, bedrock-models.json, deployment.py, configure_bedrock.py, refresh_models.py, verify_bedrock.py, verify_bedrock_codex.py, verify.py]
   notify: Restart LiteLLM
 - name: Create systemd drop-in directory
   ansible.builtin.file:

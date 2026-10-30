@@ -29,6 +29,17 @@ class RuntimeTemplates(unittest.TestCase):
         expected.add('/etc/systemd/system/litellm.service.d/40-bedrock.conf')
         self.assertEqual(set(targets), expected)
 
+    def test_bedrock_packages_host_settings_helper_for_installed_validators(self):
+        self.assertIn('deployment.py', runtime.BEDROCK_FILES)
+        import yaml
+        source = Path(__file__).resolve().parent.parent
+        tasks = yaml.safe_load((source/'deploy/tasks/bedrock-runtime.yml').read_text())
+        for name in ('Verify existing provider snapshots', 'Verify retained Bedrock routes'):
+            task = next(t for t in tasks if t.get('name') == name)
+            # Preflight uses the installed generator first; source resolves
+            # helper imports until the journalled runtime copy installs them.
+            self.assertEqual(task['environment']['PYTHONPATH'], '{{ source_root }}/scripts')
+
 class RuntimeRecovery(unittest.TestCase):
     def setUp(self):
         self.enterContext(patch.object(runtime,'service_state',return_value={'active':True,'enabled':True}))

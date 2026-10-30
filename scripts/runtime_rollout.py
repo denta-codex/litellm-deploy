@@ -27,7 +27,7 @@ JOURNAL = STATE/'runtime-upgrade.json'
 HOST = 'grace'
 UV = shutil.which('uv')
 SCOPE = 'full'
-BEDROCK_FILES = ('launch.py', 'shared_search.py', 'bedrock_aws.py', 'bedrock-models.json',
+BEDROCK_FILES = ('launch.py', 'shared_search.py', 'bedrock_aws.py', 'bedrock-models.json', 'deployment.py',
     'configure_bedrock.py', 'refresh_models.py', 'verify_bedrock.py', 'verify_bedrock_codex.py', 'verify.py')
 
 
