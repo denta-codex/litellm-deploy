@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from catalog_enrichment import stock_catalog
+from recommended import priority
 from refresh_models import Refresh, main
 from vertex_google import PROJECT, LOCATION, MODEL, SLUG, discover, encrypted_credentials
 
@@ -36,7 +37,7 @@ def generate(source, config, catalog, selected):
         'use_responses_lite':False, 'prefer_websockets':False,
         'tool_mode':'code_mode_only', 'shell_type':'shell_command', 'apply_patch_tool_type':'freeform',
         'experimental_supported_tools':[], 'service_tiers':[], 'additional_speed_tiers':[],
-        'availability_nux':None, 'available_access_programs':{'cyber':[]}, 'priority':86,
+        'availability_nux':None, 'available_access_programs':{'cyber':[]}, 'priority':priority(SLUG, 86),
     }
     before = {m['slug']:m for m in stock_catalog(catalog).get('models',[]) if m['slug'].startswith(PREFIX)}
     old_routes = {r['model_name']:r for r in config.get('model_list',[]) if r['model_name'].startswith(PREFIX)}

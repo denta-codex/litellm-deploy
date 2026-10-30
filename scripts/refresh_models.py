@@ -18,6 +18,7 @@ import yaml
 
 from catalog_enrichment import enrich_catalog, fetch_sources, stock_catalog
 from deployment import codex_binary
+from recommended import with_separator
 
 PREFIX = 'chatgpt/'
 REVIEW_MODEL = 'codex-auto-review'
@@ -216,6 +217,8 @@ class Refresh:
         current = tomllib.loads((self.home / '.codex/config.toml').read_text())
         selected = current.get('model', '') if current.get('model_provider') == 'litellm' else ''
         new_config, new_catalog, summary = self.generate(snapshot['catalog'], config, catalog, selected)
+        # Every namespace owner publishes the same derived separator row.
+        new_catalog = with_separator(new_catalog)
         # Namespace owners may group their rows differently. Row order alone must
         # not trigger a restart or make another provider's snapshot inconsistent.
         for generated, current, field, key in ((new_config, config, 'model_list', 'model_name'),

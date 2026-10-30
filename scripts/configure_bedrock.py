@@ -5,6 +5,7 @@ from pathlib import Path
 import subprocess
 
 from bedrock_aws import MANIFEST, discover, encrypted_session
+from recommended import priority
 from refresh_models import Refresh, main
 from catalog_enrichment import stock_catalog
 
@@ -63,7 +64,7 @@ def generate(source, config, catalog, selected):
             'use_responses_lite': False, 'prefer_websockets': False,
             'tool_mode': spec['tool_mode'], 'shell_type': 'shell_command', 'apply_patch_tool_type': 'freeform',
             'experimental_supported_tools': [], 'service_tiers': [], 'additional_speed_tiers': [],
-            'availability_nux': None, 'available_access_programs': {'cyber': []}, 'priority': 85,
+            'availability_nux': None, 'available_access_programs': {'cyber': []}, 'priority': priority(name, 85),
         })
     if seen != set(expected):
         raise ValueError('Both requested Bedrock models must be available; no routing changes made')

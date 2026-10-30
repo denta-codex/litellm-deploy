@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import subprocess
 
+from recommended import priority
 from refresh_models import Refresh, atomic_write, main
 
 MANIFEST = Path(__file__).with_name('claude-models.json')
@@ -45,7 +46,7 @@ def generate(source, config, catalog, selected):
         'experimental_supported_tools': [],
         'service_tiers': [{'id': 'priority', 'name': 'Fast', 'description': 'Faster Opus responses; uses paid Claude usage credits'}],
         'additional_speed_tiers': ['fast'],
-        'availability_nux': None, 'available_access_programs': {'cyber': []}, 'priority': 80,
+        'availability_nux': None, 'available_access_programs': {'cyber': []}, 'priority': priority(name, 80),
     }
     before = {m['slug']: m for m in catalog.get('models', []) if m['slug'].startswith(PREFIX)}
     old_routes = {r['model_name']: r for r in config.get('model_list', []) if r['model_name'].startswith(PREFIX)}

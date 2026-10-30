@@ -28,7 +28,8 @@ HOST = 'grace'
 UV = shutil.which('uv')
 SCOPE = 'full'
 BEDROCK_FILES = ('launch.py', 'shared_search.py', 'bedrock_aws.py', 'bedrock-models.json', 'deployment.py',
-    'configure_bedrock.py', 'refresh_models.py', 'verify_bedrock.py', 'verify_bedrock_codex.py', 'verify.py')
+    'recommended.py', 'configure_bedrock.py', 'refresh_models.py', 'verify_bedrock.py', 'verify_bedrock_codex.py',
+    'verify.py')
 
 
 def inventory(source, host):
@@ -138,7 +139,10 @@ def unrelated_models():
             # Shared catalog enrichment refreshes timestamped price metadata;
             # it does not alter the stock catalog or provider routes.
             from catalog_enrichment import stock_catalog
+            from recommended import SEPARATOR
             value = stock_catalog(value)
+            # The separator follows the recommended rows, including Bedrock's.
+            value[field] = [r for r in value.get(field, []) if r.get(key) != SEPARATOR]
         value[field] = sorted([r for r in value.get(field, []) if not r.get(key, '').startswith('bedrock/')],
                               key=lambda r: r[key])
         values[name] = value

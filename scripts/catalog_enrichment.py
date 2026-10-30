@@ -8,6 +8,8 @@ import math
 import re
 import urllib.request
 
+from recommended import SEPARATOR
+
 OPENAI_URL = 'https://developers.openai.com/api/docs/pricing.md'
 MODELS_DEV_URL = 'https://models.dev/api.json'
 RATE_FIELDS = ('input_per_million', 'output_per_million', 'cached_input_per_million', 'cache_write_per_million')
@@ -200,6 +202,8 @@ def enrich_catalog(document, config, modal_manifest, sources, fetched_at=None):
     policies = {}
     for row in document.get('models', []):
         name = row['slug']
+        if name == SEPARATOR:
+            continue
         upstream, policy = _identity(name, routes, modal_models)
         record = {'provider': 'litellm', 'model': name, 'estimate_kind': 'api_equivalent'}
         if upstream is not None:

@@ -9,19 +9,33 @@ import tempfile
 import unittest
 
 from catalog_enrichment import enrich_catalog
+from recommended import RECOMMENDED, SEPARATOR, priority, with_separator
 from test_refresh_models import REVIEW_MODEL, encode, generate, model
 
-PINNED_CODEX = Path('/home/agent/.local/share/mise/installs/codex/0.159.2/bin/codex')
+INSTALLS = Path('/home/agent/.local/share/mise/installs/codex')
+PINNED_CODEX = INSTALLS / '0.159.2/bin/codex'
+# Love keeps the global pin; Grace runs the newer pin from the inventory.
+PINNED_VERSIONS = ('0.159.2', '0.166.0')
+
+
+def stock_fields(row, rank):
+    row.update(description='Offline fixture', default_reasoning_level='high',
+               supported_reasoning_levels=[{'effort': 'high', 'description': 'High'}],
+               shell_type='shell_command', supported_in_api=True, priority=rank,
+               supports_reasoning_summaries=True, support_verbosity=True,
+               default_verbosity='low', experimental_supported_tools=[],
+               truncation_policy={'mode': 'tokens', 'limit': 10000})
+    return row
 
 
 @unittest.skipUnless(PINNED_CODEX.is_file(), 'Pinned stock Codex 0.159.2 unavailable')
 class StockCatalogTests(unittest.IsolatedAsyncioTestCase):
-    async def stock_reads(self, home, catalog):
+    async def stock_reads(self, home, catalog, binary=PINNED_CODEX):
         (home / 'config.toml').write_text(
             'model_provider="litellm"\nmodel="chatgpt/fixture"\nmodel_catalog_json=' + json.dumps(str(catalog)) + '\n'
             '[model_providers.litellm]\nname="Offline fixture"\nbase_url="http://127.0.0.1:1/v1"\nwire_api="responses"\n')
         process = await asyncio.create_subprocess_exec(
-            str(PINNED_CODEX), 'app-server', cwd=home,
+            str(binary), 'app-server', cwd=home,
             env=os.environ | {'CODEX_HOME': str(home)},
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         self.addAsyncCleanup(self.stop, process)
@@ -73,12 +87,7 @@ class StockCatalogTests(unittest.IsolatedAsyncioTestCase):
         source = {'models': [model('fixture'), model('fixture-two'), model('fixture-three'), model(REVIEW_MODEL, 'hide')]}
         config, catalog, _ = generate(source, {'model_list': []}, {'models': []}, 'chatgpt/fixture')
         for row in catalog['models']:
-            row.update(description='Offline fixture', default_reasoning_level='high',
-                       supported_reasoning_levels=[{'effort': 'high', 'description': 'High'}],
-                       shell_type='shell_command', supported_in_api=True, priority=1,
-                       supports_reasoning_summaries=True, support_verbosity=True,
-                       default_verbosity='low', experimental_supported_tools=[],
-                       truncation_policy={'mode': 'tokens', 'limit': 10000})
+            stock_fields(row, 1)
         enriched, _ = enrich_catalog(catalog, config, {'models': []}, {'openai': {'fixture': [{
             'tier': 'standard', 'context': 'short', 'input_per_million': 2, 'output_per_million': 10}]},
             'models_dev': {}}, '2026-10-05T00:00:00Z')
@@ -100,6 +109,32 @@ class StockCatalogTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(listed[0], listed[1])
             self.assertEqual([r['model'] for r in listed[1]], ['chatgpt/fixture', 'chatgpt/fixture-two', 'chatgpt/fixture-three'])
             self.assertNotIn('remote_codex', parsed[1])
+
+    async def test_stock_picker_lists_recommended_rows_then_blank_separator_then_the_rest(self):
+        source = {'models': [model('fixture'), model('fixture-two'), model(REVIEW_MODEL, 'hide')]}
+        config, catalog, _ = generate(source, {'model_list': []}, {'models': []}, 'chatgpt/fixture')
+        for rank, row in enumerate(catalog['models'], 1):
+            stock_fields(row, rank)
+        # Provider rows arrive in arbitrary file order; only priority orders the picker.
+        for slug, default in (('vertex/gemini-4-argon', 86), ('bedrock/opus-5.5', 85),
+                              ('claude/opus-5.5', 80), ('bedrock/gpt-6.1-sol', 85)):
+            catalog['models'].append(stock_fields(model(slug), priority(slug, default)))
+        catalog = with_separator(catalog)
+        enriched, _ = enrich_catalog(catalog, config, {'models': []}, {'openai': {}, 'models_dev': {}},
+                                     '2026-10-05T00:00:00Z')
+        versions = [v for v in PINNED_VERSIONS if (INSTALLS / v / 'bin/codex').is_file()]
+        with tempfile.TemporaryDirectory() as temporary:
+            for version in versions:
+                with self.subTest(codex=version):
+                    home = Path(temporary) / version
+                    home.mkdir()
+                    path = home / 'catalog.json'
+                    path.write_text(encode(enriched))
+                    rows = await self.stock_reads(home, path, INSTALLS / version / 'bin/codex')
+                    self.assertEqual([r['model'] for r in rows],
+                                     [*RECOMMENDED, SEPARATOR, 'chatgpt/fixture', 'chatgpt/fixture-two',
+                                      'bedrock/opus-5.5'])
+                    self.assertEqual(rows[len(RECOMMENDED)]['displayName'], '')
 
 
 if __name__ == '__main__':

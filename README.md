@@ -792,6 +792,23 @@ Upgrade actions on routed entries point to the corresponding selectable
 If that target is unavailable, the routed upgrade action is cleared and reported
 in `disabled_upgrades` in the refresh/preview output; native metadata is retained.
 
+### Recommended picker order
+
+Stock Codex sorts the picker by ascending catalog `priority`, and subscription
+`chatgpt/` rows start at 1. `scripts/recommended.py` gives the recommended rows
+negative priorities so they always lead, in this order: `claude/opus-5.5`,
+`bedrock/gpt-6.1-sol`, `vertex/gemini-4-argon`. A blank, unrouted `separator`
+row at priority -1 follows them; every other model keeps its provider priority
+below it. Edit `RECOMMENDED` to change the list, then re-publish each owning
+provider (`refresh-models.yml`, `claude.yml`, `bedrock.yml`, `vertex.yml`).
+
+Every namespace owner publishes the same separator, and only while a recommended
+row is listed. Codex has no native divider, so the separator is selectable:
+choosing it returns LiteLLM's unknown-model error, and you can then pick another
+model. Pricing enrichment and compaction fallback skip it because it has no route.
+Stock Codex treats the first row as the picker default, but the configured
+`model` is unchanged.
+
 Codex sends approval-review requests using the exact name `codex-auto-review`.
 Refresh routes that name to `chatgpt/codex-auto-review`, the subscription's native
 hidden reviewer. It stays hidden in the picker, uses full Responses transport,
