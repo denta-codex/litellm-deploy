@@ -688,7 +688,7 @@ the live stock-Codex probe found that snapshots could restore the startup key
 after exclusion. Disabling them also prevents persisting that startup environment.
 No key is written to TOML, logs, or shell startup files.
 
-The inventory pins Codex `0.166.0` on Grace and `0.159.2` on Love. Ordinary LiteLLM deployment does not install,
+The inventory pins Codex `0.166.0` on both Grace and Love. Ordinary LiteLLM deployment does not install,
 select, or restart Codex. An explicit runtime update installs its committed
 version alongside existing Mise versions, validates the current catalog with
 that exact binary, and stages the runtime without interrupting active tasks.
