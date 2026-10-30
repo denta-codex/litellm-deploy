@@ -369,20 +369,29 @@ class Refresh:
                 atomic_write(self.paths[name], text)
         return {'restart_required': journal['summary']['routing_changed']}
 
-    def check_snapshot(self):
+    def check_snapshot(self, routes_only=False):
         if self.transaction.exists():
             raise ValueError('Unfinished model refresh: recover before ordinary deployment')
         if not self.paths['snapshot'].exists():
             return {'snapshot_present': False}
         candidate = self.candidate(json.loads(self.paths['snapshot'].read_text()))
-        if candidate['summary']['routing_changed'] or candidate['summary']['catalog_changed']:
+        if candidate['summary']['routing_changed'] or (candidate['summary']['catalog_changed'] and not routes_only):
             raise ValueError(f'Installed model files differ from saved discovery; run {self.playbook} to reconcile')
         return {'snapshot_present': True, 'models': candidate['summary']['after']}
+
+    def check_routes(self):
+        """Owner preflight: routes must match saved discovery.
+
+        Catalog-only drift, such as a picker priority introduced by newer
+        scripts, is reconciled by the owner's own validated publication.
+        """
+        return self.check_snapshot(routes_only=True)
 
 
 def main(refresh_type=Refresh):
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=['preview', 'prepare', 'activate', 'validate', 'finish', 'rollback', 'cleanup-rollback', 'check-snapshot'])
+    p.add_argument('action', choices=['preview', 'prepare', 'activate', 'validate', 'finish', 'rollback', 'cleanup-rollback',
+                                      'check-snapshot', 'check-routes'])
     p.add_argument('--home', type=Path, default=Path.home())
     p.add_argument('--root', type=Path, default=Path.home() / '.local/share/litellm')
     p.add_argument('--uv', default=shutil.which('uv'))

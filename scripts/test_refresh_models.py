@@ -346,6 +346,22 @@ class ActivationTests(unittest.TestCase):
             self.refresh.paths[name].write_text(text)
         self.originals = self.refresh.originals()
 
+    def test_owner_route_check_tolerates_catalog_only_drift(self):
+        self.install_inventory_baseline()
+        catalog = json.loads(self.originals['catalog'])
+        owned = next(m for m in catalog['models'] if m['slug'].startswith('chatgpt/'))
+        owned['priority'] = owned.get('priority', 0) + 50
+        self.refresh.paths['catalog'].write_text(json.dumps(catalog))
+        with self.assertRaisesRegex(ValueError, 'differ from saved discovery'):
+            self.refresh.check_snapshot()
+        self.assertTrue(self.refresh.check_routes()['snapshot_present'])
+        config = yaml.safe_load(self.originals['config'])
+        dropped = next(r for r in config['model_list'] if r['model_name'].startswith('chatgpt/'))
+        config['model_list'].remove(dropped)
+        self.refresh.paths['config'].write_text(yaml.safe_dump(config))
+        with self.assertRaisesRegex(ValueError, 'differ from saved discovery'):
+            self.refresh.check_routes()
+
     def test_pricing_only_publication_skips_inference_and_routing_changes(self):
         self.install_inventory_baseline()
         self.refresh.pricing_sources = lambda: {'openai': {'astra': [{
