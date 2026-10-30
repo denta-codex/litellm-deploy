@@ -302,8 +302,8 @@ exit 2
             (CONFIG.replace('env_key = "LITELLM_PROXY_KEY"',
                             'env_key = "LITELLM_PROXY_KEY"\nexperimental_bearer_token = "hidden"'),
              'Remove model_providers.litellm.experimental_bearer_token'),
-            (CONFIG.replace('service_tier = "default"', 'service_tier = "priority"'),
-             'Set service_tier = "default" or remove it'),
+            (CONFIG.replace('service_tier = "default"', 'service_tier = "unsupported"'),
+             'Set service_tier = "default" or "priority", or remove it'),
             (CONFIG.replace('shell_snapshot = false', 'shell_snapshot = true'),
              'Set features.shell_snapshot = false'),
             (CONFIG.replace('exclude = ["LITELLM_PROXY_KEY"]', 'exclude = []'),
@@ -329,6 +329,17 @@ exit 2
         socket.touch()
         self.runtime.verify()
         self.finish_fixture()
+        self.assertEqual(self.config_state(), config_before)
+
+    def test_fast_preference_survives_preview_apply_verify_and_finish(self):
+        self.path(CONFIG_PATH).write_text(
+            CONFIG.replace('service_tier = "default"', 'service_tier = "priority"'))
+        config_before = self.config_state()
+        self.runtime.summary()
+        self.runtime.apply()
+        self.mark_restarted()
+        self.runtime.verify()
+        self.runtime.finish()
         self.assertEqual(self.config_state(), config_before)
 
     def test_config_permissions_and_owner_are_validated_without_repair(self):

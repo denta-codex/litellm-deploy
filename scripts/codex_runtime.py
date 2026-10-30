@@ -119,8 +119,9 @@ def config_errors(doc):
         errors.append('Remove the model_providers.litellm.auth table.')
     if 'experimental_bearer_token' in provider:
         errors.append('Remove model_providers.litellm.experimental_bearer_token.')
-    if doc.get('service_tier') not in (None, 'default'):
-        errors.append('Set service_tier = "default" or remove it.')
+    # Fast is a user preference, not a runtime/security invariant.
+    if doc.get('service_tier') not in (None, 'default', 'priority'):
+        errors.append('Set service_tier = "default" or "priority", or remove it.')
     features = doc.get('features', {})
     if not hasattr(features, 'get') or features.get('shell_snapshot') is not False:
         errors.append('Set features.shell_snapshot = false.')
