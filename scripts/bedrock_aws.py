@@ -83,11 +83,24 @@ def runtime_policy(source):
     models = sorted({a for m in source['models'] for a in m['model_arns']})
     if not profiles or not models:
         raise ValueError('No available requested Bedrock models; no runtime identity will be created')
-    return {'Version': '2012-10-17', 'Statement': [
+    statements = [
         {'Sid': 'SelectedModelInvocation', 'Effect': 'Allow',
          'Action': ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'], 'Resource': profiles + models},
         {'Sid': 'SelectedModelDiscovery', 'Effect': 'Allow',
          'Action': ['bedrock:GetFoundationModel', 'bedrock:GetFoundationModelAvailability'], 'Resource': models},
         {'Sid': 'SelectedProfileDiscovery', 'Effect': 'Allow',
          'Action': ['bedrock:GetInferenceProfile'], 'Resource': profiles},
-    ]}
+    ]
+    native = [m for m in source['models'] if m['model_id'] == 'openai.gpt-6.1-sol']
+    if native:
+        accounts = {m['profile_arn'].split(':')[4] for m in native}
+        if len(accounts) != 1 or not re.fullmatch(r'[0-9]{12}', next(iter(accounts))):
+            raise ValueError('Native Responses requires one explicit AWS account')
+        account = next(iter(accounts))
+        statements.append({
+            'Sid': 'SelectedNativeResponsesProjectInvocation', 'Effect': 'Allow',
+            'Action': ['bedrock:InvokeModel'],
+            'Resource': ['arn:aws:bedrock:' + source['region'] + ':' + account + ':project/default'],
+            'Condition': {'ArnEquals': {'bedrock:ModelArn': sorted(m['profile_arn'] for m in native)}},
+        })
+    return {'Version': '2012-10-17', 'Statement': statements}

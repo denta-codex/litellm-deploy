@@ -34,7 +34,9 @@ class BedrockTests(unittest.TestCase):
         self.assertEqual(config['model_list'][0], original['model_list'][0])
         for route, spec in zip(config['model_list'][1:], source['models']):
             params = route['litellm_params']
-            self.assertEqual(params['model'], 'bedrock/converse/' + spec['profile_id'])
+            is_native = spec['model_id'].startswith('openai.')
+            self.assertEqual(params['model'], 'bedrock/' + ('' if is_native else 'converse/') + spec['profile_id'])
+            self.assertEqual(route['model_info']['mode'], 'responses' if is_native else 'chat')
             self.assertEqual(params['aws_access_key_id'], 'os.environ/AWS_ACCESS_KEY_ID')
             self.assertNotIn('fallbacks', params)
         self.assertEqual(summary['added'], sorted(m['slug'] for m in source['models']))
@@ -51,6 +53,13 @@ class BedrockTests(unittest.TestCase):
         config, _, _ = generate(fixture_source(), {}, {}, '')
         for route in config['model_list']:
             params = route['litellm_params']
+            if route['model_name'] == 'bedrock/gpt-6.1-sol':
+                from litellm.llms.bedrock.responses.transformation import BedrockOpenAIResponsesConfig
+                self.assertIsNotNone(BedrockOpenAIResponsesConfig.for_model(params['model'].removeprefix('bedrock/')))
+                self.assertFalse(params['store'])
+                for name in ('use_chat_completions_api', 'allowed_openai_params', 'additional_drop_params'):
+                    self.assertNotIn(name, params)
+                continue
             model, provider, *_ = get_llm_provider(params['model'])
             mapped = get_optional_params(model=model, custom_llm_provider=provider,
                 reasoning_effort='low', parallel_tool_calls=True,
@@ -78,9 +87,20 @@ class BedrockTests(unittest.TestCase):
 
     def test_every_advertised_effort_is_supported_by_pinned_adapter(self):
         from litellm.utils import get_optional_params
+        from litellm.llms.bedrock.responses.transformation import BedrockOpenAIResponsesConfig
         for spec in json.loads(MANIFEST.read_text())['models']:
             for effort in spec['reasoning_levels']:
                 with self.subTest(model=spec['slug'], effort=effort):
+                    if spec['model_id'].startswith('openai.'):
+                        adapter = BedrockOpenAIResponsesConfig.for_model(spec['profile_id'])
+                        self.assertIsNotNone(adapter)
+                        mapped = adapter.map_openai_params(
+                            {'reasoning': {'effort': effort}, 'prompt_cache_key': 'session', 'store': False},
+                            spec['profile_id'], False)
+                        self.assertEqual(mapped['reasoning'], {'effort': effort})
+                        self.assertEqual(mapped['prompt_cache_key'], 'session')
+                        self.assertFalse(mapped['store'])
+                        continue
                     params = get_optional_params(model='converse/' + spec['profile_id'],
                         custom_llm_provider='bedrock', reasoning_effort=effort)
                     self.assertNotIn('reasoning_effort', params)
@@ -115,8 +135,25 @@ class BedrockTests(unittest.TestCase):
         invocation = policy['Statement'][0]
         expected = {m['profile_arn'] for m in source['models']} | {a for m in source['models'] for a in m['model_arns']}
         self.assertEqual(set(invocation['Resource']), expected)
+        project = policy['Statement'][-1]
+        self.assertEqual(project['Resource'], ['arn:aws:bedrock:us-east-1:123456789012:project/default'])
+        self.assertEqual(project['Action'], ['bedrock:InvokeModel'])
+        gpt = next(m for m in source['models'] if m['model_id'] == 'openai.gpt-6.1-sol')
+        self.assertEqual(project['Condition'], {'ArnEquals': {'bedrock:ModelArn': [gpt['profile_arn']]}})
         with self.assertRaises(ValueError):
             runtime_policy({'models': []})
+
+    def test_project_permission_is_not_added_for_converse_only_models(self):
+        source = fixture_source()
+        source['models'] = [m for m in source['models'] if m['model_id'].startswith('anthropic.')]
+        self.assertEqual(len(runtime_policy(source)['Statement']), 3)
+
+    def test_native_project_permission_rejects_malformed_account_identity(self):
+        source = fixture_source()
+        for model in source['models']:
+            model['profile_arn'] = model['profile_arn'].replace('123456789012', '*')
+        with self.assertRaisesRegex(ValueError, 'explicit AWS account'):
+            runtime_policy(source)
 
     def test_discovery_requires_exact_profile_and_account_access(self):
         source = fixture_source()
@@ -221,13 +258,29 @@ class BedrockActivationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'bedrock.yml'):
             other.rollback()
 
+    def test_stock_codex_image_failure_blocks_publication(self):
+        self.prepare()
+        self.refresh.activate()
+        def verify(command, **kwargs):
+            code = 1 if any(str(arg).endswith('verify_bedrock_codex.py') for arg in command) else 0
+            return subprocess.CompletedProcess(command, code, '', '')
+        with patch('configure_bedrock.subprocess.run', side_effect=verify):
+            with self.assertRaisesRegex(ValueError, 'stock-Codex image'):
+                self.refresh.validate()
+        self.assertFalse((self.refresh.transaction/'validated').exists())
+        with self.assertRaisesRegex(ValueError, 'not passed'):
+            self.refresh.finish()
+
     def test_publish_after_all_probes_preserves_selection_and_converges(self):
         self.prepare()
         self.refresh.activate()
         self.assertEqual(self.refresh.paths['catalog'].read_text(), self.originals['catalog'])
         with patch('configure_bedrock.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
             self.refresh.validate()
-        self.assertEqual(run.call_count, 7)
+            self.assertEqual(run.call_count, 9)
+            image_checks = [call.args[0] for call in run.call_args_list
+                            if any(str(arg).endswith('verify_bedrock_codex.py') for arg in call.args[0])]
+            self.assertEqual(len(image_checks), 2)
         probes = [call.args[0] for call in run.call_args_list if any(str(arg).endswith('/verify.py') for arg in call.args[0])]
         self.assertEqual(len(probes), 2)
         self.assertTrue(all('--auto-tool-choice' in command for command in probes))

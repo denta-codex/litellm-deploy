@@ -1,0 +1,117 @@
+- name: Validate the existing target
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.hostname == inventory_hostname
+      - ansible_facts.user_id == litellm_user
+      - litellm_root == litellm_home ~ '/.local/share/litellm'
+      - litellm_bedrock_enabled | default(false)
+- name: Inspect deployment source
+  ansible.builtin.command: git status --porcelain
+  args:
+    chdir: "{{ source_root }}"
+  register: source_status
+  changed_when: false
+  check_mode: false
+- name: Require committed source
+  ansible.builtin.assert:
+    that: source_status.stdout == ''
+- name: Inspect pending model refresh
+  ansible.builtin.stat:
+    path: "{{ litellm_state }}/model-refresh"
+  register: pending_refresh
+- name: Require completed model refresh or recovery
+  ansible.builtin.assert:
+    that: not pending_refresh.stat.exists
+    fail_msg: Recover the existing model transaction with its original playbook before deployment.
+- name: Require matching installed dependency locks
+  ansible.builtin.command:
+    argv: [cmp, "{{ source_root }}/{{ item }}", "{{ litellm_root }}/{{ item }}"]
+  loop: [pyproject.toml, uv.lock]
+  changed_when: false
+  check_mode: false
+- name: Verify existing provider snapshots
+  ansible.builtin.command:
+    argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/{{ item }}", check-snapshot]
+  loop: [refresh_models.py, configure_modal.py, configure_claude.py]
+  changed_when: false
+  check_mode: false
+- name: Inspect saved Bedrock snapshot
+  ansible.builtin.stat:
+    path: "{{ litellm_state }}/bedrock-models.json"
+  register: bedrock_snapshot
+- name: Verify retained Bedrock routes
+  ansible.builtin.command:
+    argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_bedrock.py", check-snapshot]
+  changed_when: false
+  check_mode: false
+  when: bedrock_snapshot.stat.exists
+- name: Inspect encrypted Bedrock runtime credential
+  ansible.builtin.stat:
+    path: "{{ litellm_bedrock_credential }}"
+    get_checksum: false
+    get_mime: false
+  become: true
+  register: bedrock_credential
+- name: Require the existing private Bedrock credential
+  ansible.builtin.assert:
+    that:
+      - bedrock_credential.stat.exists
+      - bedrock_credential.stat.isreg | default(false)
+      - bedrock_credential.stat.uid | default(-1) == 0
+      - bedrock_credential.stat.mode | default('') == '0600'
+- name: Record protected voice runtime and desktop state
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop: "{{ protected_paths }}"
+  register: protected_before
+- name: Install Bedrock runtime and matching validation utilities
+  ansible.builtin.copy:
+    src: "{{ source_root }}/scripts/{{ item }}"
+    dest: "{{ litellm_root }}/scripts/{{ item }}"
+    mode: '0700'
+  loop: [launch.py, shared_search.py, bedrock_aws.py, bedrock-models.json, configure_bedrock.py, refresh_models.py, verify_bedrock.py, verify_bedrock_codex.py, verify.py]
+  notify: Restart LiteLLM
+- name: Create systemd drop-in directory
+  ansible.builtin.file:
+    path: /etc/systemd/system/litellm.service.d
+    state: directory
+    mode: '0755'
+  become: true
+- name: Load the encrypted Bedrock credential
+  ansible.builtin.template:
+    src: bedrock.conf.j2
+    dest: /etc/systemd/system/litellm.service.d/40-bedrock.conf
+    mode: '0644'
+  become: true
+  notify: Restart LiteLLM
+- name: Apply Bedrock runtime changes
+  ansible.builtin.meta: flush_handlers
+- name: Verify LiteLLM liveness
+  ansible.builtin.uri:
+    url: http://127.0.0.1:4000/health/liveliness
+  register: health
+  until: health.status == 200
+  retries: 30
+  delay: 2
+  when: not ansible_check_mode
+- name: Verify retained voice registration
+  ansible.builtin.uri:
+    url: http://127.0.0.1:4000/v1/live
+    method: GET
+    status_code: 405
+  when: not ansible_check_mode and litellm_voice_enabled
+- name: Inspect protected voice runtime and desktop state
+  ansible.builtin.stat:
+    path: "{{ item }}"
+    checksum_algorithm: sha256
+  loop: "{{ protected_paths }}"
+  register: protected_after
+- name: Require unchanged protected files
+  ansible.builtin.assert:
+    that:
+      - item.0.stat.exists == item.1.stat.exists
+      - item.0.stat.checksum | default('') == item.1.stat.checksum | default('')
+  loop: "{{ protected_before.results | zip(protected_after.results) | list }}"
+  loop_control:
+    label: "{{ item.0.item }}"

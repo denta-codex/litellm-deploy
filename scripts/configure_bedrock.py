@@ -26,16 +26,24 @@ def generate(source, config, catalog, selected):
         if not model.get('streaming'):
             raise ValueError('Bedrock route requires streaming support')
         seen.add(name)
-        routes.append({'model_name': name, 'model_info': {'mode': 'chat'}, 'litellm_params': {
-            'model': 'bedrock/converse/' + spec['profile_id'],
+        native = spec['model_id'].startswith('openai.')
+        params = {
+            'model': 'bedrock/' + ('' if native else 'converse/') + spec['profile_id'],
             'aws_region_name': source['region'],
             'aws_access_key_id': 'os.environ/AWS_ACCESS_KEY_ID',
             'aws_secret_access_key': 'os.environ/AWS_SECRET_ACCESS_KEY',
-            'use_chat_completions_api': True,
-            'allowed_openai_params': ['tools', 'tool_choice'],
-            'additional_drop_params': ['prompt_cache_key'],
             'num_retries': 0,
-        }})
+        }
+        if native:
+            params['store'] = False
+        else:
+            params.update({
+                'use_chat_completions_api': True,
+                'allowed_openai_params': ['tools', 'tool_choice'],
+                'additional_drop_params': ['prompt_cache_key'],
+            })
+        routes.append({'model_name': name, 'model_info': {'mode': 'responses' if native else 'chat'},
+                       'litellm_params': params})
         instructions = (Path(__file__).with_name('claude-instructions.md').read_text()
             if spec['tool_mode'] == 'direct' else
             "You are Codex, a coding agent. Follow the user's request and use tools when needed.")
@@ -115,6 +123,12 @@ class BedrockSetup(Refresh):
                     stdout=log, stderr=subprocess.STDOUT, timeout=900)
                 if process.returncode:
                     raise ValueError('Bedrock hosted-search validation failed; see private model-refresh/bedrock-validation.log')
+                process = subprocess.run([self.uv, 'run', '--no-sync', '--project', str(self.root),
+                    str(Path(__file__).with_name('verify_bedrock_codex.py')), '--model', name,
+                    '--catalog', str(self.transaction / 'catalog.json')],
+                    stdout=log, stderr=subprocess.STDOUT, timeout=900)
+                if process.returncode:
+                    raise ValueError('Bedrock stock-Codex image validation failed; see private model-refresh/bedrock-validation.log')
         # The shared validator writes the publication marker only after these
         # additional checks and its own streaming/Codex checks have all passed.
         return super().validate()
