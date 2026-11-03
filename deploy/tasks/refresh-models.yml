@@ -1,8 +1,6 @@
-- name: Check target and operation
+- name: Check the requested operation
   ansible.builtin.assert:
     that:
-      - ansible_facts.hostname == inventory_hostname
-      - ansible_facts.user_id == litellm_user
       - refresh_action in ['refresh', 'rollback']
 - name: Inspect deployment source
   ansible.builtin.command: git status --porcelain
@@ -63,7 +61,7 @@
       changed_when: true
     - name: Report desktop reload requirement
       ansible.builtin.debug:
-        msg: "{{ ('Refresh complete. Restart ' ~ inventory_hostname ~ ' through the owning Codex desktop when ready to load the updated model picker.') if (discovery.stdout | from_json).catalog_changed else 'Refresh complete. No desktop restart required.' }}"
+        msg: "{{ 'Refresh complete. Restart the app server through the owning Codex desktop when ready to load the updated model picker.' if (discovery.stdout | from_json).catalog_changed else 'Refresh complete. No desktop restart required.' }}"
   rescue:
     - name: Stop rejected local inference service
       ansible.builtin.systemd_service:

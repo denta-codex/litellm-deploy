@@ -1,22 +1,56 @@
-- name: Require one explicit local target
+# The per-machine configuration (see deploy/config.example.yml). scripts/deploy_config.py
+# reads the same file with the same mapping; test_deploy_config.py keeps them identical.
+- name: Locate the per-machine deployment configuration
+  tags: [always]
+  ansible.builtin.set_fact:
+    deploy_config_path: "{{ config | default(lookup('env', 'HOME') ~ '/.config/litellm-deploy/config.yml') }}"
+
+- name: Load the per-machine deployment configuration
+  tags: [always]
+  ansible.builtin.include_vars:
+    file: "{{ deploy_config_path }}"
+    name: deploy_settings
+
+- name: Require a complete configuration for the running account
   tags: [always]
   ansible.builtin.assert:
     that:
-      - ansible_limit | default('') in ['grace', 'love']
-      - ansible_play_hosts_all | length == 1
-      - inventory_hostname == ansible_limit
       - ansible_connection == 'local'
-      - ansible_facts.hostname == inventory_hostname
-      - ansible_facts.user_id == litellm_user
-      - ansible_facts.user_dir == litellm_home
-      - litellm_root == litellm_home ~ '/.local/share/litellm'
-      - litellm_config == litellm_home ~ '/.config/litellm'
-      - litellm_state == litellm_home ~ '/.local/state/litellm'
-      - inventory_hostname in (supported_hosts | default(['grace', 'love']))
+      - ansible_play_hosts_all | length == 1
+      - deploy_settings.keys() | difference(['user', 'home', 'mise', 'codex_version', 'default_model', 'credential_mode', 'forward_agent', 'compaction_fallback', 'voice', 'local_inference', 'browser', 'credentials', 'models']) | length == 0
+      - deploy_settings.user is defined and deploy_settings.home is defined and deploy_settings.mise is defined
+      - deploy_settings.codex_version is defined and deploy_settings.default_model is defined
+      - deploy_settings.credential_mode | default('') in ['user', 'system']
+      - ansible_facts.user_id == deploy_settings.user
+      - ansible_facts.user_dir == deploy_settings.home
     fail_msg: >-
-      Run locally as agent with exactly --limit grace or --limit love.
-      This workflow supports {{ supported_hosts | default(['grace', 'love']) | join(', ') }}.
-      The selected hostname, account, home, and application paths must match.
+      Run locally as the configured user. The configuration must contain only the keys
+      documented in deploy/config.example.yml, and its home must be this account's home.
+
+- name: Map the configuration onto deployment variables
+  tags: [always]
+  ansible.builtin.set_fact:
+    litellm_user: "{{ deploy_settings.user }}"
+    litellm_home: "{{ deploy_settings.home }}"
+    litellm_root: "{{ deploy_settings.home }}/.local/share/litellm"
+    litellm_config: "{{ deploy_settings.home }}/.config/litellm"
+    litellm_state: "{{ deploy_settings.home }}/.local/state/litellm"
+    codex_mise: "{{ deploy_settings.mise }}"
+    codex_version: "{{ deploy_settings.codex_version }}"
+    litellm_model: "{{ deploy_settings.default_model }}"
+    litellm_credential_mode: "{{ deploy_settings.credential_mode }}"
+    litellm_system_credential: /etc/credstore.encrypted/litellm-proxy-key
+    codex_forward_agent: "{{ deploy_settings.forward_agent | default(false) }}"
+    compaction_fallback_enabled: "{{ deploy_settings.compaction_fallback | default(true) }}"
+    litellm_voice_enabled: "{{ deploy_settings.voice | default(false) }}"
+    litellm_local_inference: "{{ deploy_settings.local_inference | default(false) }}"
+    litellm_browser: "{{ deploy_settings.browser | default(false) }}"
+    litellm_credentials: "{{ deploy_settings.credentials | default([]) }}"
+    litellm_credential_exports: >-
+      {{ {'litellm-proxy-key': {'env': 'LITELLM_MASTER_KEY'}}
+         | combine(dict(deploy_settings.credentials | default([]) | map(attribute='name')
+                        | zip(deploy_settings.credentials | default([]) | map(attribute='export')))) }}
+    litellm_models: "{{ deploy_settings.models | default([]) }}"
 
 - name: Resolve the existing managed uv binary
   tags: [always]

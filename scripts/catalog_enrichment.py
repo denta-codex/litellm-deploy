@@ -160,7 +160,7 @@ def fetch_sources():
         return dict(zip(('openai', 'models_dev'), executor.map(fetch, ('openai', 'models_dev'))))
 
 
-def _identity(name, routes, modal_models):
+def _identity(name, routes):
     route = routes.get(name, {})
     policy = route.get('model_info', {}).get('catalog_pricing', {})
     if not isinstance(policy, dict) or type(policy.get('zero_rate', False)) is not bool:
@@ -171,9 +171,6 @@ def _identity(name, routes, modal_models):
         upstream = {'provider': policy.get('provider', 'local'), 'model': policy.get('model', name)}
     elif 'provider' in policy or 'model' in policy:
         upstream = {'provider': policy.get('provider'), 'model': policy.get('model')}
-    elif name.startswith('modal/'):
-        # Endpoint names and display names are not upstream model identities.
-        upstream = copy.deepcopy(modal_models.get(name, {}).get('pricing_model'))
     elif isinstance(model, str) and model.startswith('chatgpt/'):
         upstream = {'provider': 'openai', 'model': model.removeprefix('chatgpt/')}
     elif isinstance(model, str) and model.startswith('claudesdk/'):
@@ -183,12 +180,12 @@ def _identity(name, routes, modal_models):
         upstream = {'provider': provider, 'model': native}
     elif 'chatgpt/' + name in routes:
         # Hidden native IDs are explicitly paired with their configured route.
-        routed, _ = _identity('chatgpt/' + name, routes, modal_models)
+        routed, _ = _identity('chatgpt/' + name, routes)
         upstream = routed
     return upstream, policy
 
 
-def enrich_catalog(document, config, modal_manifest, sources, fetched_at=None):
+def enrich_catalog(document, config, sources, fetched_at=None):
     """Generate enrichment from existing inventory; never add stock model rows."""
     fetched_at = fetched_at or datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
     try:
@@ -198,13 +195,12 @@ def enrich_catalog(document, config, modal_manifest, sources, fetched_at=None):
     old = {(r['provider'], r['model']): r for r in previous['models']}
     records = copy.deepcopy(old)
     routes = {r['model_name']: r for r in config.get('model_list', [])}
-    modal_models = {'modal/' + spec['endpoint']: spec for spec in modal_manifest.get('models', [])}
     policies = {}
     for row in document.get('models', []):
         name = row['slug']
         if name == SEPARATOR:
             continue
-        upstream, policy = _identity(name, routes, modal_models)
+        upstream, policy = _identity(name, routes)
         record = {'provider': 'litellm', 'model': name, 'estimate_kind': 'api_equivalent'}
         if upstream is not None:
             record['upstream'] = upstream

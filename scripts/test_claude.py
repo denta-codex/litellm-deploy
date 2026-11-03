@@ -14,7 +14,6 @@ os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
 os.environ['LITELLM_TELEMETRY'] = 'False'
 
 import litellm
-import yaml
 from claude_agent_sdk.types import AssistantMessage, RateLimitEvent, RateLimitInfo, ResultMessage, StreamEvent, SystemMessage, ToolUseBlock
 from litellm.llms.custom_llm import CustomLLMError
 from claude_context import REQUEST, validate_request
@@ -22,11 +21,35 @@ import claude_provider
 from claude_provider import ClaudeProvider, usage_counts
 from claude_session import (CORRELATION, EFFORTS, MODEL, WORKSPACE_NOTE, Session, configuration, content_blocks,
                             digest, history_prompt, mcp_names)
-from configure_claude import INSTRUCTIONS, MANIFEST, ClaudeSetup, generate
-from refresh_models import Refresh
+from refresh_models import configured_model
 
 FUNCTION = {'type': 'function', 'function': {'name': 'probe', 'description': 'Read a marker',
     'parameters': {'type': 'object', 'properties': {'value': {'type': 'string'}}, 'required': ['value'], 'additionalProperties': False}}}
+INSTRUCTIONS = Path(__file__).with_name('claude-instructions.md')
+# The Claude route as a deployment configures it: plain LiteLLM plus a Codex row.
+CLAUDE_SPEC = {
+    'name': 'claude/opus-5.5',
+    'litellm': {'model': 'claudesdk/claude-opus-5-5', 'use_chat_completions_api': True,
+                'allowed_openai_params': ['reasoning_effort', 'response_format', 'parallel_tool_calls'],
+                'num_retries': 0},
+    'codex': {'display_name': 'Claude Opus 5.5', 'description': 'Claude Opus 5.5 through your Claude subscription.',
+              'base_instructions_file': 'claude-instructions.md', 'context_window': 200000,
+              'input_modalities': ['text', 'image'], 'supported_reasoning_levels': list(EFFORTS),
+              'default_reasoning_level': 'high', 'default_reasoning_summary': 'auto',
+              'supports_reasoning_summaries': True, 'supports_search_tool': False,
+              'supports_reasoning_effort_updates': True, 'tool_mode': 'direct',
+              'service_tiers': [{'id': 'priority', 'name': 'Fast',
+                                 'description': 'Faster Opus responses; uses paid Claude usage credits'}],
+              'additional_speed_tiers': ['fast']},
+    'verify': {'validators': [['verify_claude.py', '--model', '{model}', '--catalog', '{catalog}'],
+                              ['verify_shared_search.py', '--model', '{model}', '--catalog', '{catalog}']],
+               'timeout': 1800},
+}
+
+
+def claude_routes():
+    route, _, _ = configured_model(CLAUDE_SPEC)
+    return {'model_list': [route]}
 
 
 def stream_event(kind, **fields):
@@ -73,13 +96,8 @@ class FakeClient:
 
 
 class ContractTests(unittest.TestCase):
-    def test_catalog_preserves_defaults_and_other_routes(self):
-        original = {'model_list': [{'model_name': 'chatgpt/gpt-6-astra'}], 'general_settings': {'keep': True}}
-        catalog = {'models': [{'slug': 'modal/test'}]}
-        config, new, summary = generate(json.loads(MANIFEST.read_text()), original, catalog, 'chatgpt/gpt-6-astra')
-        self.assertEqual(config['model_list'][0], original['model_list'][0])
-        self.assertEqual(new['models'][0], catalog['models'][0])
-        row = new['models'][1]
+    def test_configured_row_carries_claude_capabilities(self):
+        _, row, verify = configured_model(CLAUDE_SPEC)
         self.assertEqual(row['display_name'], 'Claude Opus 5.5')
         self.assertEqual(row['available_access_programs'], {'cyber': []})
         self.assertEqual([e['effort'] for e in row['supported_reasoning_levels']], list(EFFORTS))
@@ -90,15 +108,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(row['additional_speed_tiers'], ['fast'])
         self.assertEqual(row['base_instructions'], INSTRUCTIONS.read_text())
         self.assertIn('apply_patch', row['base_instructions'])
-        self.assertEqual(generate(json.loads(MANIFEST.read_text()), config, new, '')[2]['test_models'], [])
-
-    def test_pricing_policy_survives_inventory_generation_without_model_probes(self):
-        source = json.loads(MANIFEST.read_text())
-        config, catalog, _ = generate(source, {'model_list': []}, {'models': []}, '')
-        config['model_list'][0]['model_info']['catalog_pricing'] = {'aliases': ['claude-explicit-alias']}
-        result, _, summary = generate(source, config, catalog, '')
-        self.assertEqual(result, config)
-        self.assertEqual(summary['test_models'], [])
+        self.assertEqual(verify['timeout'], 1800)
 
     def test_tool_names_stay_readable_with_safe_fallbacks(self):
         long = 'a' * 53
@@ -187,14 +197,6 @@ class ContractTests(unittest.TestCase):
             content_blocks([{'type': 'image_url', 'image_url': {'url': 'http://localhost/private'}}])
         self.assertIsNone(usage_counts(None))
         self.assertEqual(usage_counts({'input_tokens': 1, 'output_tokens': 2, 'cache_read_input_tokens': 3})['total_tokens'], 6)
-
-    def test_wrong_transaction_owner_names_claude_recovery(self):
-        with tempfile.TemporaryDirectory() as directory:
-            refresh = Refresh(Path(directory), Path(directory), 'uv')
-            refresh.transaction.mkdir(parents=True)
-            (refresh.transaction / 'journal.json').write_text(json.dumps({'prefix': 'claude/'}))
-            with self.assertRaisesRegex(ValueError, 'claude.yml'):
-                refresh.journal()
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -547,8 +549,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         mapping = [{'provider': 'claudesdk', 'custom_handler': self.provider}]
         with patch.object(litellm, 'custom_provider_map', mapping):
             custom_llm_setup()
-            routes, _, _ = generate(json.loads(MANIFEST.read_text()), {}, {}, '')
-            router = litellm.Router(model_list=routes['model_list'], num_retries=0)
+            router = litellm.Router(model_list=claude_routes()['model_list'], num_retries=0)
             events = [e.model_dump() async for e in await router.aresponses(
                 model='claude/opus-5.5', input='hello', reasoning={'effort': 'high'}, stream=True)]
             self.assertTrue(any(e['type'] == 'response.completed' for e in events))
@@ -561,8 +562,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         try:
             with patch.object(litellm, 'custom_provider_map', [{'provider': 'claudesdk', 'custom_handler': self.provider}]):
                 custom_llm_setup()
-                routes, _, _ = generate(json.loads(MANIFEST.read_text()), {}, {}, '')
-                router = litellm.Router(model_list=routes['model_list'], num_retries=0)
+                router = litellm.Router(model_list=claude_routes()['model_list'], num_retries=0)
                 events = [e.model_dump() async for e in await router.aresponses(
                     model='claude/opus-5.5', input='hello', service_tier='priority', stream=True)]
                 self.assertTrue(any(e['type'] == 'response.completed' for e in events))
@@ -577,8 +577,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             'delta': {'type': 'thinking_delta', 'thinking': 'A short summary.'}}), 'ANSWER']]
         with patch.object(litellm, 'custom_provider_map', [{'provider': 'claudesdk', 'custom_handler': self.provider}]):
             custom_llm_setup()
-            routes, _, _ = generate(json.loads(MANIFEST.read_text()), {}, {}, '')
-            router = litellm.Router(model_list=routes['model_list'], num_retries=0)
+            router = litellm.Router(model_list=claude_routes()['model_list'], num_retries=0)
             events = [e.model_dump() async for e in await router.aresponses(model='claude/opus-5.5', input='hello', stream=True)]
             self.assertTrue(any('reasoning_summary' in e['type'] for e in events))
 
@@ -697,73 +696,6 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('LATE_RESULT', prompt)
         self.assertIn('NEW_REQUEST', prompt)
         self.assertIn('read the marker', prompt)
-
-
-class ActivationTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        home = Path(self.temp.name)
-        self.refresh = ClaudeSetup(home, home / 'runtime', 'uv')
-        self.refresh.pricing_sources = lambda: {'openai': None, 'models_dev': None}
-        (home / '.codex').mkdir()
-        (home / '.codex/config.toml').write_text('model_provider="litellm"\nmodel="chatgpt/gpt-6-astra"\n')
-        self.refresh.paths['config'].parent.mkdir(parents=True)
-        self.refresh.paths['config'].write_text(yaml.safe_dump({'model_list': [{'model_name': 'chatgpt/gpt-6-astra'}]}))
-        self.refresh.paths['catalog'].write_text('{"models": []}')
-        self.snapshot = {'version': 1, 'codex_version': 'test', 'catalog': json.loads(MANIFEST.read_text())}
-        self.originals = self.refresh.originals()
-
-    def prepare(self):
-        candidate = self.refresh.candidate(self.snapshot)
-        with patch.object(self.refresh, 'discover', return_value=self.snapshot), patch('refresh_models.subprocess.run',
-                return_value=subprocess.CompletedProcess([], 0, candidate['candidates']['catalog'], '')):
-            self.refresh.prepare()
-
-    def test_failure_cannot_publish_and_rolls_back_exactly(self):
-        self.prepare()
-        self.refresh.activate()
-        with patch('configure_claude.subprocess.run', return_value=subprocess.CompletedProcess([], 1)):
-            with self.assertRaisesRegex(ValueError, 'validation failed'):
-                self.refresh.validate()
-        with self.assertRaisesRegex(ValueError, 'not passed'):
-            self.refresh.finish()
-        self.refresh.rollback()
-        self.assertEqual(self.refresh.originals(), self.originals)
-
-    def test_publish_requires_full_acceptance_and_converges(self):
-        self.prepare()
-        self.refresh.activate()
-        self.assertEqual(self.refresh.paths['catalog'].read_text(), self.originals['catalog'])
-        with patch('configure_claude.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run:
-            self.refresh.validate()
-            commands = [c.args[0] for c in run.call_args_list]
-            self.assertIn('verify_claude.py', ' '.join(commands[0]))
-            self.assertNotIn('--api-only', commands[0])
-            self.assertIn('verify_shared_search.py', ' '.join(commands[1]))
-        self.refresh.finish()
-        self.assertTrue(self.refresh.check_snapshot()['snapshot_present'])
-        with patch.object(self.refresh, 'discover', return_value=self.snapshot):
-            self.assertFalse(self.refresh.prepare()['any_changes'])
-
-    def test_pricing_only_validation_skips_claude_and_search_probes(self):
-        self.refresh.state.mkdir(parents=True)
-        candidate = self.refresh.candidate(self.snapshot)
-        for name, text in candidate['candidates'].items():
-            self.refresh.paths[name].write_text(text)
-        self.prepare()
-        self.refresh.activate()
-        with patch('configure_claude.subprocess.run') as run:
-            self.assertEqual(self.refresh.validate(), {'validated': []})
-            run.assert_not_called()
-        self.refresh.finish()
-
-    def test_concurrent_edits_are_not_overwritten_by_recovery(self):
-        self.prepare()
-        self.refresh.activate()
-        self.refresh.paths['catalog'].write_text('concurrent edit')
-        with self.assertRaisesRegex(ValueError, 'Concurrent edit'):
-            self.refresh.rollback()
 
 
 if __name__ == '__main__':

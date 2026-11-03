@@ -1,0 +1,32 @@
+# Files installed by the earlier per-provider layout. deploy.yml removes them and
+# runtime_rollout.py journals the removal so rollback restores them.
+# Removal criterion: delete this file (and its two readers) once every machine
+# has finished a runtime rollout from the config-driven layout.
+scripts:
+  - bedrock-models.json
+  - bedrock_aws.py
+  - claude-models.json
+  - configure_bedrock.py
+  - configure_claude.py
+  - configure_local.py
+  - configure_modal.py
+  - configure_vertex.py
+  - cutover.py
+  - modal-models.json
+  - provision_cloud.py
+  - provision_vertex.py
+  - test_bedrock.py
+  - test_cutover.py
+  - test_modal.py
+  - test_modal_bridge.py
+  - test_provision_cloud.py
+  - test_verify_bedrock.py
+  - test_vertex.py
+  - verify_bedrock.py
+  - verify_bedrock_codex.py
+  - verify_vertex.py
+  - vertex_google.py
+dropins:
+  - 30-compaction-recovery.conf
+  - 40-bedrock.conf
+  - 50-vertex.conf

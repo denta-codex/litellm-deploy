@@ -1,32 +1,32 @@
-# Subscription voice on Grace — client contract v1
+# Subscription voice — client contract v1
 
 This document is the handoff and replacement guide; no chat history is required.
 Deployment and observed acceptance results are recorded in [VOICE-ACCEPTANCE.md](VOICE-ACCEPTANCE.md).
 The target is stock Codex **0.159.2**, LiteLLM **1.102.1**, voice model
 `gpt-live-1-codex`, and initial voice `cove`. The adapter supports the single-user
-Grace deployment, using its existing private gateway master credential. It does
+deployment, using its existing private gateway master credential. It does
 not implement LiteLLM virtual-key permissions or separate voice spend accounting.
 
 ## Ownership and connections
 
 ```text
-Client ── authenticated app-server control connection ──► stock Codex on Grace
+Client ── authenticated app-server control connection ──► stock Codex on the server
 Client ◄──────────────── WebRTC media ────────────────► OpenAI voice service
 Codex ── loopback signaling/control ──► LiteLLM subscription adapter ──► OpenAI
 Codex ── existing Responses route ────► LiteLLM text models and tools
 ```
 
 The client owns WebRTC, microphone/speaker, audio buffering, mute, interruption,
-reconnection and UI. Grace does not decode, transcribe or synthesize client audio.
-Subscription credentials and the gateway key stay on Grace. The client needs
+reconnection and UI. The server does not decode, transcribe or synthesize client audio.
+Subscription credentials and the gateway key stay on the server. The client needs
 only its existing app-server connection credential, delivered through the
 established secure provisioning flow, never copied from this document.
 
-The existing remote endpoint is `wss://grace.taila198f.ts.net/codex/rpc`.
+The remote endpoint is `wss://<machine>.<tailnet>.ts.net/codex/rpc`.
 It forwards the stock app-server protocol. The client must additionally reach
 the provider's WebRTC endpoints described by the SDP answer; media does not pass
 through that Tailscale control endpoint. Do not expose port 4000 or add an audio
-bridge on Grace to work around client networking.
+bridge on the server to work around client networking.
 
 ## Stock client sequence
 
@@ -122,9 +122,9 @@ Use the repository's existing managed toolchain and encrypted credentials.
 `deploy/voice.yml` owns this initial cutover. From committed source:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml -e voice_action=prepare
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml -e voice_action=verify
+ansible-playbook -i deploy/inventory.yml deploy/voice.yml
+ansible-playbook -i deploy/inventory.yml deploy/voice.yml -e voice_action=prepare
+ansible-playbook -i deploy/inventory.yml deploy/voice.yml -e voice_action=verify
 ```
 
 Preparation copies only `serve.py` and `live_voice.py`, sets the two root voice
@@ -132,7 +132,7 @@ base URLs to `http://127.0.0.1:4000/v1`, and sets `realtime.version = "v3"` and
 `realtime.voice = "cove"`. The transaction preserves other Codex settings.
 It restarts LiteLLM, not the Codex service that owns active chats. Validate config
 pickup with a fresh/resumed thread; if the desktop retains old session settings,
-reconnect Grace through the desktop before desktop acceptance. Do not restart an
+reconnect the server through the desktop before desktop acceptance. Do not restart an
 app-server in the middle of its active work to conceal a failed configuration test.
 
 One private journal, `~/.local/state/litellm/voice-rollout.json`, is the recovery
@@ -141,14 +141,14 @@ Rollback restores only the managed files/settings, refuses conflicting edits,
 and restarts the gateway:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml -e voice_action=rollback
+ansible-playbook -i deploy/inventory.yml deploy/voice.yml -e voice_action=rollback
 ```
 
 After the remote reference client, regression checks and real desktop voice test
 pass, finish with the recorded receipt and actual desktop confirmation:
 
 ```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/voice.yml -e voice_action=finish \
+ansible-playbook -i deploy/inventory.yml deploy/voice.yml -e voice_action=finish \
   -e voice_desktop_validated=true -e voice_receipt=/absolute/path/tool-receipt.json
 ```
 
@@ -168,12 +168,14 @@ explicit archived-history comparison; do not substitute ordinary text turns.
 
 `scripts/voice_client.py` is a runnable, version-pinned WebRTC reference client.
 It connects through the same authenticated remote WSS route as the Dot will use.
-Its only nonportable default is the path to Grace's encrypted connection token;
-on another host use `--token-env REMOTE_CODEX_TOKEN` with securely provisioned
-credentials. It needs neither a LiteLLM key nor a subscription token.
+Pass the remote endpoint with `--url`. It defaults to the encrypted connection
+token under `~/.local/share/remote-codex/`; alternatively use
+`--token-env REMOTE_CODEX_TOKEN` with securely provisioned credentials.
+It needs neither a LiteLLM key nor a subscription token.
 
 ```sh
-uv run --script scripts/voice_client.py --input question.wav --output answer.wav \
+uv run --script scripts/voice_client.py --url 'wss://<machine>.<tailnet>.ts.net/codex/rpc' \
+  --input question.wav --output answer.wav \
   --receipt receipt.json --duration 60
 ```
 
@@ -199,7 +201,7 @@ failed refresh; two isolated concurrent calls; actual audio round trip; unknown
 file-content tool result; interrupted playback; stop/control loss; abandoned
 offer; gateway restart followed by a fresh call; and existing text/search/tool/
 shell credential-isolation checks. Desktop acceptance must be an existing chat
-on **Grace**, not a local Mac chat. Record the actual results with the deployed
+on **the deployed server**, not a local Mac chat. Record the actual results with the deployed
 commit and never turn an unperformed check into a pass.
 
 ## Replacement by upstream LiteLLM

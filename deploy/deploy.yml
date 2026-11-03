@@ -1,13 +1,21 @@
-- name: Deploy the selected host's LiteLLM gateway
+- name: Deploy the LiteLLM gateway from the per-machine configuration
   hosts: all
   gather_facts: true
   vars:
     source_root: "{{ playbook_dir }}/.."
+    # Files the running proxy imports; changing any of them restarts the service.
+    runtime_scripts: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py,
+                      claude_session.py, claude_provider.py, shared_search.py, live_voice.py,
+                      compaction_fallback.py, deployment.py]
   pre_tasks:
-    - name: Validate the selected local host
+    - name: Load and validate the deployment configuration
       ansible.builtin.import_tasks: tasks/target.yml
       tags: [always]
   tasks:
+    - name: Load the list of files retired by the configuration-driven layout
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/retired.yml"
+        name: retired
     - name: Require an existing Python 3.14 before changing application files
       ansible.builtin.command:
         argv: ["{{ litellm_uv }}", python, find, --no-python-downloads, '3.14']
@@ -21,15 +29,8 @@
     - name: Require side-by-side Codex installation before gateway deployment
       ansible.builtin.assert:
         that: pinned_codex.stat.executable | default(false)
-        fail_msg: Run codex-runtime.yml with the same --limit and -e codex_runtime_action=install first. This stages the binary without switching the app server.
-    - name: Check destination identity
-      tags: [compaction-recovery]
-      ansible.builtin.assert:
-        that:
-          - ansible_facts.hostname == inventory_hostname
-          - ansible_facts.user_id == litellm_user
+        fail_msg: Run codex-runtime.yml with -e codex_runtime_action=install first. This stages the binary without switching the app server.
     - name: Inspect deployment source
-      tags: [compaction-recovery]
       ansible.builtin.command: git status --porcelain
       args:
         chdir: "{{ source_root }}"
@@ -37,14 +38,16 @@
       changed_when: false
       check_mode: false
     - name: Require committed deployment source
-      tags: [compaction-recovery]
       ansible.builtin.assert:
         that: source_status.stdout == ''
     - name: Inspect pending model refresh
-      tags: [compaction-recovery]
       ansible.builtin.stat:
         path: "{{ litellm_state }}/model-refresh"
       register: pending_refresh
+    - name: Require completed model refresh or recovery
+      ansible.builtin.assert:
+        that: not pending_refresh.stat.exists
+        fail_msg: Recover the pending transaction with refresh-models.yml (or local.yml) -e refresh_action=rollback before deploying.
     - name: Inspect pending voice acceptance
       ansible.builtin.stat:
         path: "{{ litellm_state }}/voice-rollout.json"
@@ -53,125 +56,45 @@
       ansible.builtin.assert:
         that: not pending_voice.stat.exists
         fail_msg: Finish or roll back the pending deploy/voice.yml transaction first.
-    - name: Require completed model refresh or recovery
-      tags: [compaction-recovery]
-      ansible.builtin.assert:
-        that: not pending_refresh.stat.exists
-        fail_msg: Recover the pending transaction with its original playbook (claude.yml, modal.yml, local.yml, bedrock.yml or refresh-models.yml) -e refresh_action=rollback before deploying.
     - name: Inspect existing model refresh utility
       ansible.builtin.stat:
         path: "{{ litellm_root }}/scripts/refresh_models.py"
       register: installed_refresh
-    - name: Verify saved discovery with the currently installed generators
+    - name: Inspect the published configured-model list
+      ansible.builtin.stat:
+        path: "{{ litellm_config }}/models.json"
+      register: installed_models
+    # Temporary first-cutover exception: a machine that has not yet published
+    # models.json still runs the per-provider generators, which cannot read the
+    # configuration. Its first refresh-models.yml run publishes models.json and
+    # this check applies from then on. Remove the models.json condition together
+    # with deploy/retired.yml, once every machine has published models.json.
+    - name: Verify installed routes and picker still match saved discovery
       ansible.builtin.command:
-        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/{{ item }}", check-snapshot]
-      loop: [refresh_models.py, configure_modal.py, configure_claude.py]
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/refresh_models.py",
+               --config, "{{ deploy_config_path }}", check-snapshot]
       changed_when: false
       check_mode: false
-      when: installed_refresh.stat.exists
-    - name: Inspect saved local model snapshot
+      when: installed_refresh.stat.exists and installed_models.stat.exists
+    - name: Inspect configured encrypted provider credentials
       ansible.builtin.stat:
-        path: "{{ litellm_state }}/local-model.json"
-      register: local_snapshot
-    - name: Require Grace for a retained local GPU route
-      ansible.builtin.assert:
-        that: inventory_hostname == 'grace'
-      when: local_snapshot.stat.exists
-    - name: Verify saved local route with installed generator
-      ansible.builtin.command:
-        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_local.py", check-snapshot]
-      changed_when: false
-      check_mode: false
-      when: local_snapshot.stat.exists
-    - name: Inspect saved Bedrock snapshot
-      ansible.builtin.stat:
-        path: "{{ litellm_state }}/bedrock-models.json"
-      register: bedrock_snapshot
-    - name: Verify saved Bedrock routes with installed generator
-      ansible.builtin.command:
-        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_bedrock.py", check-snapshot]
-      changed_when: false
-      check_mode: false
-      when: bedrock_snapshot.stat.exists
-    - name: Require enabled Bedrock credentials for retained routes
-      ansible.builtin.assert:
-        that: litellm_bedrock_enabled | default(false)
-      when: bedrock_snapshot.stat.exists
-    - name: Inspect saved Vertex snapshot
-      ansible.builtin.stat:
-        path: "{{ litellm_state }}/vertex-models.json"
-      register: vertex_snapshot
-    - name: Verify retained Vertex routes
-      ansible.builtin.command:
-        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/configure_vertex.py", check-snapshot]
-      changed_when: false
-      check_mode: false
-      when: vertex_snapshot.stat.exists
-    - name: Require enabled Vertex credentials for retained routes
-      ansible.builtin.assert:
-        that: litellm_vertex_enabled | default(false)
-      when: vertex_snapshot.stat.exists
-    - name: Inspect encrypted Vertex runtime credential
-      ansible.builtin.stat:
-        path: "{{ litellm_vertex_credential }}"
+        path: "{{ item.path }}"
         get_checksum: false
         get_mime: false
       become: true
-      register: vertex_credential
-      when: litellm_vertex_enabled | default(false)
-    - name: Require the dedicated private Vertex credential
+      loop: "{{ litellm_credentials }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: credential_files
+    - name: Require each configured credential to be a private root-owned file
       ansible.builtin.assert:
         that:
-          - vertex_credential.stat.exists
-          - vertex_credential.stat.isreg | default(false)
-          - vertex_credential.stat.uid | default(-1) == 0
-          - vertex_credential.stat.mode | default('') == '0600'
-      when: litellm_vertex_enabled | default(false)
-    - name: Inspect encrypted Bedrock runtime credential
-      ansible.builtin.stat:
-        path: "{{ litellm_bedrock_credential }}"
-        get_checksum: false
-        get_mime: false
-      become: true
-      register: bedrock_credential
-      when: litellm_bedrock_enabled | default(false)
-    - name: Require the existing private Bedrock credential
-      ansible.builtin.assert:
-        that:
-          - bedrock_credential.stat.exists
-          - bedrock_credential.stat.isreg | default(false)
-          - bedrock_credential.stat.uid | default(-1) == 0
-          - bedrock_credential.stat.mode | default('') == '0600'
-      when: litellm_bedrock_enabled | default(false)
-    - name: Inspect retained encrypted Modal inference credential
-      ansible.builtin.stat:
-        path: "{{ litellm_modal_credential }}"
-        get_checksum: false
-        get_mime: false
-      become: true
-      register: modal_credential
-      when: litellm_modal_enabled
-    - name: Require the existing private Modal credential
-      ansible.builtin.assert:
-        that:
-          - modal_credential.stat.exists
-          - modal_credential.stat.isreg | default(false)
-          - modal_credential.stat.uid | default(-1) == 0
-          - modal_credential.stat.mode | default('') == '0600'
-        fail_msg: Restore the retained root-owned encrypted Modal credential before deployment.
-      when: litellm_modal_enabled
-    - name: Inspect saved optional provider snapshots
-      ansible.builtin.stat:
-        path: "{{ litellm_state }}/{{ item.name }}-models.json"
-      loop:
-        - {name: modal, enabled: "{{ litellm_modal_enabled }}"}
-        - {name: claude, enabled: "{{ litellm_claude_enabled }}"}
-      register: optional_snapshots
-    - name: Require retained providers to remain enabled
-      ansible.builtin.assert:
-        that: not item.stat.exists or (item.item.enabled | bool)
-        fail_msg: Retained provider routes require their integration to remain enabled; remove them through their original activation workflow first.
-      loop: "{{ optional_snapshots.results }}"
+          - item.stat.exists
+          - item.stat.isreg | default(false)
+          - item.stat.uid | default(-1) == 0
+          - item.stat.mode | default('') == '0600'
+        fail_msg: "Create {{ item.item.path }} with systemd-creds encrypt (root-owned, mode 0600) before deployment."
+      loop: "{{ credential_files.results }}"
       loop_control:
         label: "{{ item.item.name }}"
     - name: Create application directories
@@ -194,86 +117,23 @@
       loop: [pyproject.toml, uv.lock]
       register: project_files
       notify: Restart LiteLLM
-    - name: Install non-secret host settings for verification and recovery
-      tags: [host-settings]
+    - name: Install non-secret deployment settings for verification and recovery
       ansible.builtin.template:
         src: deployment.json.j2
         dest: "{{ litellm_config }}/deployment.json"
         mode: '0600'
+    - name: Install the credential export map read by the launcher
+      ansible.builtin.template:
+        src: credentials.json.j2
+        dest: "{{ litellm_config }}/credentials.json"
+        mode: '0600'
+      notify: Restart LiteLLM
     - name: Install service launcher and request customization
       ansible.builtin.copy:
         src: "{{ source_root }}/scripts/{{ item }}"
         dest: "{{ litellm_root }}/scripts/{{ item }}"
         mode: '0700'
-      loop: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_session.py, claude_provider.py, shared_search.py, live_voice.py, bedrock_aws.py, vertex_google.py, deployment.py]
-      notify: Restart LiteLLM
-    - name: Install compaction recovery runtime
-      tags: [compaction-recovery]
-      ansible.builtin.copy:
-        src: "{{ source_root }}/scripts/{{ item }}"
-        dest: "{{ litellm_root }}/scripts/{{ item }}"
-        mode: '0700'
-      loop: [claude_context.py, compaction_fallback.py]
-      notify: Restart LiteLLM
-    - name: Inspect launcher for targeted compaction deployment
-      tags: [compaction-recovery]
-      ansible.builtin.slurp:
-        src: "{{ litellm_root }}/scripts/serve.py"
-      register: compaction_launcher
-      when: "'compaction-recovery' in ansible_run_tags"
-    - name: Require the shared-search dispatch installation point
-      tags: [compaction-recovery]
-      ansible.builtin.assert:
-        that: "'    install_search()' in (compaction_launcher.content | b64decode).splitlines()"
-        fail_msg: Review the installed launcher before applying targeted compaction recovery.
-      when: "'compaction-recovery' in ansible_run_tags"
-    - name: Add compaction dispatch to the installed launcher
-      tags: [compaction-recovery]
-      ansible.builtin.blockinfile:
-        path: "{{ litellm_root }}/scripts/serve.py"
-        insertafter: '^    install_search\(\)$'
-        marker: '    # {mark} managed compaction recovery'
-        block: |2
-              from compaction_fallback import install as install_compaction
-              install_compaction()
-      when:
-        - "'compaction-recovery' in ansible_run_tags"
-        - "'    install_compaction()' not in (compaction_launcher.content | b64decode).splitlines()"
-      notify: Restart LiteLLM
-    - name: Install compaction verification utility
-      tags: [compaction-recovery]
-      ansible.builtin.copy:
-        src: "{{ source_root }}/scripts/verify_compaction.py"
-        dest: "{{ litellm_root }}/scripts/verify_compaction.py"
-        mode: '0700'
-    - name: Create compaction service drop-in directory
-      tags: [compaction-recovery]
-      ansible.builtin.file:
-        path: /etc/systemd/system/litellm.service.d
-        state: directory
-        mode: '0755'
-      become: true
-    - name: Configure compaction recovery
-      tags: [compaction-recovery]
-      ansible.builtin.template:
-        src: compaction-recovery.conf.j2
-        dest: /etc/systemd/system/litellm.service.d/30-compaction-recovery.conf
-        mode: '0644'
-      become: true
-      notify: Restart LiteLLM
-    - name: Configure Bedrock systemd credential
-      ansible.builtin.template:
-        src: bedrock.conf.j2
-        dest: /etc/systemd/system/litellm.service.d/40-bedrock.conf
-        mode: '0644'
-      become: true
-      notify: Restart LiteLLM
-    - name: Configure Vertex systemd credential
-      ansible.builtin.template:
-        src: vertex.conf.j2
-        dest: /etc/systemd/system/litellm.service.d/50-vertex.conf
-        mode: '0644'
-      become: true
+      loop: "{{ runtime_scripts }}"
       notify: Restart LiteLLM
     - name: Install deployment utilities without restarting inference
       ansible.builtin.copy:
@@ -281,7 +141,19 @@
         dest: "{{ litellm_root }}/scripts/{{ item | basename }}"
         mode: '0700'
       with_fileglob: "{{ source_root }}/scripts/*"
-      when: item | basename not in ['start-litellm', 'launch.py', 'serve.py', 'chatgpt_responses.py', 'claude-cli', 'claude_context.py', 'claude_session.py', 'claude_provider.py', 'shared_search.py', 'live_voice.py', 'bedrock_aws.py', 'vertex_google.py', 'compaction_fallback.py', 'deployment.py']
+      when: item | basename not in runtime_scripts
+    - name: Remove scripts retired by the configuration-driven layout
+      ansible.builtin.file:
+        path: "{{ litellm_root }}/scripts/{{ item }}"
+        state: absent
+      loop: "{{ retired.scripts }}"
+    - name: Remove service drop-ins replaced by the configured unit
+      ansible.builtin.file:
+        path: "/etc/systemd/system/litellm.service.d/{{ item }}"
+        state: absent
+      loop: "{{ retired.dropins }}"
+      become: true
+      notify: Restart LiteLLM
     - name: Inspect installed Python environment
       ansible.builtin.stat:
         path: "{{ litellm_root }}/.venv/bin/litellm"
@@ -323,10 +195,8 @@
       become: true
       when: not ansible_check_mode
     - name: Apply service changes
-      tags: [compaction-recovery]
       ansible.builtin.meta: flush_handlers
     - name: Verify local service liveness
-      tags: [compaction-recovery]
       ansible.builtin.uri:
         url: http://127.0.0.1:4000/health/liveliness
       register: health

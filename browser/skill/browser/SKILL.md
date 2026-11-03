@@ -9,7 +9,7 @@ Use the `browser` MCP tools for requested website interaction. For research, sta
 
 Discover browser tools through code mode when needed: filter `ALL_TOOLS` for names starting with `mcp__browser__`. Their descriptions include callable signatures. Do not load unrelated tool catalogs.
 
-The browser runs headlessly on Grace. The user does not need a desktop app or live viewer. Use accessibility snapshots and their current element references for ordinary interaction; use screenshots and coordinate actions for visual interfaces. When using code mode, forward image content with `image()` so you can see it; printing an image’s JSON or file path is not visual inspection.
+The browser runs headlessly on the server. The user does not need a desktop app or live viewer. Use accessibility snapshots and their current element references for ordinary interaction; use screenshots and coordinate actions for visual interfaces. When using code mode, forward image content with `image()` so you can see it; printing an image’s JSON or file path is not visual inspection.
 
 Ordinary browser actions start an isolated session. It retains tabs and cookies across follow-up turns until closed or idle for 15 minutes. To use a saved login, call `browser_session` with `action: "open", mode: "saved", profile: "name"` only when the user requests that profile. Use `action: "status"` to inspect selection and `action: "close"` to release it. Saved profiles preserve website storage, not open tabs; isolated sessions lose storage when closed. Opening a saved profile does not import personal-browser credentials or log in automatically. A profile in use by another conversation must be released there before it can be used here.
 

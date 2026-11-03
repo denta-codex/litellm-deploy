@@ -1,4 +1,4 @@
-"""Exercise host isolation, Love's credential path, and portable runtime recovery."""
+"""Exercise both credential modes and portable runtime recovery under a non-default home."""
 import base64
 import json
 import os
@@ -10,11 +10,9 @@ from unittest.mock import patch
 
 import deployment
 from codex_runtime import Runtime, render_launcher, render_service
-from runtime_rollout import inventory
 
 
-SOURCE = Path(__file__).resolve().parent.parent
-LOVE_HOME = Path('/mnt/HC_Volume_103914271/agent/home')
+MOUNTED_HOME = Path('/mnt/volume/agent/home')
 
 
 class CredentialTests(unittest.TestCase):
@@ -27,14 +25,14 @@ class CredentialTests(unittest.TestCase):
         self.config.write_text(json.dumps({'home': str(self.home), 'credential_mode': mode,
             'system_credential': '/etc/credstore.encrypted/litellm-proxy-key', 'codex': '/managed/codex'}))
 
-    def test_user_credentials_preserve_graces_unprivileged_decryption(self):
+    def test_user_mode_decrypts_without_privilege(self):
         self.configure('user')
         with patch('deployment.subprocess.check_output', return_value='test-key\n') as run:
             self.assertEqual(deployment.proxy_key(home=self.home), 'test-key')
         self.assertEqual(run.call_args.args[0][:3], ['/usr/bin/systemd-creds', 'decrypt', '--user'])
         self.assertIn(str(self.home / '.config/litellm/proxy-key.cred'), run.call_args.args[0])
 
-    def test_love_uses_system_encryption_without_user_option(self):
+    def test_system_mode_uses_system_encryption_without_user_option(self):
         self.configure('system')
         for uid, prefix in [(2002, ['sudo', '-n']), (0, [])]:
             with self.subTest(uid=uid), patch('deployment.os.geteuid', return_value=uid), \
@@ -65,17 +63,17 @@ class CredentialTests(unittest.TestCase):
         run.assert_not_called()
 
 
-class LoveRuntimeTests(unittest.TestCase):
+class SystemModeRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.runtime = Runtime('0.159.2', self.root, LOVE_HOME, 'system', False)
+        self.runtime = Runtime('0.159.2', self.root, MOUNTED_HOME, 'system', False)
         for method in ('check_remote_candidate', 'check_remote_connection', 'check_running_version', 'validate_catalog'):
             self.enterContext(patch.object(self.runtime, method))
-        # Reuse the existing contract; only the host paths differ.
+        # Reuse the existing contract; only the home differs.
         from test_codex_runtime import CONFIG
-        self.write(LOVE_HOME / '.codex/config.toml', CONFIG.replace('/home/agent', str(LOVE_HOME)))
-        self.write('/etc/systemd/system/codex-app-server.service', '# existing love service\n', 0o644)
-        self.write(LOVE_HOME / '.local/share/mise/installs/codex/0.159.2/bin/codex',
+        self.write(MOUNTED_HOME / '.codex/config.toml', CONFIG.replace('/home/agent', str(MOUNTED_HOME)))
+        self.write('/etc/systemd/system/codex-app-server.service', '# existing service\n', 0o644)
+        self.write(MOUNTED_HOME / '.local/share/mise/installs/codex/0.159.2/bin/codex',
                    '#!/bin/sh\nprintf "codex-cli 0.159.2\\n"\n', 0o700)
 
     def write(self, name, value, mode=0o600):
@@ -84,14 +82,14 @@ class LoveRuntimeTests(unittest.TestCase):
         path.write_text(value)
         path.chmod(mode)
 
-    def test_love_adoption_and_rollback_preserve_config_and_prior_service(self):
-        config = self.runtime.path(LOVE_HOME / '.codex/config.toml')
+    def test_adoption_and_rollback_preserve_config_and_prior_service(self):
+        config = self.runtime.path(MOUNTED_HOME / '.codex/config.toml')
         original = config.read_bytes()
         before = self.runtime.current_fingerprints()
         self.runtime.apply()
         desired = self.runtime.desired()
         service = base64.b64decode(desired['/etc/systemd/system/codex-app-server.service']['content']).decode()
-        self.assertIn(f'RequiresMountsFor={LOVE_HOME}', service)
+        self.assertIn(f'RequiresMountsFor={MOUNTED_HOME}', service)
         self.assertIn('LoadCredentialEncrypted=litellm-proxy-key:', service)
         self.assertNotIn('/home/agent', service)
         self.assertNotIn('SSH_AUTH_SOCK', service)
@@ -109,7 +107,7 @@ class LoveRuntimeTests(unittest.TestCase):
         binary.write_text('#!/bin/bash\n[[ "$LITELLM_PROXY_KEY" == private-value ]] || exit 9\nprintf "%s\\0" "$@"\n')
         binary.chmod(0o700)
         launcher = self.root / 'launcher'
-        launcher.write_text(render_launcher('0.159.2', binary=str(binary), home=LOVE_HOME, credential_mode='system'))
+        launcher.write_text(render_launcher('0.159.2', binary=str(binary), home=MOUNTED_HOME, credential_mode='system'))
         launcher.chmod(0o700)
         env = os.environ | {'CREDENTIALS_DIRECTORY': str(credentials)}
         result = subprocess.run([launcher, 'app-server', 'with spaces', '$literal'], env=env, capture_output=True)
@@ -122,25 +120,10 @@ class LoveRuntimeTests(unittest.TestCase):
         self.assertEqual(failed.stdout, b'')
         self.assertNotIn(b'bad key', failed.stderr)
 
-    def test_grace_retains_its_current_service_auth_and_forwarding(self):
+    def test_user_mode_service_forwards_the_agent_without_service_credentials(self):
         service = render_service()
         self.assertIn('Environment=SSH_AUTH_SOCK=/home/agent/', service)
         self.assertNotIn('LoadCredentialEncrypted=', service)
-
-
-class HostInventoryTests(unittest.TestCase):
-    def test_love_enables_basic_gateway_and_cloud_providers(self):
-        love, grace = inventory(SOURCE, 'love'), inventory(SOURCE, 'grace')
-        self.assertEqual(love['litellm_home'], str(LOVE_HOME))
-        for feature in ('modal', 'voice', 'claude'):
-            self.assertFalse(love['litellm_' + feature + '_enabled'])
-            self.assertTrue(grace['litellm_' + feature + '_enabled'])
-        for feature in ('bedrock', 'vertex'):
-            self.assertTrue(love['litellm_' + feature + '_enabled'])
-            self.assertEqual(love['litellm_' + feature + '_credential'],
-                             grace['litellm_' + feature + '_credential'])
-        self.assertEqual(love['litellm_credential_mode'], 'system')
-        self.assertEqual(grace['litellm_credential_mode'], 'user')
 
 
 if __name__ == '__main__':

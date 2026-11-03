@@ -29,24 +29,24 @@ class EnrichmentTests(unittest.TestCase):
         self.config = {'model_list': [
             {'model_name': 'chatgpt/gpt-fixture', 'litellm_params': {'model': 'chatgpt/gpt-fixture'}},
             {'model_name': 'claude/opus', 'litellm_params': {'model': 'claudesdk/claude-opus'}},
-            {'model_name': 'modal/endpoint', 'litellm_params': {'model': 'openai/endpoint'}}]}
-        self.manifest = {'models': [{'endpoint': 'endpoint', 'pricing_model': {'provider': 'zai', 'model': 'glm'}}]}
+            {'model_name': 'modal/endpoint', 'litellm_params': {'model': 'openai/endpoint'},
+             'model_info': {'catalog_pricing': {'provider': 'zai', 'model': 'glm'}}}]}
         self.sources = {'openai': {'gpt-fixture': [STANDARD]}, 'models_dev': {
             'anthropic': {'models': {'claude-opus': {'cost': {'input': 4, 'output': 20, 'cache_read': 0.2, 'cache_write': 5}}}},
             'zai': {'models': {'glm': {'cost': {'input': 0.15, 'output': 0.5}}}}}}
 
     def enrich(self, catalog=None, sources=None, at=AT):
-        return enrich_catalog(catalog or self.catalog, self.config, self.manifest,
+        return enrich_catalog(catalog or self.catalog, self.config,
                               self.sources if sources is None else sources, at)
 
     def rows(self, result):
         return {r['model']: r for r in result['remote_codex']['models']}
 
     def test_published_prices_have_route_identity_and_separate_upstream_provenance(self):
-        originals = copy.deepcopy((self.catalog, self.config, self.manifest, self.sources))
+        originals = copy.deepcopy((self.catalog, self.config, self.sources))
         result, summary = self.enrich()
         self.assertEqual(result['models'], self.catalog['models'])
-        self.assertEqual((self.catalog, self.config, self.manifest, self.sources), originals)
+        self.assertEqual((self.catalog, self.config, self.sources), originals)
         rows = self.rows(result)
         self.assertTrue(all(row['provider'] == 'litellm' for row in rows.values()))
         self.assertEqual(rows['chatgpt/gpt-fixture']['upstream'], {'provider': 'openai', 'model': 'gpt-fixture'})
@@ -57,7 +57,9 @@ class EnrichmentTests(unittest.TestCase):
         self.assertEqual(summary['unpriced_models'], 0)
 
     def test_missing_price_and_hosted_endpoint_are_never_assumed_free(self):
-        self.manifest = {'models': []}
+        # Without an explicit pricing identity, an endpoint name is not an upstream model.
+        self.config['model_list'][2] = {'model_name': 'modal/endpoint',
+                                        'litellm_params': {'model': 'custom_endpoint'}}
         self.sources['openai'] = {'unselectable-model': [STANDARD]}
         result, summary = self.enrich()
         rows = self.rows(result)

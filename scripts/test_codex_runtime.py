@@ -1,4 +1,4 @@
-"""Regression checks for the transactional Grace Codex runtime deployment."""
+"""Regression checks for the transactional Codex runtime deployment."""
 
 import json
 import os
@@ -123,23 +123,18 @@ class RuntimeTests(unittest.TestCase):
         self.assertNotIn('private-value', str(caught.exception))
         self.assertEqual(run.call_args.args[0][:4], ['/usr/sbin/runuser', '-u', 'agent', '--'])
 
-    def test_transport_selects_candidate_and_live_checks(self):
-        for mode in ('forwarder', 'ssh'):
-            runtime = Runtime(self.version, self.root, connection_mode=mode)
-            with patch.object(runtime, 'run_ssh_check') as ssh, patch.object(runtime, 'run_remote_check') as forwarder:
-                CANDIDATE_CHECK(runtime)
-                CONNECTION_CHECK(runtime)
-            if mode == 'ssh':
-                self.assertEqual([call.args for call in ssh.call_args_list], [('candidate',), ('live',)])
-                forwarder.assert_not_called()
-            else:
-                ssh.assert_not_called()
-                self.assertEqual([call.args[0] for call in forwarder.call_args_list],
-                                 ['candidate-check.py', 'connection-check.py'])
+    def test_acceptance_checks_both_forwarder_and_ssh_clients(self):
+        runtime = Runtime(self.version, self.root)
+        with patch.object(runtime, 'run_ssh_check') as ssh, patch.object(runtime, 'run_remote_check') as forwarder:
+            CANDIDATE_CHECK(runtime)
+            CONNECTION_CHECK(runtime)
+        self.assertEqual([call.args for call in ssh.call_args_list], [('candidate',), ('live',)])
+        self.assertEqual([call.args[0] for call in forwarder.call_args_list],
+                         ['candidate-check.py', 'connection-check.py'])
 
     def test_ssh_check_runs_as_agent_and_redacts_failed_rpc(self):
         result = subprocess.CompletedProcess([], 1, 'private-value', 'private-value')
-        runtime = Runtime(self.version, self.root, connection_mode='ssh')
+        runtime = Runtime(self.version, self.root)
         with patch('codex_runtime.os.geteuid', return_value=runtime.uid + 1), patch('codex_runtime.subprocess.run', return_value=result) as run:
             with self.assertRaises(RuntimeError) as caught:
                 runtime.run_ssh_check('live')
@@ -210,7 +205,7 @@ exit 2
     def test_rollback_restores_runtime_without_touching_config(self):
         originals = {name: self.runtime.snapshot(name) for name in MANAGED_PATHS}
         self.runtime.apply()
-        edited = self.path(CONFIG_PATH).read_text() + '\n# Grace changed an unrelated preference.\n'
+        edited = self.path(CONFIG_PATH).read_text() + '\n# The operator changed an unrelated preference.\n'
         self.path(CONFIG_PATH).write_text(edited)
         result = self.runtime.rollback()
         self.assertTrue(result['changed'])
@@ -261,7 +256,7 @@ exit 2
     def test_compliant_user_edits_do_not_create_runtime_drift(self):
         self.runtime.apply()
         self.finish_fixture()
-        edited = self.path(CONFIG_PATH).read_text() + '\n# Grace owns this file.\n[plugins.second]\nenabled = true\n'
+        edited = self.path(CONFIG_PATH).read_text() + '\n# The operator owns this file.\n[plugins.second]\nenabled = true\n'
         self.path(CONFIG_PATH).write_text(edited)
         self.assertFalse(self.runtime.apply()['changed'])
         self.assertEqual(self.path(CONFIG_PATH).read_text(), edited)

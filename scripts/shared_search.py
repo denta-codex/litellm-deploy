@@ -31,6 +31,8 @@ from claude_session import atomic_json
 
 CURRENT = ContextVar('shared_search', default=None)
 HOSTED = ('web_search', 'web_search_preview')
+# Routes owned by the subscription refresh; they keep the provider's native search.
+NATIVE_PREFIX, NATIVE_REVIEW = 'chatgpt/', 'codex-auto-review'
 # Search batches per Responses request. Parallel searches within a batch are
 # never capped. The limit is enforced by message, never by changing the tool
 # list: Claude workers are replaced whenever tools or tool_choice change.
@@ -401,18 +403,33 @@ def cite(output, sources):
 
 
 class SearchResponses:
-    def __init__(self, dispatch, interceptor, backend=None, journal=None):
+    def __init__(self, dispatch, interceptor, backend=None, journal=None, router=None):
         self.dispatch, self.interceptor = dispatch, interceptor
         self.backend = backend or ChatGPTSearch()
         self.journal = journal or SearchJournal()
+        self.router = router
         self.active = {}
+
+    def configured_store(self, model):
+        """Return a route's configured `store`, which overrides the caller's value."""
+        router = self.router
+        if router is None:
+            from litellm.proxy.proxy_server import llm_router as router
+        for deployment in (router.get_model_list(model_name=model) if router else None) or []:
+            params = deployment.get('litellm_params') or {}
+            if 'store' in params:
+                return params['store']
+        return None
 
     async def route(self, data, route_type, **kwargs):
         model = data.get('model', '')
-        if route_type == 'aresponses' and model == 'bedrock/gpt-6.1-sol':
-            data = copy.deepcopy(data)
-            data['store'] = False
-        eligible = model in ('claude/opus-5.5', 'local/qwen3.8-27b', 'vertex/gemini-4-argon') or model.startswith(('modal/', 'bedrock/'))
+        if route_type == 'aresponses':
+            store = self.configured_store(model)
+            if store is not None and data.get('store') != store:
+                data = copy.deepcopy(data)
+                data['store'] = store
+        # Subscription routes search natively; every configured route uses shared search.
+        eligible = bool(model) and not model.startswith(NATIVE_PREFIX) and model != NATIVE_REVIEW
         hosted = [t for t in data.get('tools', []) if t.get('type') in HOSTED]
         history = isinstance(data.get('input'), list) and any(i.get('type') == 'web_search_call' and i.get('id', '').startswith('ws_shared') for i in data['input'])
         if route_type != 'aresponses' or not eligible or not (hosted or history):

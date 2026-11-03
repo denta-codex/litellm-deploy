@@ -1,13 +1,13 @@
-- name: Explicitly configure the selected host model routes and picker
+- name: Refresh the subscription catalog and publish the configured models
   hosts: all
   gather_facts: true
   vars:
     source_root: "{{ playbook_dir }}/.."
     refresh_action: refresh
-    refresh_script: refresh_models.py
-    refresh_command: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/{{ refresh_script }}"]
+    refresh_command: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/refresh_models.py",
+                      --config, "{{ deploy_config_path }}"]
   pre_tasks:
-    - name: Validate the selected local host
+    - name: Load and validate the deployment configuration
       ansible.builtin.import_tasks: tasks/target.yml
       tags: [always]
   tasks:

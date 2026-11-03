@@ -241,7 +241,8 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_vertex_search_keeps_project_credentials_and_provider_on_followup(self):
         from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
         from litellm.llms.vertex_ai.vertex_llm_base import VertexBase
-        from vertex_google import PROJECT, SLUG, MODEL
+        PROJECT, MODEL = 'fixture-project', 'fixture-gemini'
+        SLUG = 'vertex/' + MODEL
         def upstream(request):
             body = json.loads(request.content)
             self.requests.append(body)

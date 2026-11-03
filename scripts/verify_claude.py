@@ -19,10 +19,10 @@ import httpx
 import tomlkit
 import yaml
 
-from configure_claude import MANIFEST, generate
+from deployment import proxy_key
+from refresh_models import configured_model
 
 ROOT = Path(__file__).resolve().parent.parent
-MODEL = 'claude/opus-5.5'
 
 
 class RPC:
@@ -96,6 +96,7 @@ async def stop(process):
 class Acceptance:
     def __init__(self, args, directory):
         self.args, self.directory = args, directory
+        self.model = args.model
         self.proxy = None
         self.logs = []
         self.passes = []
@@ -110,11 +111,17 @@ class Acceptance:
             self.args.report.write_text(json.dumps({'passed': self.passes, 'complete': False}, indent=2))
 
     async def start_proxy(self):
+        # The isolated proxy serves the configured Claude route plus one subscription
+        # model, so the switch-and-return check exercises a real second provider.
+        specs = [s for s in json.loads(self.args.models.read_text()) if s.get('name') == self.model]
+        if len(specs) != 1:
+            raise SystemExit('Configured models must contain exactly one entry named ' + self.model)
+        route, row, _ = configured_model(specs[0])
         existing = json.loads((Path.home() / '.config/litellm/codex-models.json').read_text())
-        existing['models'] = [m for m in existing['models'] if m['slug'] == 'chatgpt/gpt-6-astra']
-        config, catalog, _ = generate(json.loads(MANIFEST.read_text()), {'model_list': [
-            {'model_name': 'chatgpt/gpt-6-astra', 'model_info': {'mode': 'responses'},
-             'litellm_params': {'model': 'chatgpt/gpt-6-astra'}}]}, existing, '')
+        existing['models'] = [m for m in existing['models'] if m['slug'] == self.args.other_model] + [row]
+        config = {'model_list': [route, {'model_name': self.args.other_model, 'model_info': {'mode': 'responses'},
+                                         'litellm_params': {'model': self.args.other_model}}]}
+        catalog = existing
         config['general_settings'] = {'master_key': 'os.environ/CLAUDE_TEST_PROXY_KEY', 'disable_spend_logs': True}
         config['litellm_settings'] = {'turn_off_message_logging': True, 'num_retries': 0}
         path = self.directory / 'config.yaml'
@@ -140,7 +147,7 @@ class Acceptance:
         raise RuntimeError('Isolated proxy startup timed out')
 
     async def request(self, prompt, *, chat=None, stream=True, **extra):
-        payload = {'model': MODEL, 'input': prompt, 'stream': stream, **extra}
+        payload = {'model': self.model, 'input': prompt, 'stream': stream, **extra}
         headers = {'Authorization': 'Bearer ' + self.key, 'x-claude-chat-id': chat or secrets.token_hex(12)}
         async with httpx.AsyncClient(timeout=240) as client:
             response = await client.post(self.base + '/v1/responses', json=payload, headers=headers)
@@ -230,7 +237,7 @@ class Acceptance:
         work.mkdir(exist_ok=True)
         marker = 'CODEX_' + secrets.token_hex(12)
         (work / 'marker.txt').write_text(marker)
-        config = {'model': MODEL, 'model_provider': 'claude_acceptance', 'model_catalog_json': str(self.catalog),
+        config = {'model': self.model, 'model_provider': 'claude_acceptance', 'model_catalog_json': str(self.catalog),
             'model_reasoning_effort': 'low', 'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'disabled',
             'features': {'shell_snapshot': False, 'fast_mode': self.args.fast}, 'shell_environment_policy': {'exclude': ['CLAUDE_TEST_PROXY_KEY']},
             'model_providers': {'claude_acceptance': {'name': 'Claude acceptance', 'base_url': self.base + '/v1',
@@ -257,7 +264,7 @@ class Acceptance:
             await rpc.send({'method': 'initialized', 'params': {}})
             async def new_thread(sandbox='read-only'):
                 # Use the catalog's Claude instructions, as a real chat would.
-                result = await rpc.call('thread/start', {'model': MODEL, 'modelProvider': 'claude_acceptance', 'cwd': str(work),
+                result = await rpc.call('thread/start', {'model': self.model, 'modelProvider': 'claude_acceptance', 'cwd': str(work),
                     'approvalPolicy': 'never', 'sandbox': sandbox})
                 return result['thread']['id']
             if self.args.fast:
@@ -288,7 +295,7 @@ class Acceptance:
             self.passed('quote-heavy edit through apply_patch')
             reply, _ = await rpc.turn(thread, 'Repeat the marker without using tools.')
             assert marker in reply
-            fork = await rpc.call('thread/fork', {'threadId': thread, 'model': MODEL, 'modelProvider': 'claude_acceptance'})
+            fork = await rpc.call('thread/fork', {'threadId': thread, 'model': self.model, 'modelProvider': 'claude_acceptance'})
             reply, items = await rpc.turn(fork['thread']['id'], 'Repeat the earlier marker without tools.')
             assert marker in reply and not any(i['type'] == 'commandExecution' for i in items)
             self.passed('follow-up and real Codex fork')
@@ -306,11 +313,11 @@ class Acceptance:
             reply, _ = await rpc.turn(thread, 'Repeat the marker from the earlier command output without tools.')
             assert marker in reply
             self.passed('real Codex compaction and continuity')
-            reply, _ = await rpc.turn(thread, 'Repeat the earlier command marker without tools.', model='chatgpt/gpt-6-astra')
+            reply, _ = await rpc.turn(thread, 'Repeat the earlier command marker without tools.', model=self.args.other_model)
             assert marker in reply
-            reply, _ = await rpc.turn(thread, 'Repeat the earlier command marker without tools.', model=MODEL)
+            reply, _ = await rpc.turn(thread, 'Repeat the earlier command marker without tools.', model=self.model)
             assert marker in reply
-            self.passed('Claude to ChatGPT and back with retained history')
+            self.passed('Claude to another model and back with retained history')
             offset = len(rpc.events)
             turn = await rpc.call('turn/start', {'threadId': thread, 'input': [{'type': 'text', 'text': 'Run sleep 30 using the shell, with yield_time_ms 30000. Do not retry.'}], 'effort': 'low'})
             await rpc.until(lambda e: e.get('method') == 'item/started' and e.get('params', {}).get('item', {}).get('type') == 'commandExecution', offset)
@@ -382,8 +389,7 @@ class Acceptance:
         else:
             self.catalog = self.args.catalog
             if not self.key:
-                self.key = subprocess.check_output(['systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
-                    str(Path.home() / '.config/litellm/proxy-key.cred'), '-'], text=True).strip()
+                self.key = proxy_key()
         try:
             if not self.args.codex_only and not self.args.fast_only:
                 await self.api_checks()
@@ -399,6 +405,11 @@ class Acceptance:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--model', required=True, help='configured Claude model name')
+    parser.add_argument('--other-model', default='chatgpt/gpt-6-astra',
+                        help='model used for the switch-and-return continuity check')
+    parser.add_argument('--models', type=Path, default=Path.home() / '.config/litellm/models.json',
+                        help='configured models list used by --isolated')
     parser.add_argument('--isolated', action='store_true')
     parser.add_argument('--api-only', action='store_true')
     parser.add_argument('--codex-only', action='store_true')

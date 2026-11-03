@@ -1,12 +1,12 @@
-"""Recommended rows at the top of the stock Codex picker, followed by a blank separator.
+"""Blank separator below recommended rows in the stock Codex picker.
 
 Stock Codex sorts the picker by ascending catalog priority, and subscription
-ChatGPT rows start at 1. Recommended rows therefore use negative priorities, and
-one unrouted blank row sits between them and every other model.
+ChatGPT rows start at 1. A configured model is recommended by giving it a
+negative priority; one unrouted blank row then sits between those rows and
+every other model.
 """
 import copy
 
-RECOMMENDED = ('claude/opus-5.5', 'bedrock/gpt-6.1-sol', 'vertex/gemini-4-argon')
 SEPARATOR = 'separator'
 SEPARATOR_PRIORITY = -1
 
@@ -24,16 +24,10 @@ SEPARATOR_ROW = {
 }
 
 
-def priority(slug, default):
-    """Picker priority for a provider row: recommended order first, otherwise the provider default."""
-    if slug in RECOMMENDED:
-        return SEPARATOR_PRIORITY - len(RECOMMENDED) + RECOMMENDED.index(slug)
-    return default
-
-
 def with_separator(catalog):
     """Place the separator only while a recommended model is listed above it."""
     models = [m for m in catalog.get('models', []) if m.get('slug') != SEPARATOR]
-    if any(m.get('slug') in RECOMMENDED and m.get('visibility') == 'list' for m in models):
+    if any(isinstance(m.get('priority'), int) and m['priority'] < SEPARATOR_PRIORITY
+           and m.get('visibility') == 'list' for m in models):
         models.append(copy.deepcopy(SEPARATOR_ROW))
     return dict(catalog, models=models)

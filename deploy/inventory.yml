@@ -1,44 +1,7 @@
+# Deployment always runs locally on the machine being configured. Everything that
+# differs between machines lives in ~/.config/litellm-deploy/config.yml.
 all:
-  vars:
-    ansible_connection: local
-    ansible_python_interpreter: /usr/bin/python3
-    litellm_user: agent
-    litellm_model: chatgpt/gpt-6-astra
-    codex_version: 0.166.0
-    litellm_system_credential: /etc/credstore.encrypted/litellm-proxy-key
   hosts:
-    grace:
-      litellm_home: /home/agent
-      litellm_root: /home/agent/.local/share/litellm
-      litellm_config: /home/agent/.config/litellm
-      litellm_state: /home/agent/.local/state/litellm
-      codex_mise: /usr/bin/mise
-      litellm_credential_mode: user
-      compaction_fallback_enabled: true
-      litellm_modal_enabled: true
-      litellm_bedrock_enabled: true
-      litellm_vertex_enabled: true
-      litellm_vertex_credential: /etc/credstore.encrypted/litellm-vertex-ai
-      litellm_bedrock_credential: /etc/credstore.encrypted/litellm-bedrock-aws
-      litellm_modal_credential: /etc/credstore.encrypted/codex-gateway-modal
-      litellm_voice_enabled: true
-      litellm_claude_enabled: true
-      codex_forward_agent: true
-      codex_connection_mode: forwarder
-    love:
-      litellm_home: /mnt/HC_Volume_103914271/agent/home
-      litellm_root: /mnt/HC_Volume_103914271/agent/home/.local/share/litellm
-      litellm_config: /mnt/HC_Volume_103914271/agent/home/.config/litellm
-      litellm_state: /mnt/HC_Volume_103914271/agent/home/.local/state/litellm
-      codex_mise: /mnt/HC_Volume_103914271/agent/home/.local/bin/mise
-      litellm_credential_mode: system
-      compaction_fallback_enabled: true
-      litellm_modal_enabled: false
-      litellm_bedrock_enabled: true
-      litellm_vertex_enabled: true
-      litellm_vertex_credential: /etc/credstore.encrypted/litellm-vertex-ai
-      litellm_bedrock_credential: /etc/credstore.encrypted/litellm-bedrock-aws
-      litellm_voice_enabled: false
-      litellm_claude_enabled: false
-      codex_forward_agent: false
-      codex_connection_mode: ssh
+    localhost:
+      ansible_connection: local
+      ansible_python_interpreter: /usr/bin/python3

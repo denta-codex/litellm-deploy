@@ -6,7 +6,7 @@
 
 Connects only to the app-server endpoint. It never reads subscription or gateway
 credentials. See docs/VOICE.md for contract, acceptance, and client boundaries.
-Input/output are WAV files so the same harness runs on headless Grace or a laptop.
+Input/output are WAV files so the same harness runs on a headless server or a laptop.
 """
 import argparse
 import array
@@ -248,10 +248,12 @@ async def run(args):
 def main():
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--url', default='wss://grace.taila198f.ts.net/codex/rpc')
-    parser.add_argument('--credential', type=Path, default=Path('/home/agent/.local/share/remote-codex/connection-token.cred'))
+    endpoint = parser.add_mutually_exclusive_group(required=True)
+    endpoint.add_argument('--url',
+                        help='Remote app-server endpoint, for example wss://<machine>.<tailnet>.ts.net/codex/rpc')
+    parser.add_argument('--credential', type=Path, default=Path.home() / '.local/share/remote-codex/connection-token.cred')
     parser.add_argument('--token-env', help='Portable alternative: environment variable containing the app-server connection token')
-    parser.add_argument('--socket', type=Path, help='Diagnostic local Unix app-server socket instead of remote WSS')
+    endpoint.add_argument('--socket', type=Path, help='Diagnostic local Unix app-server socket instead of remote WSS')
     parser.add_argument('--voice-base', help='Diagnostic per-thread voice gateway override')
     parser.add_argument('--thread-id')
     parser.add_argument('--persist', action='store_true',

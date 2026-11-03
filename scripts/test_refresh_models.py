@@ -1,4 +1,4 @@
-"""Behavioral tests for discovery preservation and recoverable activation."""
+"""Behavioral tests for discovery, configured models, and recoverable activation."""
 import copy
 import json
 import os
@@ -10,7 +10,19 @@ import unittest
 from unittest.mock import patch
 
 import yaml
-from refresh_models import REVIEW_MODEL, Refresh, encode, generate
+import refresh_models
+from refresh_models import REVIEW_MODEL, Refresh, configured_model, configured_models, encode
+
+SPEC = {'name': 'modal/custom',
+        'litellm': {'model': 'openai/private', 'api_key': 'os.environ/MODAL_KEY'},
+        'codex': {'display_name': 'Custom', 'context_window': 1000,
+                  'supported_reasoning_levels': ['high'], 'default_reasoning_level': 'high'},
+        'verify': {'validators': [['verify_capabilities.py', '--model', '{model}', '--catalog', '{catalog}']]}}
+ROUTE, ROW, _ = configured_model(SPEC)
+
+
+def generate(source, config, catalog, selected, specs=(SPEC,)):
+    return refresh_models.generate(source, config, catalog, selected, specs)
 
 
 def model(slug, visibility='list'):
@@ -28,9 +40,9 @@ def upgrade(target):
 class DiscoveryTests(unittest.TestCase):
     def setUp(self):
         self.source = {'models': [model('astra'), model('sol'), model(REVIEW_MODEL, 'hide')]}
-        self.external = {'model_name': 'modal/custom', 'litellm_params': {'model': 'openai/private', 'api_key': 'os.environ/MODAL_KEY'}}
+        self.external = copy.deepcopy(ROUTE)
         self.config = {'model_list': [self.external], 'general_settings': {'master_key': 'os.environ/LITELLM_MASTER_KEY'}}
-        self.catalog = {'models': [model('modal/custom'), model('retired-native', 'hide')]}
+        self.catalog = {'models': [copy.deepcopy(ROW), model('retired-native', 'hide')]}
 
     def test_subscription_routes_metadata_and_external_preservation(self):
         config, catalog, summary = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
@@ -57,9 +69,11 @@ class DiscoveryTests(unittest.TestCase):
         config, normalized, summary = generate(source, self.config, catalog, 'chatgpt/astra')
         rows = {row['slug']: row for row in normalized['models']}
         for slug in ('astra', 'sol', REVIEW_MODEL, 'chatgpt/astra', 'chatgpt/sol',
-                     'modal/custom', 'retired-native'):
+                     'retired-native'):
             self.assertEqual(rows[slug]['available_access_programs'], {
                 'future_program': ['keep'], 'cyber': []})
+        # Configured rows are regenerated from configuration, not carried forward.
+        self.assertEqual(rows['modal/custom'], ROW)
         self.assertEqual(summary['compatibility_changed'], ['modal/custom', 'retired-native'])
         again_config, again_catalog, again = generate(source, config, normalized, 'chatgpt/astra')
         self.assertEqual((again_config, again_catalog), (config, normalized))
@@ -156,13 +170,83 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(diff['changed_fields']['chatgpt/sol'], ['context_window'])
 
 
+class ConfiguredModelTests(unittest.TestCase):
+    def setUp(self):
+        DiscoveryTests.setUp(self)
+
+    def test_route_is_litellm_config_verbatim_and_row_uses_stock_defaults(self):
+        spec = copy.deepcopy(SPEC)
+        spec['litellm'].update(api_base='https://example.invalid/v1', use_chat_completions_api=True)
+        spec['model_info'] = {'catalog_pricing': {'provider': 'zai', 'model': 'glm'}}
+        spec['codex'].update(priority=-3, input_modalities=['text', 'image'],
+                             supported_reasoning_levels=['low', {'effort': 'high', 'description': 'Deep'}])
+        route, row, verify = configured_model(spec)
+        self.assertEqual(route, {'model_name': 'modal/custom', 'litellm_params': spec['litellm'],
+                                 'model_info': {'catalog_pricing': {'provider': 'zai', 'model': 'glm'}, 'mode': 'chat'}})
+        self.assertEqual(row['description'], 'Custom')
+        self.assertEqual(row['max_context_window'], 1000)
+        self.assertEqual((row['priority'], row['tool_mode']), (-3, 'code_mode_only'))
+        self.assertEqual(row['supported_reasoning_levels'], [
+            {'effort': 'low', 'description': 'low'}, {'effort': 'high', 'description': 'Deep'}])
+        self.assertEqual(verify['timeout'], 600)
+
+    def test_instructions_file_is_read_from_scripts(self):
+        spec = copy.deepcopy(SPEC)
+        spec['codex']['base_instructions_file'] = 'claude-instructions.md'
+        _, row, _ = configured_model(spec)
+        self.assertEqual(row['base_instructions'], (Path(refresh_models.__file__).parent / 'claude-instructions.md').read_text())
+        self.assertNotIn('base_instructions_file', row)
+
+    def test_invalid_specs_are_rejected(self):
+        def variant(**changes):
+            spec = copy.deepcopy(SPEC)
+            for key, value in changes.items():
+                if value is None:
+                    spec.pop(key)
+                else:
+                    spec[key] = value
+            return spec
+        invalid = [
+            variant(name='chatgpt/sol'), variant(name='no-provider'), variant(litellm=None),
+            variant(codex={'display_name': 'x'}), variant(unknown=True),
+            variant(codex=dict(SPEC['codex'], default_reasoning_level='max')),
+            variant(codex=dict(SPEC['codex'], visibility='none')),
+            variant(codex=dict(SPEC['codex'], base_instructions_file='../secret')),
+            variant(verify={'validators': [['/bin/sh', '-c', 'x']]}),
+            variant(verify={'timeout': 0}),
+        ]
+        for spec in invalid:
+            with self.subTest(spec=spec), self.assertRaises(ValueError):
+                configured_model(spec)
+        with self.assertRaisesRegex(ValueError, 'unique'):
+            configured_models([SPEC, SPEC])
+
+    def test_removed_configuration_drops_route_and_row(self):
+        config, catalog, _ = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
+        new_config, new_catalog, summary = generate(self.source, config, catalog, 'chatgpt/astra', specs=())
+        self.assertNotIn('modal/custom', [r['model_name'] for r in new_config['model_list']])
+        self.assertNotIn('modal/custom', [r['slug'] for r in new_catalog['models']])
+        self.assertEqual(summary['removed'], ['modal/custom'])
+        with self.assertRaisesRegex(ValueError, 'no longer configured'):
+            generate(self.source, config, catalog, 'modal/custom', specs=())
+
+    def test_changed_configuration_requires_validation(self):
+        config, catalog, _ = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
+        spec = copy.deepcopy(SPEC)
+        spec['litellm']['timeout'] = 30
+        _, _, summary = generate(self.source, config, catalog, 'chatgpt/astra', specs=(spec,))
+        self.assertEqual((summary['changed'], summary['test_models']), (['modal/custom'], ['modal/custom']))
+        added = dict(copy.deepcopy(SPEC), name='bedrock/other')
+        _, _, summary = generate(self.source, config, catalog, 'chatgpt/astra', specs=(SPEC, added))
+        self.assertEqual((summary['added'], summary['test_models']), (['bedrock/other'], ['bedrock/other']))
+
+
 class UpgradeTests(unittest.TestCase):
     def setUp(self):
         DiscoveryTests.setUp(self)
         self.source = {'models': [model('gpt-5.5'), model('gpt-5.6-sol'), model(REVIEW_MODEL, 'hide')]}
         self.source['models'][0]['upgrade'] = upgrade('gpt-5.6-sol')
         self.source['models'][1]['upgrade'] = None
-        self.catalog['models'][0]['upgrade'] = upgrade('modal/replacement')
         self.catalog['models'][1]['upgrade'] = upgrade('retired-replacement')
         self.catalog['future_setting'] = {'keep': True}
 
@@ -295,8 +379,12 @@ class ActivationTests(unittest.TestCase):
         self.refresh.paths['config'].parent.mkdir(parents=True)
         self.refresh.paths['config'].write_text(yaml.safe_dump(self.config))
         self.refresh.paths['catalog'].write_text(encode(self.catalog))
+        self.stage([SPEC])
         self.snapshot = {'version': 1, 'codex_version': 'test', 'catalog': self.source}
         self.originals = self.refresh.originals()
+
+    def stage(self, specs):
+        self.refresh.models = specs
 
     def prepare(self):
         candidate = self.refresh.candidate(self.snapshot)
@@ -334,11 +422,45 @@ class ActivationTests(unittest.TestCase):
             self.refresh.validate()
         self.refresh.finish()
         self.assertFalse(self.refresh.transaction.exists())
+        self.assertEqual(json.loads(self.refresh.paths['models'].read_text()), [SPEC])
         self.assertTrue(self.refresh.check_snapshot()['snapshot_present'])
         with patch.object(self.refresh, 'discover', return_value=self.snapshot), patch('refresh_models.subprocess.run') as run:
             result = self.refresh.prepare()
         self.assertFalse(result['any_changes'])
         run.assert_not_called()
+
+    def test_configuration_edit_is_drift_until_refreshed_and_rollback_restores_models(self):
+        self.install_inventory_baseline()
+        spec = copy.deepcopy(SPEC)
+        spec['codex']['display_name'] = 'Renamed'
+        self.stage([spec])
+        with self.assertRaisesRegex(ValueError, 'differ from saved discovery'):
+            self.refresh.check_snapshot()
+        # Verification-only edits are drift too: the installed record must match configuration.
+        verify_only = copy.deepcopy(SPEC)
+        verify_only['verify']['timeout'] = 30
+        self.stage([verify_only])
+        with self.assertRaisesRegex(ValueError, 'differ from saved discovery'):
+            self.refresh.check_snapshot()
+        self.stage([spec])
+        summary = self.prepare()
+        self.assertEqual(summary['test_models'], ['modal/custom'])
+        self.assertTrue(summary['models_changed'])
+        self.refresh.activate()
+        commands = []
+        def probe(command, **kwargs):
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 1, '', 'injected failure')
+        with patch('refresh_models.subprocess.run', side_effect=probe):
+            with self.assertRaisesRegex(ValueError, 'modal/custom: validation failed'):
+                self.refresh.validate()
+        # Configured validators run first with placeholders resolved.
+        self.assertTrue(commands[0][-5].endswith('verify_capabilities.py'))
+        self.assertEqual(commands[0][-4:], ['--model', 'modal/custom', '--catalog',
+                                            str(self.refresh.transaction / 'catalog.json')])
+        self.refresh.rollback()
+        self.assertEqual(self.refresh.originals(), self.originals)
+        self.assertEqual(json.loads(self.refresh.paths['models'].read_text()), [SPEC])
 
     def install_inventory_baseline(self):
         candidate = self.refresh.candidate(self.snapshot)

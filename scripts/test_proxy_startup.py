@@ -101,7 +101,7 @@ class Backend(BaseHTTPRequestHandler):
 
 
 class StartupTests(unittest.TestCase):
-    basic_gateway = False
+    voice = True
     def test_voice_route_is_registered_by_production_startup(self):
         # A healthy text proxy can still have lost its voice startup hook.
         # GET never creates a call; a registered POST route returns 405, not 404.
@@ -122,8 +122,10 @@ class StartupTests(unittest.TestCase):
         cls.addClassCleanup(cls.backend.server_close)
         cls.addClassCleanup(cls.backend.shutdown)
         (root / 'litellm-proxy-key').write_text('sk-isolated-proxy-key')
-        if not cls.basic_gateway:
-            (root / 'modal-inference-token').write_text('WK_SECRET=wk-isolated\nWS_SECRET=ws-isolated\n')
+        (root / 'modal-inference-token').write_text('WK_SECRET=wk-isolated\nWS_SECRET=ws-isolated\n')
+        (root / 'credentials.json').write_text(json.dumps({
+            'litellm-proxy-key': {'env': 'LITELLM_MASTER_KEY'},
+            'modal-inference-token': {'modal_token': 'MODAL_API_KEY'}}))
         (root / 'auth.json').write_text(json.dumps({
             'access_token': 'isolated-backend-token', 'account_id': 'isolated-account',
             'expires_at': time.time() + 3600,
@@ -149,8 +151,7 @@ class StartupTests(unittest.TestCase):
                    LITELLM_LOCAL_MODEL_COST_MAP='True', LITELLM_TELEMETRY='False',
                    COMPACTION_FALLBACK_ENABLED='true', COMPACTION_MODEL_CATALOG=str(cls.catalog),
                    UV_OFFLINE='1', UV_PYTHON_DOWNLOADS='never', UV_CACHE_DIR=str(root / 'uv-cache'))
-        env.update(LITELLM_VOICE_ENABLED=str(not cls.basic_gateway).lower(),
-                   LITELLM_CLAUDE_ENABLED=str(not cls.basic_gateway).lower())
+        env.update(LITELLM_VOICE_ENABLED=str(cls.voice).lower())
         cls.log = (root / 'server.log').open('w+')
         cls.addClassCleanup(cls.log.close)
         cls.process = subprocess.Popen([
@@ -367,8 +368,8 @@ stream_max_retries = 0
             self.assertIn('COMPACTION_CONTEXT_OK', json.dumps(checkpoints))
 
 
-class LoveStartupTests(StartupTests):
-    basic_gateway = True
+class VoiceDisabledStartupTests(StartupTests):
+    voice = False
 
     def test_voice_route_is_registered_by_production_startup(self):
         with self.assertRaises(urllib.error.HTTPError) as caught:

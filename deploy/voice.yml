@@ -1,21 +1,18 @@
-- name: Deploy or recover subscription voice on Grace
+- name: Deploy or recover subscription voice
   hosts: all
   gather_facts: true
   vars:
     voice_action: preview
     source_root: "{{ playbook_dir }}/.."
   pre_tasks:
-    - name: Validate the selected local host
+    - name: Load and validate the deployment configuration
       ansible.builtin.import_tasks: tasks/target.yml
       tags: [always]
-      vars:
-        supported_hosts: [grace]
   tasks:
-    - name: Validate destination and action
+    - name: Validate configuration and action
       ansible.builtin.assert:
         that:
-          - ansible_facts.hostname == 'grace'
-          - ansible_facts.user_id == litellm_user
+          - voice_action == 'rollback' or (litellm_voice_enabled | bool)
           - voice_action in ['preview', 'prepare', 'verify', 'rollback', 'finish', 'waive']
           - voice_action != 'finish' or (voice_desktop_validated | default(false) | bool)
           - voice_action != 'waive' or (voice_waiver_reason | default('') | trim | length > 0)

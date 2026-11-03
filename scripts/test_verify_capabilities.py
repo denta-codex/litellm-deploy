@@ -7,14 +7,25 @@ import unittest
 from unittest.mock import patch
 import zlib
 
-from verify_bedrock import check, image_fixture
+from verify_capabilities import check, image_fixture, row_for
 
 
-class BedrockImageAcceptanceTests(unittest.TestCase):
+class ImageAcceptanceTests(unittest.TestCase):
     def check_stream(self, events, expected='blue'):
         lines = b''.join(b'data: ' + json.dumps(e).encode() + b'\n\n' for e in events)
-        with patch('verify_bedrock.urllib.request.urlopen', return_value=io.BytesIO(lines)):
+        with patch('verify_capabilities.urllib.request.urlopen', return_value=io.BytesIO(lines)):
             check('http://127.0.0.1:4000', 'fixture', {'stream': True}, expected, exact=True)
+
+    def test_row_lookup_requires_exactly_one_configured_slug(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            catalog = Path(tmp, 'catalog.json')
+            catalog.write_text(json.dumps({'models': [{'slug': 'a/x'}, {'slug': 'b/y'}, {'slug': 'b/y'}]}))
+            self.assertEqual(row_for(catalog, 'a/x'), {'slug': 'a/x'})
+            for missing in ('c/z', 'b/y'):
+                with self.subTest(missing=missing), self.assertRaises(SystemExit):
+                    row_for(catalog, missing)
 
     def test_correct_deltas_and_completed_are_required(self):
         self.check_stream([{'type': 'response.output_text.delta', 'delta': 'Blue'},

@@ -9,12 +9,13 @@ import tempfile
 import unittest
 
 from catalog_enrichment import enrich_catalog
-from recommended import RECOMMENDED, SEPARATOR, priority, with_separator
-from test_refresh_models import REVIEW_MODEL, encode, generate, model
+from recommended import SEPARATOR, with_separator
+from refresh_models import REVIEW_MODEL, encode, generate
+from test_refresh_models import model
 
 INSTALLS = Path('/home/agent/.local/share/mise/installs/codex')
 PINNED_CODEX = INSTALLS / '0.159.2/bin/codex'
-# Love keeps the global pin; Grace runs the newer pin from the inventory.
+# Both pins in service: the global pin and the newer configured pin.
 PINNED_VERSIONS = ('0.159.2', '0.166.0')
 
 
@@ -88,7 +89,7 @@ class StockCatalogTests(unittest.IsolatedAsyncioTestCase):
         config, catalog, _ = generate(source, {'model_list': []}, {'models': []}, 'chatgpt/fixture')
         for row in catalog['models']:
             stock_fields(row, 1)
-        enriched, _ = enrich_catalog(catalog, config, {'models': []}, {'openai': {'fixture': [{
+        enriched, _ = enrich_catalog(catalog, config, {'openai': {'fixture': [{
             'tier': 'standard', 'context': 'short', 'input_per_million': 2, 'output_per_million': 10}]},
             'models_dev': {}}, '2026-10-05T00:00:00Z')
         with tempfile.TemporaryDirectory() as temporary:
@@ -116,11 +117,12 @@ class StockCatalogTests(unittest.IsolatedAsyncioTestCase):
         for rank, row in enumerate(catalog['models'], 1):
             stock_fields(row, rank)
         # Provider rows arrive in arbitrary file order; only priority orders the picker.
-        for slug, default in (('vertex/gemini-4-argon', 86), ('bedrock/opus-5.5', 85),
-                              ('claude/opus-5.5', 80), ('bedrock/gpt-6.1-sol', 85)):
-            catalog['models'].append(stock_fields(model(slug), priority(slug, default)))
+        recommended = ('fixture/first', 'fixture/second', 'fixture/third')
+        for slug, rank in (('fixture/third', -2), ('fixture/later', 85),
+                           ('fixture/first', -4), ('fixture/second', -3)):
+            catalog['models'].append(stock_fields(model(slug), rank))
         catalog = with_separator(catalog)
-        enriched, _ = enrich_catalog(catalog, config, {'models': []}, {'openai': {}, 'models_dev': {}},
+        enriched, _ = enrich_catalog(catalog, config, {'openai': {}, 'models_dev': {}},
                                      '2026-10-05T00:00:00Z')
         versions = [v for v in PINNED_VERSIONS if (INSTALLS / v / 'bin/codex').is_file()]
         with tempfile.TemporaryDirectory() as temporary:
@@ -132,9 +134,9 @@ class StockCatalogTests(unittest.IsolatedAsyncioTestCase):
                     path.write_text(encode(enriched))
                     rows = await self.stock_reads(home, path, INSTALLS / version / 'bin/codex')
                     self.assertEqual([r['model'] for r in rows],
-                                     [*RECOMMENDED, SEPARATOR, 'chatgpt/fixture', 'chatgpt/fixture-two',
-                                      'bedrock/opus-5.5'])
-                    self.assertEqual(rows[len(RECOMMENDED)]['displayName'], '')
+                                     [*recommended, SEPARATOR, 'chatgpt/fixture', 'chatgpt/fixture-two',
+                                      'fixture/later'])
+                    self.assertEqual(rows[len(recommended)]['displayName'], '')
 
 
 if __name__ == '__main__':

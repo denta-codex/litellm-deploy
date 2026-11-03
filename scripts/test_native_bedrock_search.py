@@ -50,7 +50,7 @@ class NativeBedrockSearchTests(unittest.IsolatedAsyncioTestCase):
                                'store': False}}], num_retries=0)
         async def dispatch(data, route_type, **kwargs):
             return self.router.aresponses(**data)
-        self.bridge = SearchResponses(dispatch, self.interceptor, self.backend, SearchJournal(self.temporary.name))
+        self.bridge = SearchResponses(dispatch, self.interceptor, self.backend, SearchJournal(self.temporary.name), self.router)
         self.token = REQUEST.set({'caller': 'caller-one', 'headers': {}, 'request': {}})
 
     async def asyncTearDown(self):
@@ -123,7 +123,7 @@ class NativeBedrockSearchTests(unittest.IsolatedAsyncioTestCase):
         async def dispatch(data, route_type, **kwargs):
             captured.append(data)
             return 'direct'
-        bridge = SearchResponses(dispatch, self.interceptor, self.backend, self.bridge.journal)
+        bridge = SearchResponses(dispatch, self.interceptor, self.backend, self.bridge.journal, self.router)
         self.assertEqual(await bridge.route(data=data, route_type='aresponses'), 'direct')
         self.assertFalse(captured[0]['store'])
         self.assertTrue(data['store'])

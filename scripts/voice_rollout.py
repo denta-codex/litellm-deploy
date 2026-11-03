@@ -64,7 +64,7 @@ class Rollout:
         return {'text':path.read_text(), 'mode':path.stat().st_mode & 0o777} if path.exists() else None
 
     def prepare(self, commit='test'):
-        for name in ('model-refresh', 'codex-runtime.json', 'cutover.json'):
+        for name in ('model-refresh', 'codex-runtime.json', 'runtime-upgrade.json'):
             if (self.state / name).exists():
                 raise RuntimeError('Finish or recover the existing deployment transaction first')
         if self.journal.exists():

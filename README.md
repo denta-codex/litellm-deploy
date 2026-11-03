@@ -1,311 +1,204 @@
-# Grace and Love LiteLLM deployment
+# LiteLLM deployment for stock Codex
 
 > **Personal project:** This is my personal setup. I'm sharing the source in the
 > hope that it benefits others. I am not accepting outside pull requests at this time.
 
-LiteLLM 1.106.5 with a small repository-owned ChatGPT request customization,
-uv, and systemd on Grace, for stock Codex through a named
-`litellm` Responses provider. Default model: `chatgpt/gpt-6-astra`. Discover subscription models with
-the explicit refresh command below. This is a private deployment with explicit, local-per-host operations on Grace and Love.
+Pinned LiteLLM with a small repository-owned ChatGPT request customization, uv,
+and systemd, serving stock Codex through a named `litellm` Responses provider.
+The ChatGPT subscription catalog is discovered by an explicit refresh; every other
+model is ordinary LiteLLM configuration.
 
-## Host selection and Love's first deployment
+## How a machine is configured
 
-Run Ansible **locally as `agent` on the selected machine**, from a clean committed
-checkout. Every entrypoint requires exactly `--limit grace` or `--limit love` and
-checks the real hostname, account, home, and application paths before changes.
-Omitting the limit, selecting both hosts, or selecting Love while running on Grace
-fails. Tags do not bypass these checks. No remote-controller deployment is provided.
+The repository is identical on every machine. Everything that differs between
+machines lives in one file outside the repository:
 
-Grace uses `/home/agent`. Love uses
-`/mnt/HC_Volume_103914271/agent/home`; its application and Codex paths remain on that
-mounted volume. Both hosts run an independent loopback gateway on `127.0.0.1:4000`.
-
-| Workflow | Grace | Love in this release |
-| --- | --- | --- |
-| Basic LiteLLM gateway; ChatGPT catalog, search, review | Supported | Supported with its own LiteLLM login |
-| Pinned Codex installation and launcher/service management | Supported | Supported; install can stage without switching the server |
-| Provider switch and its config recovery (`cutover.yml`) | Supported | Supported; no legacy gateway cleanup |
-| LiteLLM runtime recovery | Supported | Supported, including failed first installation |
-| GPU runtime/model (`local-runtime.yml`, `local.yml`) | Supported | Excluded: Love has no GPU |
-| Browser MCP package/skill/registration (`browser.yml`) | Supported | Follow-up |
-| Voice prepare/acceptance/recovery (`voice.yml`) | Supported | Follow-up; adapter disabled |
-| Modal (`modal.yml`) | Supported | Follow-up; credential not required |
-| AWS/Bedrock (`bedrock-runtime.yml`, `bedrock.yml`) | Supported | Supported with host-encrypted credentials |
-| Claude subscription (`claude.yml`) | Supported | Follow-up; adapter disabled |
-| Google Vertex (`vertex.yml`) | Supported | Supported with host-encrypted credentials |
-| Remove Grace's original `codex-gateway` (`finalize.yml`) | Supported | Unsupported; do not run on Love |
-
-The remaining deferred activation playbooks reject Love explicitly before mutation.
-Ordinary gateway deployment preserves existing provider routes; cloud activation
-publishes only after explicit capability checks.
-
-### Prerequisites and preparation
-
-Use each host's existing Mise installation and this repository's pinned Ansible
-and uv. Application Python must be 3.14; the inventory's `/usr/bin/python3` is only
-Ansible's target interpreter. The deployment checks Python availability before
-writing application files and disables implicit Python downloads. On Love,
-prepare the missing tools through existing Mise/uv (no OS upgrade, system Python
-replacement, or shell-startup edits):
-
-```sh
-mise trust
-mise install
-mise exec -- uv python install 3.14
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit love deploy/codex-runtime.yml -e codex_runtime_action=install
+```text
+~/.config/litellm-deploy/config.yml
 ```
 
-The `install` action adds the exact Codex version alongside the existing one; it
-leaves login, config, launchers, and the running server unchanged. Mise's global
-Codex selection is not changed. Installed gateway settings record the selected
-host and resolved tool paths without secrets.
+Start from [`deploy/config.example.yml`](deploy/config.example.yml). It holds the
+account and home directory, the mise binary, the pinned Codex version, the default
+model, the proxy-credential mode, a few switches (`forward_agent`,
+`compaction_fallback`, `voice`, `local_inference`, `browser`), the encrypted
+provider credentials to load, and the `models:` list. Unknown keys are rejected.
+Ansible reads it by default; pass `-e config=PATH` to use another file. The
+scripts take `--config PATH`.
 
-Love uses only the system-encrypted proxy credential, loaded by the systemd
-service. Validation commands decrypt it through noninteractive sudo into process
-memory. Its older systemd needs no user-scoped credential support. Grace retains
-its existing system/user credential pair. Never copy encrypted host credentials
-or saved ChatGPT tokens between machines.
+Run every playbook **locally, as the configured user, on the machine being
+configured**, from a clean committed checkout. The inventory is `localhost` only.
+Each playbook first checks that the running account and home match the
+configuration. There is no remote-controller deployment.
 
-### Install before the later cutover
+Every machine runs the same pieces:
 
-```sh
-mise exec -- uv sync --locked
-mise exec -- uv run --no-sync scripts/runtime_rollout.py prepare --host love --source "$PWD"
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit love deploy/deploy.yml --syntax-check
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit love deploy/deploy.yml --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit love deploy/deploy.yml
-mise exec -- uv run --no-sync scripts/runtime_rollout.py finish --host love --source "$PWD"
-```
+- the loopback LiteLLM gateway on `127.0.0.1:4000`;
+- the pinned Codex app server;
+- the Remote Codex forwarder, whose connection checks the runtime gates require.
+  Stock SSH clients are checked as well.
 
-Check mode cannot sync an absent environment or provision credentials, so a fresh
-host preview covers paths/templates and prerequisites rather than live readiness.
-The base service can be installed without a ChatGPT login; model discovery and
-inference require Love's own explicit authentication. Use the existing login
-procedure below with Love's home and tool paths. Do not change the shared native
-Codex login as part of gateway installation.
+Paths:
 
-Prepare recovery before both first installation and upgrades, as shown above,
-and finish after service acceptance. On failure, run
-`mise exec -- uv run --no-sync scripts/runtime_rollout.py rollback --host love --source "$PWD"`. Its
-rollback restores only changed application/service files and re-syncs the prior
-lock. For a failed first installation it stops/disables the new service, removes
-created managed files and the new environment, and does not restart a nonexistent
-old gateway. Encrypted credentials remain for retry. Recovery state is removed on
-successful finish or rollback; concurrent edits stop recovery instead of being
-overwritten.
+- application files: `~/.local/share/litellm`;
+- generated configuration: `~/.config/litellm`;
+- mutable state: `~/.local/state/litellm`;
+- the root-owned unit: `/etc/systemd/system/litellm.service`.
 
-### Deliberate Codex cutover
+The proxy runs from a locked uv environment with no runtime dependency downloads.
+No database or Redis server is configured.
 
-Keep Love's existing native login until its separately scheduled account rotation.
-First authenticate LiteLLM explicitly, refresh the subscription catalog with
-`refresh-models.yml --limit love`, and validate the gateway using the pinned binary
-in disposable Codex homes. No saved tokens are copied from Grace.
+### Providers are LiteLLM configuration
 
-Grace's forwarder transport requires
-`~/.local/libexec/remote-codex-checks/candidate-check.py` and `connection-check.py`.
-Love uses stock Codex over SSH. Its repository-owned connection check runs two
-proxy clients against the same home, reads shared projects/history, and tests an
-isolated candidate restart. It does not require Grace's forwarder helpers.
+Modal, Bedrock, Vertex, Claude, and local models are not deployment features. Each
+is one `models:` entry whose `litellm:` block is passed to LiteLLM unchanged as
+`litellm_params`, plus whatever credential that provider needs. Each entry has:
 
-After gateway validation, schedule the brief server interruption:
-
-Before changing the provider, run the source script
-scripts/verify_codex_connection.py baseline with --home set to Love's home and
---codex-binary set to the pinned binary. Invoke it with managed uv run --no-project.
-It stores only hashes of native authentication, project/thread IDs, and saved
-session files in ~/.local/state/litellm/codex-connection-baseline.json. Remove that
-baseline after successful runtime and config acceptance, or verified recovery.
-The check hashes decompressed content when pinned Codex compresses older rollouts,
-so its native storage migration does not invalidate history verification.
-
-1. Run `cutover.yml --limit love` to validate and prepare only the provider config.
-2. Run `codex-runtime.yml --limit love -e codex_runtime_action=apply` to stage the
-   pinned launcher and service. It does not restart the running server.
-3. Restart Love through its owning desktop, then run runtime `verify` and `finish`
-   or use a direct systemd restart. Love's finish action verifies the actual
-   live server and SSH proxy clients automatically; desktop UI acceptance can
-   follow separately. Grace still requires its desktop validation flag.
-4. Finish the config transaction with `cutover.yml --limit love` using
-   `-e cutover_action=finish`. Love verifies the live server and both proxy
-   clients before finishing. Never use
-   `finalize.yml` on Love.
-
-If acceptance fails, roll back the runtime transaction, then the config transaction,
-then restart the service. Runtime rollback restores the prior
-launcher/service; config rollback restores the prior config only if no concurrent
-edit has occurred. Native authentication, projects, history, websites, and the
-separate tailnet workflow remain outside these transactions.
-
-## Deploy on Grace
-
-Use a clean committed checkout. Python 3.14 and uv use Grace's existing toolchain.
-The repository's `.mise.toml` selects Grace's already-installed Ansible and uv.
-Trust that repo-local file with `mise trust` once after reviewing a new checkout;
-no additional toolchain installation is needed on Grace.
-
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --syntax-check
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
-```
-
-The proxy listens on `127.0.0.1:4000`. It runs with a locked uv environment and
-no runtime dependency downloads. No database or Redis server is configured;
-stock upstream may include their client libraries among its dependencies.
-No virtual-key administration or installed dependency source edits.
-Codex uses a locally discovered model catalog to enable hosted Responses search;
-see the compatibility note below.
-Application files live under `~/.local/share/litellm`, configuration under
-`~/.config/litellm`, and mutable state under `~/.local/state/litellm`.
-The root-owned unit is `/etc/systemd/system/litellm.service`.
-
-### Subscription voice
-
-The repository includes a narrow stock-Codex WebRTC signaling/control adapter
-inside LiteLLM. Initial activation uses `deploy/voice.yml`, with targeted recovery
-and actual desktop acceptance before finalization. Client audio travels directly
-over WebRTC; Grace does not run an audio bridge. See [the voice handoff and
-replacement guide](docs/VOICE.md) for the pinned contract, reference client,
-verification, rollback, and migration to future upstream LiteLLM support.
-
-### Browser capability
-
-The `browser/` package supplies a conversation-scoped stdio MCP wrapper around
-Playwright MCP 0.0.83, plus a progressively loaded `browser` skill. It connects
-directly to stock Codex; LiteLLM still carries only model traffic. Grace's existing
-code-mode host keeps browser tool schemas out of initial model context and exposes
-them through `ALL_TOOLS` when requested. A lightweight MCP process can initialize
-for discovery; Chromium starts only on a browser operation. There is no desktop,
-Steel, remote browser account, live viewer, or Android update dependency.
-
-Hosted search remains the default for research. Website interaction uses browser
-tools, and full skill instructions load only when selected. Screenshots are MCP
-image content for the agent; code-mode callers must forward them with `image()`.
-The API-based `defer_loading` flag is not added to Codex configuration: acceptance
-verifies the installed code-mode discovery behavior on the real LiteLLM route.
-
-`browser_session` accepts `status`, `open`, or `close`. Default browsing is isolated
-and in memory. Explicit `open` with `mode: "saved"` and a profile name uses persistent
-website storage. Profile names contain 1–64 lowercase letters, digits, underscores,
-or hyphens, starting with a letter or digit. A saved profile is exclusively locked
-to one conversation until close or idle expiry. Profiles do not import personal
-browser logins; human takeover is not implemented. No arbitrary Node-code execution
-tool is exposed. Browser page evaluation is available; it is not a host shell.
-
-Browsers close after 15 idle minutes. Tabs and isolated cookies are then gone;
-saved profile storage remains. Profile changes and restart recovery explicitly
-invalidate prior tab/element references. Uncertain actions are never automatically
-replayed. Automatic screenshots, snapshots, and downloads live in temporary session
-directories: copy deliverables to the authorized workspace before closing. Named
-profiles live under `~/.local/state/codex-browser/profiles/` with owner-only access.
-Browser subprocesses do not inherit model-provider credentials; operational logs
-do not record page contents or tool payloads.
-
-Use Grace's managed Node 26.8.1, Chromium, and Ansible. No toolchain installer is
-run. The separate Ansible workflow defaults to preview:
-
-```sh
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=stage --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=stage
-```
-
-Stage installs a content-addressed release under `~/.local/share/codex-browser/`,
-runs its disposable browser fixtures, and marks it ready. Repeating stage for the
-same sources does not rebuild or restart anything. It does not register the skill
-or MCP. Failed staging leaves that one release directory for diagnosis/retry;
-remove it if abandoning the attempt. There are no whole-home/config backups.
-
-After isolated acceptance passes, prepare the registration without interrupting
-active conversations. Prepare selects the release, registers the skill and MCP,
-and reloads systemd configuration, but leaves the running app-server untouched:
-
-```sh
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=prepare --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=prepare
-```
-
-When ready, restart with `sudo systemctl restart codex-app-server.service`, or use
-the activate action below. **Activation and rollback can restart the live
-app-server.** Activation also performs preparation if it was not done separately:
-
-```sh
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=activate --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=activate
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/browser.yml -e codex_browser_action=verify
-```
-
-Activation registers the skill and adds `40-browser.conf` to the systemd app-server
-drop-ins; the base runtime unit and user-managed `~/.codex/config.toml` are unchanged.
-Repeated stage or prepare actions do not restart. Activate explicitly restarts,
-including after preparation. Verify runs the
-active release's browser fixture suite; the separate model-path test below verifies
-discovery, image understanding, and continuation using an isolated app-server.
-
-`-e codex_browser_action=rollback` restores the previous browser release, or removes
-the registration on first-install rollback. Saved profiles are retained. After
-successful adoption, `-e codex_browser_action=finish -e codex_browser_validated=true`
-removes the superseded release and rollback pointer. Other unused staged releases
-can be removed once no current/previous pointer references them.
-
-Development and acceptance:
-
-```sh
-npm --prefix browser ci --ignore-scripts --no-audit --no-fund
-npm --prefix browser test
-node browser/scripts/verify-codex.mjs
-```
-
-The model-path check uses the existing encrypted proxy credential in memory and
-the configured `chatgpt/gpt-6-astra` route. It keeps only request-shape booleans,
-not transcripts or credentials, and removes its isolated Codex home afterward.
-`BROWSER_TEST_MODEL` and `BROWSER_TEST_CODEX` select another installed model/binary
-for compatibility validation. It does not alter or restart the live app-server.
-
-### ChatGPT Responses customization
-
-`scripts/chatgpt_responses.py` subclasses the pinned upstream adapter and changes
-only request instructions and field preservation. Explicit client instructions,
-including an empty string, survive unchanged; absent instructions use upstream's
-fallback. It restores `text` (`format` and `verbosity`), `parallel_tool_calls`,
-`prompt_cache_key`, and `service_tier` after upstream transformation. Authentication, token refresh,
-headers, HTTP transport, streaming, response parsing, and errors remain upstream.
-Upstream still forces `store=false`, streaming, and encrypted reasoning inclusion.
-
-`scripts/start-litellm` runs `scripts/serve.py` through the existing locked uv
-environment. Before invoking the upstream CLI, it replaces the
-`litellm.ChatGPTResponsesAPIConfig` export used by `ProviderConfigManager`.
-The server runs in the same process with one worker; reload and alternate worker
-launchers are not exposed. Running the stock `litellm` command directly bypasses
-this customization. Ansible installs these three runtime files and treats changes
-to them as restart-requiring; utility-only updates still do not restart inference.
-The launcher's optional fourth argument selects a port for isolated tests; the
-systemd invocation continues to use port 4000.
-
-The override fails startup unless LiteLLM is exactly 1.102.1. Any upstream upgrade
-must revalidate dispatch, transformation, and launcher tests, then revisit or
-remove the override. There is no copied adapter or separate deployed service.
-
-Isolated live subscription probes on September 27, 2026 used this checkout's
-launcher with an access-only snapshot of the existing login, no refresh token,
-and no live installation/configuration changes. Additional format/cache controls
-called the backend directly with the same transformer and upstream header helper,
-reading the existing access token without invoking login or refresh. Observations:
-
-| Field | Subscription-backend evidence and limits |
+| Key | Purpose |
 | --- | --- |
-| `text.format: json_schema` | Both `gpt-6-astra` and `codex-auto-review` returned the schema-required enum despite conflicting non-JSON instructions. Both rejected invalid schemas with HTTP 400 / `invalid_json_schema`. This tests schema processing, beyond merely prompting for JSON; it is not an exhaustive schema-keyword guarantee. |
-| `text.format: text` | Accepted on `gpt-6-astra`. |
-| `text.format: json_object` | Accepted on `gpt-6-astra` when input explicitly mentioned JSON; input without that keyword was rejected. JSON-object mode is not schema enforcement. |
-| `text.verbosity` | `low` was accepted and echoed; an invalid value was rejected, listing `low`, `medium`, and `high`. Output-length effects were not measured. |
-| `parallel_tool_calls` | `false` and `true` were echoed and produced one and two calls respectively when asked for two tools. Streamed tool-result continuation passed. |
-| `prompt_cache_key` | Preserved on the outgoing wire, but the backend ignored the body value, even an invalid object. A supplied `session_id` header became the response cache key; without it the backend generated a key. Body-key control and cache-hit benefits are not supported by this evidence. Upstream session headers are unchanged. |
+| `name` | The route and the Codex slug, as `provider/model`. `chatgpt/` is reserved for the discovered subscription catalog. |
+| `litellm` | LiteLLM `litellm_params`, exactly as LiteLLM documents them. Use `os.environ/VAR` for secrets. |
+| `model_info` | Optional LiteLLM `model_info`. `catalog_pricing` selects the price row shown in Codex. |
+| `codex` | Codex catalog fields. `display_name`, `context_window`, `supported_reasoning_levels`, and `default_reasoning_level` are required. |
+| `verify` | Optional `{args, validators, timeout}` used before the model is published. Validators are scripts or commands with `{model}` and `{catalog}` placeholders. |
 
-These are account/model-specific observations, not guarantees for every model.
-The reserved reviewer also completed the existing probe's streaming JSON payload.
-That probe alone does not establish schema enforcement or Codex approval decisions.
+To add, change, or remove a model:
 
-Complete a separate ChatGPT device login using the same subscription account:
+1. Edit `models:`.
+2. If the model needs a new credential, add it under `credentials:` and rerun
+   `deploy.yml` so the service loads it.
+3. Run `refresh-models.yml`.
+
+Refresh validates new and changed entries before publishing them.
+
+### Credentials
+
+The gateway key (`litellm-proxy-key`) is always loaded. Each additional
+`credentials:` entry names a systemd-encrypted file, which must be root-owned with
+mode 0600. Create one without writing plaintext to disk, for example:
+
+```sh
+read -rs SECRET && printf %s "$SECRET" | \
+  sudo systemd-creds encrypt --name=modal-inference-token - /etc/credstore.encrypted/modal-inference-token
+```
+
+The `name` in the configuration must match the name embedded in the credential.
+Each entry's `export` tells `scripts/launch.py` how to turn the decrypted file into
+environment variables:
+
+- `{env: VAR}`: the whole file is one token.
+- `{path_env: [VAR, ...]}`: the file's path, for SDKs that read a file.
+- `{json: {field: VAR, ...}}`: string fields of a JSON document.
+- `{modal_token: VAR}`: a Modal combined `wk-…ws-…` inference token. The launcher
+  also accepts `MODAL_PROXY_TOKEN=` or a `WK_SECRET`/`WS_SECRET` pair and exports
+  only the combined token.
+
+Deployment writes the non-secret export map to `~/.config/litellm/credentials.json`.
+The launcher parses each credential in memory and never evaluates shell code. It
+removes ambient provider credentials (AWS, Google, Modal, and similar variables)
+from its environment before exporting the configured ones. A malformed credential
+fails startup with a generic message that does not echo its contents.
+
+Never copy encrypted credentials or saved ChatGPT tokens between machines. Each
+machine encrypts with its own host key.
+
+## Install and upgrade
+
+Use the account's existing mise installation and this repository's pinned Ansible
+and uv. Application Python must be 3.14, and deployment checks for it before
+writing any files. The inventory's `/usr/bin/python3` is only Ansible's target
+interpreter.
+
+```sh
+mise trust && mise install
+mise exec -- uv python install 3.14
+install -d ~/.config/litellm-deploy
+cp deploy/config.example.yml ~/.config/litellm-deploy/config.yml   # then edit it
+```
+
+Each step below is an explicit transaction with its own recovery. Commands are
+run with `mise exec --`, which is omitted here for brevity.
+
+1. **Stage the pinned Codex binary.** This installs it beside existing versions.
+   It leaves login, configuration, launchers, and the running app server unchanged:
+
+   ```sh
+   ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=install
+   ```
+
+2. **Prepare runtime recovery, deploy the gateway, then finish:**
+
+   ```sh
+   uv sync --locked
+   uv run --no-sync scripts/runtime_rollout.py prepare --source "$PWD"
+   ansible-playbook -i deploy/inventory.yml deploy/deploy.yml --check --diff
+   ansible-playbook -i deploy/inventory.yml deploy/deploy.yml
+   uv run --no-sync scripts/runtime_rollout.py finish --source "$PWD"
+   ```
+
+3. **Log in to ChatGPT for LiteLLM** on a new machine. See
+   [ChatGPT login](#chatgpt-login) below.
+
+4. **Publish models.** This discovers the subscription catalog, validates the
+   configured models, and writes `~/.config/litellm/models.json` and the Codex
+   catalog:
+
+   ```sh
+   ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml --check --diff
+   ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml
+   ```
+
+5. **Switch the Codex runtime** using apply, then restart, verify, and finish. See
+   [Codex runtime](#codex-runtime).
+
+Every script takes `--config PATH` when the configuration is not in the default
+location. Step 1 stages Codex side by side; the steps above do not select or
+restart the app server until step 5.
+Ordinary deployment changes neither the Codex catalog nor its configuration.
+
+Check mode cannot sync an absent environment or provision credentials. On a fresh
+machine, the preview covers paths, templates, and prerequisites, not live readiness.
+
+### First rollout from the per-provider layout
+
+Earlier releases installed per-provider scripts, model manifests, and systemd
+drop-ins. These are listed in [`deploy/retired.yml`](deploy/retired.yml).
+`deploy.yml` removes them, and `runtime_rollout.py` journals the removal so
+rollback restores them.
+
+Until `models.json` exists, `deploy.yml` skips its installed-snapshot check,
+because the old generators cannot read the new configuration. Run
+`refresh-models.yml` (step 4) immediately after the first new deployment.
+
+Both exceptions have the same removal criterion: once every machine has published
+`models.json` from this layout, remove `retired.yml`, its two readers, and the
+`models.json` condition. Afterward, the old state files
+(`~/.local/state/litellm/{bedrock,claude,modal,local,vertex}-models.json`,
+`bedrock-runtime-installed.json`, and `vertex-installed.json`) are unused and
+can be deleted.
+
+### Recovery
+
+- **Gateway runtime.** Before acceptance, run
+  `uv run --no-sync scripts/runtime_rollout.py rollback --source "$PWD"`.
+  - The rollback restores only changed application, service, and retired files,
+    then re-syncs the prior lock.
+  - After a failed first installation, it stops and disables the new service and
+    removes the files it created.
+  - Encrypted credentials are kept for a retry.
+  - The journal at `~/.local/state/litellm/runtime-upgrade.json` is removed on
+    finish or rollback.
+  - Rollback stops, rather than overwriting, if files were edited concurrently.
+- **Models.** Run `ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml -e refresh_action=rollback`.
+  It recovers an interrupted refresh from `~/.local/state/litellm/model-refresh`.
+- **Codex runtime.** Run `codex-runtime.yml -e codex_runtime_action=rollback`, as
+  described below.
+
+Ordinary deployment refuses to run while a model refresh or voice transaction is
+unfinished.
+
+## ChatGPT login
+
+Complete a separate ChatGPT device login with the subscription account:
 
 ```sh
 CHATGPT_TOKEN_DIR="$HOME/.local/state/litellm/chatgpt" \
@@ -314,265 +207,301 @@ CHATGPT_TOKEN_DIR="$HOME/.local/state/litellm/chatgpt" \
 ```
 
 The login prints only the temporary device authorization code, never tokens.
-After login, run `deploy/refresh-models.yml` before the initial Codex cutover.
-Stock LiteLLM OAuth token files are private (0700 directory, 0600 files), but
-are not encrypted by this deployment. Codex's own login is not changed.
+Stock LiteLLM OAuth token files are private (a 0700 directory with 0600 files),
+but this deployment does not encrypt them. Codex's own login is not changed.
 
 ## Encrypted proxy key
 
-Provisioning generates one random key and encrypts it twice without a plaintext
-disk file: a system credential under `/etc/credstore.encrypted/litellm-proxy-key`
-and an agent-scoped credential under `~/.config/litellm/proxy-key.cred`.
-Systemd's host key is used; this machine has no usable TPM. Disk encryption is
-still needed for protection against theft of the whole disk including its host
-key. Root or a compromised live agent account can access the running credential.
+Provisioning generates one random key and encrypts it without writing a plaintext
+file. A system credential is always created at
+`/etc/credstore.encrypted/litellm-proxy-key`. With `credential_mode: user`, an
+account-scoped copy is also created at `~/.config/litellm/proxy-key.cred`.
 
-Systemd `LoadCredentialEncrypted` supplies LiteLLM's credential. A tiny launcher
-sets its master-key process environment from the runtime credential. Codex uses
-stock `model_providers.litellm.auth.command` to run `systemd-creds decrypt --user`.
-There is no proxy key in `.codex/.env`, the unit, config.toml, or Git. No sudo is
-required by the Codex credential command. A partial credential pair fails closed
-rather than generating a replacement that could desynchronize the clients.
+- **Encryption key.** Systemd's host key is used. Disk encryption is still needed
+  against theft of the whole disk, including that key.
+- **Who can read it.** Root or a compromised live account can access the running
+  credential.
+- **Partial pairs.** An incomplete pair fails closed rather than generating a
+  replacement that could desynchronize clients.
+- **How the gateway reads it.** Systemd `LoadCredentialEncrypted` supplies the
+  credential, and the launcher sets LiteLLM's master key from it.
+- **How Codex reads it.** In `user` mode, Codex decrypts it with
+  `systemd-creds decrypt --user`, with no sudo. In `system` mode, validation
+  commands decrypt it through noninteractive sudo into process memory.
 
-## One-time cutover
+The key never appears in `.codex/.env`, the unit, `config.toml`, or Git.
 
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/cutover.yml
-# Restart Grace's connection using the owning desktop's Restart action.
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/cutover.yml -e cutover_action=check-restart
-```
+## Codex runtime
 
-Prepare verifies authenticated streaming and a complete tool round trip, then
-replaces gateway routing with the named `litellm` provider, standard model name,
-HTTP Responses streaming, and credential command. The old gateway stays active
-only during this unfinished migration. One private configuration recovery record
-is retained in `~/.local/state/litellm/cutover.json` and removed on completion.
-Check mode for cutover intentionally performs no inference/config mutation.
+The desktop's Fast controls require the machine's genuine ChatGPT identity.
 
-Prepare also requires a real stock Codex native-search event and a resumed
-shell-tool round trip with retained search context. A raw API search test alone
-is insufficient to pass this gate.
+### Configuration requirements
 
-Before finalizing, verify a new desktop task uses LiteLLM, tool execution and
-follow-up turns work, existing tasks remain visible/reopenable, and cancellation
-and restarts work. Exercise web search and compaction; report material limitations
-before committing to them. Old tasks are not relabeled and may retain `openai`.
-The native provider returns to its normal backend once its gateway override is
-removed. Dynamic merged model discovery is not a cutover requirement.
+`~/.codex/config.toml` is user-managed. The runtime deployment validates that its
+`litellm` provider has:
 
-After desktop validation, uninstall the old gateway completely:
+- `requires_openai_auth = true`;
+- `env_key = "LITELLM_PROXY_KEY"`;
+- the local endpoint;
+- standard or Fast speed;
+- shell snapshots disabled;
+- proxy-key exclusion.
 
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/finalize.yml \
-  -e litellm_desktop_validated=true
-```
+When something is missing, it reports the exact correction. It never rewrites,
+snapshots, or restores the file.
 
-Finalize checks the desktop replaced the app-server socket, validates LiteLLM,
-removes the old service and installation, checks its listener is gone, verifies
-LiteLLM again, and deletes migration recovery state. Keep Git checkouts; they are
-source, not an installed fallback service. Repeat deploy.yml to check convergence.
+### What the runtime deployment owns
 
-## Recovery
+- `codex-app-server.service`;
+- the Desktop attach setting;
+- the credential-loading launcher;
+- the `~/.local/bin/codex` entry point;
+- the pinned Codex binary selection.
 
-Before finalize:
+The launcher decrypts the proxy credential into the process environment, rejects
+empty or invalid credentials, and runs the configured exact Codex version.
+Environment exclusion keeps the key out of shell tools. **Shell snapshots must be
+disabled**, because snapshots could restore the startup key after exclusion. With
+`forward_agent: true`, the unit forwards the SSH agent into the app server.
 
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/cutover.yml -e cutover_action=rollback
-# Restart Grace's connection using the desktop.
-```
+The unit restarts at most 3 times in 300 seconds, so a crash loop leaves it in the
+failed state instead of retrying forever. After reading
+`journalctl -u codex-app-server`, recover with
+`sudo systemctl reset-failed codex-app-server.service` and then
+`sudo systemctl start codex-app-server.service`.
 
-Rollback refuses to overwrite intervening Codex configuration edits. Review and
-merge such edits manually using the retained private recovery record.
-
-After uninstall, redeploy the old gateway from:
-https://github.com/denta-codex/codex-gateway/tree/gateway-paused-2026-09-26
-
-The frozen revision is `7883f72f9d9a7ca9075fcef81155b4d23bb7ed55`, including its
-existing Ansible. The encrypted Modal credential is retained at its existing path
-`/etc/credstore.encrypted/codex-gateway-modal`; use that
-repository's `bin/deploy-grace prepare`, desktop Restart, and
-`bin/deploy-grace finalize`. Remove LiteLLM's provider selection/configuration
-as part of that deliberate recovery; do not run parallel routing workflows.
-Retain the Modal credential for imminent provider reuse and gateway recovery.
-It is independent of the uninstalled gateway service; do not copy it into
-1Password or delete it during this migration.
-
-## Validation
-
-### Claude subscription adapter
-
-`claude/opus-5.5` is an opt-in route to the exact `claude-opus-5-5` model through
-Claude Agent SDK 0.2.161. Its picker name is **Claude Opus 5.5**. It offers low,
-medium, high, xhigh, and max effort, defaults to high, and advertises a conservative
-200,000-token context window. The default model remains `chatgpt/gpt-6-astra`.
-There is no model fallback or API-key fallback.
-
-The adapter uses the agent account's existing `claude auth login`. To renew login,
-run that command as `agent`, then retry the request. No Claude token belongs in
-LiteLLM YAML, systemd environment variables, or Git. The repository's `claude-cli`
-wrapper starts the SDK-bundled binary with a minimal environment; unrelated proxy,
-Modal, and OpenAI credentials are excluded. Workers use an empty private working
-directory, no settings sources, and only the declared MCP server. The sole native
-tool allowed for schema output is the SDK's local `StructuredOutput` formatter.
-Every client command or file edit still runs through Codex and its approvals.
-
-The Codex catalog entry gives Claude its own base instructions,
-`scripts/claude-instructions.md`, which cover Codex's context blocks, direct tool use and
-the `apply_patch` format. Claude calls Codex tools directly (`tool_mode: direct`) under
-their real names instead of writing JavaScript through code mode, because it reasons
-over each result. `supports_search_tool` is off because it enables Codex's client-side
-`tool_search`, which the adapter cannot relay; deferred tools arrive as namespaces
-instead, and hosted web search is unaffected. The adapter's prompt tells Claude to
-ignore the SDK's environment block, which describes the worker's scratch directory.
-
-The adapter supports streaming/nonstreaming Responses, inline PNG/JPEG/GIF/WebP
-images, JSON schema output, summarized reasoning, and client tools including
-namespaced functions and freeform patches. It does not fetch image URLs. Sampling,
-token-budget, verbosity and server-side Responses retrieval controls
-are rejected. Codex metadata and cache hints are accepted as transport metadata;
-they do not force a Claude cache policy. Opaque encrypted reasoning is not exported.
-Hosted search uses the shared ChatGPT-backed interceptor described below.
-
-### Claude Fast mode
-
-The Codex Fast toggle's `service_tier: "priority"` selects the worker-local
-Claude setting `fastMode: true`. Omitted, `auto`, and `default` tiers explicitly
-select standard speed. Other tiers are rejected. Global Claude settings and
-billing settings are never changed. Fast requires enabled usage credits on the
-Claude account; subscription limits do not cover it.
-
-Speed changes take effect on a new user turn after the previous turn finishes.
-The adapter replaces the worker using completed conversation history. Changing
-speed during a tool continuation returns a conflict without closing the worker
-or consuming its pending results; finish the turn at its original speed first.
-Request replay caches distinguish Fast from standard requests.
-
-Fast is strict: every generated message must report `usage.speed: "fast"` before
-its text, reasoning, or tools can be exposed. Missing speed evidence, a standard
-response, unavailable Fast, exhausted credits, or cooldown fails the request.
-The adapter never retries at standard speed. Claude's runtime can internally
-attempt a standard-speed retry before the adapter detects it; this does not
-guarantee that no fallback request or charge occurs. Speed confirmation delayed
-until later stream events delays delivery of buffered output.
-
-The existing private worker journal records requested/observed speed and the
-number of verified messages. Warning logs contain only sanitized failure labels
-and speed metadata. The opt-in acceptance probe reports those fields without
-printing credentials or conversation history:
+### Runtime actions
 
 ```sh
-uv run --no-sync scripts/verify_claude.py --isolated --fast-only
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml                                     # preview
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=apply
+# Restart the app server from the owning desktop (or with systemctl).
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=verify
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=finish -e codex_desktop_validated=true
 ```
 
-This **consumes paid Claude usage credits** and tests standard → Fast → standard
-through the real Codex app-server control, including shell execution and tool
-continuation. `--fast` adds the same checks to full isolated acceptance. Routine
-deployment checks do not request Fast. Missing runtime speed evidence or denied
-Fast access blocks Fast release; do not deploy on the strength of offline tests
-alone. Desktop toggle interaction remains a separate manual acceptance check.
+- **`apply`**
+  - Validates `config.toml` and installs the exact binary if needed.
+  - Tests the candidate with the installed forwarder under its real systemd
+    sandbox, using an isolated Codex home and a synthetic credential.
+  - Tests an isolated candidate restart.
+  - Only then stages the launcher, unit, and attach setting.
+- **`verify`**
+  - Requires a replaced app-server socket.
+  - Checks that the live process uses the pinned binary and the proxy credential.
+  - Runs a real shell turn to prove the key is absent from tools.
+  - Checks subscription streaming, tool continuation, native search and resume,
+    and the reserved reviewer route.
+- **`finish`**
+  - Reruns a live turn.
+  - Runs the forwarder's authenticated WSS check and the SSH proxy-client check.
+  - Records the accepted manifest.
 
-After isolated acceptance passes, commit and deploy through `deploy/deploy.yml`
-when Claude workers are idle: deployment restarts the proxy and ends in-memory
-workers. Then run `deploy/claude.yml` to activate the Claude catalog's Fast
-capability and restart the desktop connection to reload it. Without that catalog
-capability, Codex can suppress the requested tier before it reaches the adapter.
-Recover with the existing deployment/model-activation workflow; do not add a
-second backup mechanism.
+The forwarder checks live in `~/.local/libexec/remote-codex-checks/`. Deploy Remote
+Codex first. A missing check or a failed gate stops the operation and keeps the
+recovery state. Nothing is retried or rolled back automatically.
 
-### Claude session behavior
-
-Direct clients must send `thread-id` or `x-claude-chat-id` on authenticated requests
-and supply full conversation history. Session identity also includes the caller,
-model, and Codex context window. Concurrent requests for one session serialize;
-different chats run independently. Partial tool-result batches return outstanding
-calls with their original IDs. Repeated results must agree. Completed request
-retries are replayable from the last 16 saved responses per worker generation.
-
-Forks, compaction, configuration changes and lost workers use readable completed
-history. This preserves useful context, not native role structure or hidden model
-state. Unknown tool execution is never blindly replayed. Private atomic journals
-under `~/.local/state/litellm/claude/journals` contain tool arguments/results and
-recent responses; treat them as conversation data. SDK-owned session data remains
-in the normal Claude configuration directory. Usage excludes the SDK's list-price
-cost estimate and avoids recounting earlier tool boundaries as new inference.
-
-Stopping or losing an active response unregisters its session immediately and
-closes the worker in a task that repeated request cancellation cannot interrupt;
-the next message gets a fresh worker built from history. Stop during an outstanding
-client tool still lacks an immediate adapter signal after the HTTP response has
-ended. The next request reconciles the aborted tool and new prompt, interrupting
-and closing the superseded worker. At most 20 workers (`MAX_WORKERS`, roughly
-110 MiB each) stay alive: creating another closes the least recently used worker
-without an in-flight request. Only busy workers can push the count past 20.
-Returning to an evicted chat rebuilds a worker from history; a late tool result
-still continues, and unresolved calls still fail closed. There is no time-based
-expiry; idle workers otherwise last until eviction, restart or deploy.
-
-Validate in isolation, commit the implementation, deploy it, and activate the route:
+To install updated checking utilities without staging or restarting Codex, run:
 
 ```sh
-uv sync --locked
-uv run --no-sync scripts/verify_claude.py --isolated
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/claude.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/claude.yml
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=apply --tags runtime-checks
 ```
 
-The isolated check starts a disposable loopback proxy and Codex home. It uses the
-existing subscription logins, writes only synthetic fixtures, and removes its
-temporary state on success. Failed checks retain a printed diagnostic directory;
-remove it once the failure is resolved. Nothing is installed globally. Tests include
-all efforts, images, schema output, summaries, tool continuations, native execution
-and patches, forks, compaction, switching to ChatGPT and back, cancellation follow-up,
-and proxy crash recovery. Existing offline tests cover error mapping, retries,
-configuration preservation and rollback without deliberately exhausting a quota.
+### Recovery state and rollback
 
-Activation publishes the picker only after the live acceptance suite passes;
-failure restores the previous configuration. Recover an interrupted transaction
-with `deploy/claude.yml -e refresh_action=rollback`. Activation changes no Codex
-default. Restart Grace's connection through the owning desktop to load the picker.
-The official SDK remains an agent runtime; this adapter is not full raw-inference
-API equivalence. Packaging for public distribution is a later decision.
+One private transaction at `~/.local/state/litellm/codex-runtime.json` records:
 
-On September 29, 2026, the isolated full suite passed 21 live checks with Opus 5.5,
-SDK 0.2.161 and Codex 0.155.1; all 93 offline regression tests passed. The live
-parallel-call test verified two distinct SDK calls in one response, partial result
-delivery, and reversed result order. The SDK can make ancillary helper-model
-requests internally; the adapter verifies that conversational answers use Opus
-5.5. Reported inference usage comes from the SDK's response usage, not an invented
-subscription bill or a guarantee of accounting for every internal helper request.
+- the repository-owned runtime files;
+- the prior version selection;
+- the pre-restart socket identity.
 
-### Existing provider checks
+It never contains `config.toml`. Rollback refuses managed files that differ from
+the staged revision, restores the previous runtime as a whole, and then requires
+a restart:
 
 ```sh
-uv run --no-sync scripts/test_cutover.py
-uv run --no-sync scripts/verify.py
-uv run --no-sync scripts/verify_codex.py
-uv run --no-sync scripts/verify_review.py
+ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runtime_action=rollback
 ```
 
-`verify.py` sends small subscription requests. It checks unauthenticated rejection,
-model configuration, streaming completion, and a function-call/result round trip.
-It does not print credentials or conversation content. Routine updates need only
-deploy.yml; restart the desktop connection if its configuration changes.
+After acceptance, the installed manifest becomes the baseline for later updates.
+An update aborts on any intervening managed-file edit instead of overwriting it.
+Previous binaries stay installed; rollback changes the selection rather than
+deleting shared mise state.
 
-The locked `prisma==0.15.0` client dependency is included solely because stock
-LiteLLM's database-free authentication error handler imports it unconditionally
-(upstream issue https://github.com/BerriAI/litellm/issues/38978). No Prisma engine,
-schema generation, database connection, or database server is configured.
+Before changing the provider on a machine whose history must be preserved, run
+`scripts/verify_codex_connection.py baseline --home HOME --codex-binary BINARY`
+with `uv run --no-project`. It stores only hashes of native authentication,
+project and thread IDs, and saved session files. When pinned Codex compresses
+older rollouts, it hashes the decompressed content. Remove the baseline after
+acceptance or after a verified recovery.
+
+After each runtime update, repeat the desktop acceptance:
+
+- a Fast-on turn sends `priority`, including after a restart;
+- a Fast-off turn omits the field;
+- the shell sees no proxy key.
+
+## Refresh models
+
+```sh
+ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml
+```
+
+Refresh is the only way the published model set changes. There is no timer or
+background synchronizer.
+
+- **Subscription discovery.** Refresh fetches the account's current Codex catalog
+  using LiteLLM's ChatGPT login and the pinned Codex version.
+  - Each selectable upstream chat model gets one `chatgpt/<slug>` route and one
+    visible picker entry.
+  - Hidden native entries keep their metadata for existing tasks.
+  - The reserved `codex-auto-review` name routes to `chatgpt/codex-auto-review`
+    and stays hidden. Discovery that omits the reviewer is rejected.
+- **Configured models.** Every `models:` entry becomes a router deployment and a
+  catalog row. A configured `priority` controls its position in the picker.
+- **Default model.** It is never changed. If it disappears from discovery, the
+  refresh aborts rather than substituting another model.
+- **Upgrade actions.** Upgrade actions on routed entries point to the matching
+  selectable `chatgpt/` route. When that target is missing, the action is cleared
+  and reported in `disabled_upgrades`.
+- **Older catalogs.** An empty `available_access_programs` gains the empty `cyber`
+  list that current Codex parsers require. This grants no access program.
+
+**Preview** performs discovery and prints:
+
+- added and removed model IDs;
+- changed metadata;
+- which models would be probed.
+
+It installs nothing, refreshes no OAuth tokens, restarts nothing, and prints no
+credentials.
+
+**A live refresh** proceeds in this order:
+
+1. Checks the candidate catalog with stock Codex.
+2. Restarts LiteLLM only if routes changed.
+3. Tests each new or changed model, two at a time: streaming, function-call
+   continuation, and stock Codex search, tools, and context. Search is tested only
+   when the model advertises it.
+4. Runs the entry's `verify.validators`, if any.
+5. Publishes the picker only after everything passes.
+
+A Codex version change revalidates every model and the reviewer. Validation
+consumes usage. Unchanged refreshes perform no inference and no restart.
+
+**Failure handling.** A failure restores the previous configuration, catalog, and
+discovery, restarts the restored routes, and checks liveness. Recovery state is
+kept in `~/.local/state/litellm/model-refresh` only while work is unfinished.
+Recovery refuses to overwrite concurrent edits; in that case, inspect the
+directory and reconcile before retrying.
+
+**After a catalog change,** restart the Codex app server so it loads the new
+picker.
+
+An expired ChatGPT login is reported. Refresh does not start an interactive login.
+
+Ordinary deployment checks the installed snapshot against the configuration. It
+never fetches anything or changes timestamps. If generated files are missing or
+inconsistent, it stops and asks you to run refresh.
+
+### Recommended picker order
+
+Stock Codex sorts the picker by ascending catalog `priority`. Subscription
+`chatgpt/` rows start at 1. To recommend a configured model, give it a negative
+`codex.priority`. While any recommended row is listed, refresh adds a blank,
+unrouted `separator` row at priority -1 below the recommended rows.
+
+Codex has no native divider, so the separator is selectable. Choosing it returns
+LiteLLM's unknown-model error. Pricing enrichment and compaction fallback skip it.
+Stock Codex treats the first row as the picker default, but the configured
+`model` is unchanged.
+
+### Catalog pricing
+
+`~/.config/litellm/codex-models.json` embeds versioned `remote_codex`
+pricing and provenance beside its stock `models` array. Remote Codex clients read
+the file through stock `config/read` and `fs/readFile`; there is no separate
+pricing service.
+
+- **OpenAI rates** come from OpenAI's official pricing document, including tiers,
+  context variants, and cache rates.
+- **Other rates** use exact models.dev identities, selected by
+  `model_info.catalog_pricing`:
+  - `{provider, model}` names the pricing identity;
+  - `aliases` lists recorded runtime IDs;
+  - `zero_rate: true` marks a deliberately free local route.
+- **Unknown models.** An endpoint name is never guessed to be a model ID; unknown
+  rates stay unavailable.
+- **Not invoices.** These figures are API-equivalent estimates, not hosting
+  invoices.
+
+**Source failures.** If a pricing source fails, only previously validated prices
+for the same identity are kept, marked stale with their original timestamp. If a
+source succeeds but no longer publishes a price, that price becomes unknown.
+
+**Pricing-only changes** set `enrichment_changed` and `catalog_document_changed`.
+They publish without inference probes or restarts.
+
+### Native web-search compatibility
+
+In the pinned Codex, models that use Responses Lite suppress hosted web search,
+and its standalone search uses `/v1/alpha/search`, which this deployment does not
+serve. Generated entries therefore set `use_responses_lite=false`. All other
+upstream metadata is retained.
+
+Incomplete catalogs are rejected rather than filled with invented defaults.
+`model_catalog_json` points at `~/.config/litellm/codex-models.json`, which Codex
+loads at startup.
+
+## ChatGPT Responses customization
+
+`scripts/chatgpt_responses.py` subclasses the pinned upstream adapter. It changes
+only request instructions and field preservation.
+
+- **Instructions.** Explicit client instructions, including an empty string, are
+  passed through unchanged. When instructions are absent, upstream's fallback is
+  used.
+- **Restored fields.** After upstream transformation, it restores:
+  - `text` (`format` and `verbosity`);
+  - `parallel_tool_calls`;
+  - `prompt_cache_key`;
+  - `service_tier`.
+- **Left to upstream.** Authentication, token refresh, headers, transport,
+  streaming, parsing, and errors. Upstream still forces `store=false`, streaming,
+  and encrypted reasoning.
+
+`scripts/start-litellm` runs `scripts/serve.py` through the locked environment.
+`serve.py` replaces the `litellm.ChatGPTResponsesAPIConfig` export before invoking
+the upstream CLI. The server runs with one worker. Running the stock `litellm`
+command directly bypasses this customization.
+
+Changes to runtime files restart the service; utility-only updates do not. The
+launcher's optional fourth argument selects a port for isolated tests.
+
+The override fails startup on any LiteLLM version other than the pinned one. Before
+any upgrade, revalidate the dispatch, transformation, and launcher tests.
+
+Live subscription probes (account- and model-specific, not guarantees) found:
+
+| Field | Evidence and limits |
+| --- | --- |
+| `text.format: json_schema` | Schema-required enums were honored despite conflicting instructions. Invalid schemas were rejected with `invalid_json_schema`. |
+| `text.format: json_object` | Accepted when the input mentions JSON. It is not schema enforcement. |
+| `text.verbosity` | `low` was accepted and echoed. Invalid values were rejected. Output-length effects were not measured. |
+| `parallel_tool_calls` | `false` and `true` produced one and two calls respectively. |
+| `prompt_cache_key` | Forwarded, but the backend ignored the body value. A `session_id` header becomes the cache key. |
+
+The locked `prisma` client is included only because stock LiteLLM's
+authentication error handler imports it unconditionally
+([BerriAI/litellm#38978](https://github.com/BerriAI/litellm/issues/38978)). No
+database is configured.
 
 ## Fast mode
 
-The shared `scripts/chatgpt_responses.py` override preserves an explicitly supplied
-`service_tier`, which LiteLLM 1.102.1 otherwise drops from ChatGPT requests.
-Ordinary requests do not gain a tier or enable priority by default. This uses the
-same version-checked launcher as the other request fixes; it does not edit the
-installed LiteLLM package. Changes to the module trigger the existing Ansible
-restart handler. No catalog refresh or desktop restart is required for forwarding.
-
-After deployment, verify both tiers and the real Codex search/tool flow.
-These probes consume subscription usage:
+The customization preserves an explicitly supplied `service_tier`, which pinned
+LiteLLM otherwise drops. Ordinary requests do not gain a tier. These probes consume
+subscription usage:
 
 ```sh
 uv run --no-sync scripts/verify.py --service-tier priority
@@ -580,817 +509,366 @@ uv run --no-sync scripts/verify.py --service-tier default
 uv run --no-sync scripts/verify_codex.py --service-tier priority
 ```
 
-The API probes report requested and returned tiers separately. ChatGPT subscription
-responses can report `default` after a `priority` request, including when native
-Codex bypasses LiteLLM. The returned field is not a reliable Fast acceptance gate
-for this subscription endpoint; the earlier equality assertion was incorrect.
-See the [OpenAI contributor's explanation](https://github.com/openai/codex/issues/14204#issuecomment-4033184620).
-Offline regressions strictly check priority forwarding, omission on ordinary
-requests, and unchanged response metadata. These checks do not measure throughput.
+The subscription backend can report `default` after a `priority` request, so the
+returned tier is not an acceptance gate. See the
+[Codex contributor's explanation](https://github.com/openai/codex/issues/14204#issuecomment-4033184620).
+Offline tests check forwarding strictly. Check the desktop Fast toggle before
+declaring Fast mode verified. Remove the override once a pinned upstream release
+preserves the tier.
 
-The Codex probe enables its fast-mode feature and exercises an explicit tier with
-native search and resumed tool execution. Both probes accept `--base-url` for an
-isolated proxy. Check the desktop Fast toggle before declaring fast mode verified.
-Remove the forwarding override when a pinned upstream release preserves the tier
-and passes the same checks.
+## Compaction recovery
 
-### Compaction recovery
+`compaction_fallback: true` (the default) enables the compaction-only recovery
+wrapper through `COMPACTION_FALLBACK_ENABLED` in the unit. Setting it to `false`
+and redeploying restores ordinary dispatch.
 
-`compaction_fallback_enabled` in the deployment inventory enables the repository's
-compaction-only recovery wrapper. Its owned systemd drop-in projects it as
-`COMPACTION_FALLBACK_ENABLED`; setting the inventory flag to `false` and repeating
-`deploy/deploy.yml --tags compaction-recovery` restores ordinary dispatch without changing Codex or model
-discovery. `COMPACTION_MODEL_CATALOG` points at the same saved catalog used by the
-desktop picker. The wrapper reloads that catalog for each compaction and intersects
-it with active router deployments, so existing model-refresh playbooks also update
-future fallback candidates without another list to maintain.
+**Which requests enter recovery.** Only requests marked `request_kind=compaction`
+enter recovery. Codex carries the marker in `client_metadata["x-codex-turn-metadata"]`;
+the legacy header is also accepted. Ordinary turns and `codex-auto-review` are
+unaffected.
 
-`ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --tags compaction-recovery`
-installs only the compaction runtime, verifier, and service drop-in, then restarts
-LiteLLM and checks liveness. Use this tag to activate recovery independently of
-other pending runtime or provider updates. The tagged deployment inserts the
-compaction installation after shared search in the existing launcher, preserving
-other active integrations such as voice. Ordinary deployment installs the complete
-repository launcher, which already includes compaction recovery; the targeted
-insertion is only for this staged rollout.
+**Candidate order:**
 
-Only requests explicitly marked `request_kind=compaction` enter recovery. Current
-Codex transports that marker in `client_metadata["x-codex-turn-metadata"]`; the
-legacy HTTP header remains supported. Ordinary turns and `codex-auto-review` keep
-their existing routing. The requested compactor is always tried first. After an
-availability failure, models from other inference backends are tried in picker
-priority order, followed by remaining models on the original backend. Hidden,
-inactive, duplicate, unauthorized, and unsuitable context/modality routes are
-excluded. Each attempt has a 120-second timeout, with nested retries/fallbacks
-disabled; cancellation closes the active stream immediately.
+1. The requested compactor.
+2. After an availability failure, models from other backends, in picker priority
+   order.
+3. Remaining models on the original backend.
 
-ChatGPT compaction with historical native search calls includes the required
-search declaration while explicitly disabling tool execution. Synthetic live
-comparison reproduced `response protection is unavailable` when the declaration
-was absent and succeeded with it present.
+Candidates are the published catalog (`COMPACTION_MODEL_CATALOG`) intersected with
+the active router deployments. Hidden, inactive, unauthorized, and unsuitable
+routes are excluded. Each attempt has 120 seconds and no nested retries.
+Cancellation closes the active stream.
 
-Compaction summaries are buffered until completion, with SSE comment keepalives
-while waiting. Failed partial summaries never reach Codex. Compatible models can
-reuse native history; other backends receive quoted readable history and tool
-results with tool execution disabled, at standard speed. Opaque compaction
-checkpoints cannot be translated across backends, and unknown history items are
-rejected rather than dropped. Size checks exclude encoded images and encrypted
-state from readable text. A known tokenizer can reject text that exceeds the
-advertised window; unknown tokenizers, image budgets, or context windows defer
-the decision to the provider. Provider context-limit errors continue recovery
-and are distinguished from preflight rejection in the diagnostics. On success,
-Codex persists its
-usual replacement checkpoint and continues with the selected working model. On
-exhaustion, the original error and model/outcome list are returned. Structured
-`compaction_recovery` logs and response metadata identify the actual compactor.
-For fallback attempts, they also report the size decision, estimator, readable
-token estimate, context window, and image count. They do not contain transcripts
-or credentials.
+**Handling summaries:**
 
-Offline validation includes the real proxy process and optional installed-Codex
-acceptance with a synthetic backend that fails compaction and recovers through a
-second provider:
+- Summaries are buffered with SSE keepalives, so failed partial summaries never
+  reach Codex.
+- Compatible models reuse native history. Other backends receive quoted, readable
+  history with tool execution disabled.
+- Opaque checkpoints are not translated across backends. Unknown history items
+  are rejected.
+- ChatGPT compaction that includes earlier native search calls still declares the
+  search tool, but disables execution.
+
+On success, Codex persists its usual checkpoint. On exhaustion, the original error
+and the outcome list are returned. Structured `compaction_recovery` logs identify
+the actual compactor and size decisions, without transcripts or credentials.
 
 ```sh
-uv run -m unittest discover -s scripts -p 'test_compaction_fallback.py'
-CODEX_COMPACTION_TEST_BINARY=/path/to/codex-0.159.2 uv run scripts/test_proxy_startup.py
+(cd scripts && uv run --no-sync --project .. -m unittest test_compaction_fallback)
+CODEX_COMPACTION_TEST_BINARY=/path/to/codex uv run --no-sync scripts/test_proxy_startup.py
+uv run --no-sync scripts/verify_compaction.py            # live, synthetic history
 ```
 
-After deployment, `uv run scripts/verify_compaction.py` checks the live proxy with
-a synthetic history and the selected working model. `--model` selects another
-active route. It uses the existing encrypted proxy credential in memory and reports
-only requested/actual model IDs and whether the marker survived; it does not
-operate on an existing desktop chat.
+Native OpenAI chats that bypass LiteLLM do not use this path.
 
-Native OpenAI chats that bypass LiteLLM do not use this recovery path. No response
-security setting is changed.
+## Shared search
 
-### Grace Codex runtime
+Some providers have no hosted search. For them, `shared_search.py` extends
+LiteLLM's `WebSearchInterceptionLogger`. LiteLLM's agentic loop performs the model
+continuations. The extension supplies a subscription-backed search helper,
+preserves mixed client and search tool batches, and emits standard Responses
+search events to stock Codex. Native ChatGPT search keeps its own path.
 
-The desktop's Fast controls require the host's genuine ChatGPT identity.
-Grace's `~/.codex/config.toml` is user-managed. The runtime deployment validates
-that its LiteLLM provider uses `requires_openai_auth = true`,
-`env_key = "LITELLM_PROXY_KEY"`, the local endpoint, standard or Fast speed, disabled
-shell snapshots, and proxy-key exclusion. It reports exact corrections when
-those prerequisites are missing, but never rewrites, snapshots, digest-locks,
-or restores the file. The native ChatGPT login, catalog, model, plugins, and
-other preferences remain under Grace's control. No desktop or installed package
-is patched.
+**Helper model.** The helper is `chatgpt/gpt-6-luna` at low effort. Set
+`SHARED_SEARCH_MODEL` to choose another configured ChatGPT route. ChatGPT
+credentials never reach the other providers.
 
-The dedicated runtime deployment owns Grace's full `codex-app-server.service`,
-the existing Desktop attach setting, the credential-loading launcher, its
-`~/.local/bin/codex` entry point, and the pinned Codex binary selection. The
-launcher decrypts the existing credential into the process environment,
-rejects empty/invalid credentials, and executes a committed exact Codex version
-with arguments unchanged. Explicit environment exclusion keeps the key out of
-shell tools. **Shell snapshots are disabled**:
-the live stock-Codex probe found that snapshots could restore the startup key
-after exclusion. Disabling them also prevents persisting that startup environment.
-No key is written to TOML, logs, or shell startup files.
+**Limits:**
 
-The inventory pins Codex `0.166.0` on both Grace and Love. Ordinary LiteLLM deployment does not install,
-select, or restart Codex. An explicit runtime update installs its committed
-version alongside existing Mise versions, validates the current catalog with
-that exact binary, and stages the runtime without interrupting active tasks.
-Desktop's Restart action activates it. The repository does not change Mise's
-global `latest` selection, patch Codex, update the desktop application, or run a
-scheduled upgrade.
+- Every requested search runs, and parallel searches are not capped.
+- Each Responses request allows five search rounds. Results in the fifth round
+  tell the model that search is closed; any later search returns immediately as
+  a failed "not run" result.
+- `max_agentic_loops` is seven, which is the absolute stop.
+- Each query has 60 seconds.
+- Results keep up to 4,000 characters and eight sources.
 
-The runtime playbook has five explicit actions:
+**Journals.** Private journals in `~/.local/state/litellm/search` hold search
+calls, findings, and replays, scoped to the authenticated caller. Completed
+records are pruned after 30 days or 100 MiB per caller. Treat them as conversation
+data. `SHARED_SEARCH_STATE` overrides the directory for testing.
 
 ```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml -e codex_runtime_action=apply
-# Restart Grace through the owning desktop.
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml -e codex_runtime_action=verify
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml -e codex_runtime_action=finish -e codex_desktop_validated=true
-```
-
-The default action is read-only preview. `apply` validates the user-managed
-configuration, installs the exact binary if needed, and stages the launcher,
-unit, and attach setting. It also removes the temporary emergency drop-in after
-recording it for rollback. `verify`
-requires a replaced app-server socket, checks the live systemd process uses the
-pinned executable and proxy credential, and runs a real shell turn proving the
-key is absent from tools. It then checks subscription streaming, tool
-continuation, native search/resume, and the reserved reviewer route. `finish`
-reruns a live inference/tool turn, the running-version check, and the selected
-transport's connection checks before
-recording the accepted version and managed-file digests or deleting recovery state.
-
-On Grace, Remote Codex must first deploy its checks to
-`~/.local/libexec/remote-codex-checks/`. Runtime `apply` tests the exact candidate
-with the installed forwarder under its actual systemd sandbox, using an isolated
-Codex home and synthetic credential. It also tests an isolated candidate restart.
-This happens before runtime selection changes. Both `verify` and `finish` require
-the phone-facing authenticated WSS route to initialize and list projects/tasks.
-Love instead checks stock SSH proxy clients against its shared app-server socket;
-its baseline compares native login, projects and saved history across the restart.
-Missing checks or a failed gate stop the operation and preserve recovery state;
-there is no automatic retry or rollback.
-
-To install updated runtime checking utilities without staging or restarting Codex,
-use the committed source and the same runtime playbook:
-
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml \
-  -e codex_runtime_action=apply --tags runtime-checks
-```
-
-This tagged run retains host/source validation and copies only utility files.
-
-One private transaction at `~/.local/state/litellm/codex-runtime.json` contains
-only the repository-owned runtime files, prior version selection, and pre-restart
-socket identity. It never contains `config.toml`. Rollback refuses managed files
-that differ from the staged revision, restores the previous runtime together,
-leaves Grace's configuration untouched, and then requires Desktop Restart:
-
-```console
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/codex-runtime.yml -e codex_runtime_action=rollback
-```
-
-After acceptance, the persistent installed manifest is the comparison baseline
-for later version changes. A later update aborts on any intervening managed-file
-edit instead of overwriting it. Candidate binaries and the previous binary remain
-installed; rollback changes selection rather than deleting shared Mise state.
-
-Desktop acceptance passed on September 27, 2026: the user's Fast-on turn sent
-`priority`, a follow-up after a desktop connection restart still sent `priority`,
-and the Fast-off turn omitted the field. These were correlated to this existing
-task at the outgoing adapter boundary. Shell execution also confirmed that the
-proxy key was absent from tool environments after restart. The earlier isolated
-checks covered streaming, tool continuation, native search/resume, the reserved
-reviewer route, and unchanged returned-tier metadata. Repeat those desktop checks
-after each explicit runtime update. Returned `default` is not a subscription Fast
-failure, and throughput benchmarking is outside runtime acceptance.
-
-## Refresh subscription models explicitly
-
-From a clean committed checkout on Grace:
-
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml
-```
-
-This fetches the account's current Codex catalog using LiteLLM's existing
-ChatGPT login and the installed Codex version. It updates both LiteLLM routes
-and the Codex picker. There is no timer, background synchronizer, or extra server.
-Discovery failures leave the installation unchanged. An expired login is reported
-without starting an interactive login or rotating credentials; use the documented
-stock login command if needed, then retry.
-
-`chatgpt/` and the reserved `codex-auto-review` route are owned by refresh.
-Each upstream selectable chat model gets one `chatgpt/<slug>` route and one
-visible picker entry. Hidden native entries
-retain metadata for existing tasks. Other provider routes, their settings, and
-catalog entries are preserved. The selected default is not changed; removing it
-from the discovered list aborts the refresh rather than substituting another model.
-Old tasks can retain their native model selection; no task history is rewritten.
-Upgrade actions on routed entries point to the corresponding selectable
-`chatgpt/` route, preserving the upstream explanation and retirement date.
-If that target is unavailable, the routed upgrade action is cleared and reported
-in `disabled_upgrades` in the refresh/preview output; native metadata is retained.
-
-### Recommended picker order
-
-Stock Codex sorts the picker by ascending catalog `priority`, and subscription
-`chatgpt/` rows start at 1. `scripts/recommended.py` gives the recommended rows
-negative priorities so they always lead, in this order: `claude/opus-5.5`,
-`bedrock/gpt-6.1-sol`, `vertex/gemini-4-argon`. A blank, unrouted `separator`
-row at priority -1 follows them; every other model keeps its provider priority
-below it. Edit `RECOMMENDED` to change the list, then re-publish each owning
-provider (`refresh-models.yml`, `claude.yml`, `bedrock.yml`, `vertex.yml`).
-
-Every namespace owner publishes the same separator, and only while a recommended
-row is listed. Codex has no native divider, so the separator is selectable:
-choosing it returns LiteLLM's unknown-model error, and you can then pick another
-model. Pricing enrichment and compaction fallback skip it because it has no route.
-Stock Codex treats the first row as the picker default, but the configured
-`model` is unchanged.
-
-Codex sends approval-review requests using the exact name `codex-auto-review`.
-Refresh routes that name to `chatgpt/codex-auto-review`, the subscription's native
-hidden reviewer. It stays hidden in the picker, uses full Responses transport,
-and is never replaced with a general chat model. Discovery that omits the native
-reviewer is rejected before activation. Bootstrap configuration includes the same
-route; the initial refresh after login verifies its availability.
-
-Older catalogs can contain an empty `available_access_programs` object. Refresh
-preserves unknown program metadata and supplies an empty `cyber` list when that
-required field is absent, allowing current Codex catalog parsers to load the
-entry without granting an access program.
-
-Preview shows added/removed model IDs and changed metadata fields, with before/after
-lists. It performs discovery but does not install files, refresh OAuth tokens,
-restart services, validate with inference, or print credentials/model instructions.
-Live refresh checks the candidate catalog with stock Codex, restarts LiteLLM only
-if routes changed, and tests streaming, function-call continuation, and stock Codex
-search/tools/context for new or changed models (two concurrent probes maximum).
-Search is tested only when the discovered model advertises it. Validation consumes
-subscription usage. The picker is published only after every probe succeeds.
-New or changed review routing/metadata also requires a streaming JSON response
-from the reserved name. A Codex version change revalidates both chat models and
-the reviewer. Reviewer failure triggers the same rollback as chat-model failure.
-
-A successful discovery is stored privately in
-`~/.local/state/litellm/subscription-models.json`; generated configuration remains
-in `~/.config/litellm`. Neither discovery results nor credentials are committed.
-Ordinary deployment checks and preserves these files; it never reinstalls the
-one-model catalog. If generated files are missing or inconsistent, deployment
-stops and directs you to run refresh. New installations bootstrap the single
-configured default until the first explicit refresh after login.
-
-Unchanged refreshes perform no inference or service restart. After catalog changes,
-restart Grace's connection through the owning desktop to load the new picker.
-Verify the models are listed once in a new task; an existing task can still show
-its old selected native model alongside the routed choices.
-
-Failed activation or validation restores the previous config, catalog, and discovery,
-restarts restored routes when necessary, and checks liveness. One private recovery
-directory is kept only during unfinished work. If the command is interrupted:
-
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml -e refresh_action=rollback
-```
-
-Recovery refuses to overwrite concurrent edits. In that case inspect
-`~/.local/state/litellm/model-refresh` and reconcile before retrying. The directory
-is removed after successful activation or successful recovery. Ordinary deployment
-refuses to proceed while a refresh is unfinished.
-
-### Canonical catalog pricing for Android
-
-LiteLLM owns `~/.config/litellm/codex-models.json`. The shared explicit refresh
-workflow embeds versioned `remote_codex` pricing/provenance beside its stock
-`models` array. There is no separate pricing snapshot, controller command, custom
-RPC, or forwarder parsing. Inventory snapshots remain discovery inputs; pricing
-sources never introduce selectable models or alter their capabilities.
-
-Records use provider `litellm` and the actual route name (`chatgpt/...`,
-`claude/...`, or `modal/...`). `upstream` records the separate pricing identity.
-OpenAI rates come from its official pricing document, including published tiers,
-context variants, and cache rates. Other providers use exact models.dev identities.
-Modal endpoint identities are explicit `pricing_model` entries in
-`scripts/modal-models.json`; an endpoint name is never guessed to be a model ID.
-Unknown rates remain unavailable, including hosted endpoints without an exact
-published rate. These are API-equivalent estimates, not hosting invoices or
-additional subscription charges.
-
-An optional route `model_info.catalog_pricing` policy can specify an exact
-`provider` and `model` pricing identity, explicit `aliases` for recorded runtime
-IDs, or `zero_rate: true` for a deliberately free local route. A public free
-listing alone does not grant zero pricing. Cache read/write zeros published as
-part of otherwise priced models remain valid.
-
-The complete candidate passes stock Codex parsing before publication through the
-existing shared transaction and lock. Source failures retain only previously
-validated prices for the same upstream identity, with their original timestamp
-and explicit stale status. Successful sources that no longer publish an exact
-price make it unknown. Historical enrichment records remain available for prior
-chat usage without returning retired models to the picker. A content revision
-covers stock rows, identities, rates, and freshness.
-
-Pricing-only changes set `enrichment_changed` and `catalog_document_changed`, but
-leave `catalog_changed`, `routing_changed`, and model-probe lists unchanged. They
-publish without inference probes, a LiteLLM restart, or a desktop restart.
-Ordinary deployment/snapshot checks never fetch prices or change timestamps.
-
-Deploy the committed implementation through `deploy/deploy.yml` first; then run
-the existing explicit `deploy/refresh-models.yml`. Routine deployment does not
-refresh the catalog. Preview (`--check --diff`) fetches current inventories and
-public pricing but publishes nothing. After successful refresh, Android reads
-`model_catalog_json` from stock `config/read` and the published file from stock
-`fs/readFile`. Its host/path/revision cache is a copy of this catalog, not another
-pricing authority. Model refresh in Android only reads published data.
-
-Offline validation includes price/alias/freshness cases, transaction concurrency,
-pricing-only probe exclusion for ChatGPT and Claude, and pinned Codex 0.159.2
-`debug models`, paged `model/list`, `config/read`, and `fs/readFile` parity. The
-stock binary integration test skips explicitly when that pinned binary is absent.
-Live catalog and phone-badge acceptance follow deployment and explicit refresh.
-
-### Native web-search compatibility
-
-Validated initially with Codex 0.155.1 and LiteLLM 1.102.1. Models using Responses
-Lite suppress hosted web search in this Codex version; its alternative standalone
-search uses `/v1/alpha/search`, which this LiteLLM deployment does not serve.
-The generated routed entries set `use_responses_lite=false` so search uses
-`/v1/responses`. Other upstream metadata is retained, including instructions,
-reasoning levels, context limits, and capabilities. Invalid/incomplete catalogs
-are rejected rather than filling them with invented defaults.
-
-The supported `model_catalog_json` setting still points to
-`~/.config/litellm/codex-models.json`. This snapshot is loaded at Codex startup;
-run refresh explicitly after model availability or Codex version changes.
-Claude and Modal entries advertise hosted search after their activation checks pass.
-
-### Shared search for Claude and Modal
-
-`shared_search.py` extends LiteLLM 1.102.1's `WebSearchInterceptionLogger`.
-LiteLLM's existing agentic loop performs model continuations; the local extension
-supplies the subscription backend, preserves mixed client/search tool batches,
-and presents standard Responses search events to stock Codex. No additional
-gateway or Codex patch is required. Native ChatGPT search keeps its existing path.
-
-The helper is the configured `chatgpt/gpt-6-luna` route at low effort. Set
-`SHARED_SEARCH_MODEL` in the service environment to select another configured
-ChatGPT helper explicitly. Authentication and refresh remain in the existing
-ChatGPT provider; its credentials never enter Claude workers or Modal requests.
-The backend accepts a query and search settings and returns normalized text and
-source records, so a future Exa backend can use the same interceptor and Codex
-presentation. Exa is not enabled or configured by this release.
-
-Search-enabled model iterations are buffered. Search progress is emitted while
-the helper runs, then model text/reasoning and client tool calls are returned in
-batches. Ordinary requests without shared search/history keep the stock path.
-Every search the model requests runs; parallel searches in one batch are never
-capped. Each Responses request allows five search batches (rounds). Results in
-the fifth round tell the model that search is closed and to answer; any later
-search returns immediately as a failed "not run" result without a helper query.
-The tool list and `tool_choice` never change, because Claude workers are
-replaced when either changes. LiteLLM's `max_agentic_loops` is set to seven as
-the absolute stop: a model that ignores the closing message twice fails the
-request with an explicit error. Each query has 60 seconds, including retries. A
-client-tool continuation starts a new request with a fresh round count. Results keep
-up to 4,000 answer characters and eight sources per query. Failed/empty searches
-remain explicit, and no alternate provider is silently substituted. Client tool
-execution and approvals remain with Codex, including mixed and parallel batches.
-
-Private journals in `~/.local/state/litellm/search` contain search calls, findings,
-sources, helper usage, and completed response replays. They are scoped to the
-authenticated caller and use atomic owner-only files. Completed records are
-pruned after 30 days or at a 100 MiB per-caller budget; pending client-tool
-continuations are protected. Missing required records fail explicitly. Treat the
-journals as conversation data. `SHARED_SEARCH_STATE` overrides the directory for
-disposable testing. Active helper cancellation follows the owning request;
-idle Claude workers are bounded by the worker cap above.
-
-Validate and activate with the existing model refresh transactions:
-
-```sh
-uv run --no-sync scripts/test_shared_search.py
+(cd scripts && uv run --no-sync --project .. -m unittest test_shared_search)
 uv run --no-sync scripts/verify_shared_search.py --isolated --all-efforts
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/claude.yml
 ```
 
-Deployment validates installed discovery with the installed generators before
-replacing them. Provider activation then validates and publishes new capabilities.
-Retain the prior changed runtime files and model files until both activations
-pass; on release failure restore that runtime and its matching catalog together.
-The isolated acceptance starts disposable proxy/Codex homes, verifies successful
-helper output with sources, native Codex activity, external tools and follow-up
-context, and removes successful test state. Failed evidence is retained at the
-printed path only until diagnosis completes. Restart Grace's desktop connection
-after publication to load the new catalog.
+Configured models opt in by listing `verify_shared_search.py` among their
+validators and by advertising search in their `codex` block.
 
-## Local Qwen inference
+## Provider notes
 
-`deploy/local.yml` installs Qwen3.8-27B UD-Q2_K_XL
-and the checksum-pinned llama.cpp CUDA 12.8 build recorded in
-`scripts/local-model.json`. It uses Grace's existing driver; no CUDA toolkit or
-language toolchain is installed. The private runtime and model files live under
-`~/.local/share/llama-local`; the preset is `~/.config/litellm/llama-models.ini`.
+Each provider below is only a `models:` entry plus a credential. See
+`deploy/config.example.yml` for one entry of each kind.
 
-The `llama-local.service` router listens only on `127.0.0.1:18743`. It starts at
-boot with weights unloaded, loads on the first inference request, and unloads
-weights and context after 300 idle seconds. Monitoring `/health`, `/models`, and
-`/props` does not wake it. One 16K slot and full GPU offload are explicit; automatic
-fit changes are disabled. Processing uses 512-token logical and physical batches;
-larger batches would raise temporary GPU allocations. A 4 GiB system-RAM prompt
-cache (`cache-ram`) keeps processed prompts, such as Codex's shared setup text,
-when another request takes the single slot; it is cleared when the model
-unloads. The route is
-`local/qwen3.8-27b`; requests may take up to five
-minutes on cold start, with no automatic inference retries. Only the direct-answer
-reasoning choice is advertised initially. Shared search uses the existing cloud
-subscription helper; ordinary inference is local.
+### Modal
 
-The GGUF's built-in Qwen chat template rejects a system or developer message
-after the first user turn, which Codex sends on every desktop request. llama.cpp
-therefore loads `deploy/files/qwen3.8-27b-chat-template.jinja`: the embedded
-template with only that check changed to render a normal system turn. Deployment
-stops if the model's embedded template no longer matches `upstream_sha256` in
-`scripts/local-model.json`. To regenerate after a model update, run
-`uv run --no-project scripts/gguf_template.py <model.gguf> --extract deploy/files/qwen3.8-27b-chat-template.jinja`
-(it prints the new `upstream_sha256`), reapply the header comment and the
-one-line change, then update `sha256`. Remove the override, its preset line,
-and the manifest entry once upstream accepts mid-conversation system messages
-(llama.cpp #27367); the late-system probe in `verify_local.py` stays.
+Modal endpoints are OpenAI-compatible routes:
 
-From a clean committed checkout on Grace:
+- `model: openai/<endpoint>`;
+- `api_base: https://inference.<region>.modal.direct/v1`;
+- `api_key: os.environ/MODAL_API_KEY`;
+- `use_chat_completions_api: true`.
+
+Stock LiteLLM bridges Responses to Chat Completions. No Modal SDK or custom adapter
+is installed. Load the token with a `{modal_token: MODAL_API_KEY}` credential.
+
+Endpoint names are not model IDs. Set `model_info.catalog_pricing` explicitly to
+show prices. Begin with a fresh task: encrypted OpenAI compaction state is not
+converted for Modal.
+
+### AWS Bedrock
+
+Use LiteLLM's Bedrock parameters (`model: bedrock/...` and `aws_region_name`),
+with a `{json: {...}}` credential exporting `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, and `AWS_REGION_NAME`. The launcher disables ambient AWS
+credential sources.
+
+- **Responses mode.** Models served by Bedrock's native Responses API set
+  `mode: responses` in `model_info` and `store: false` in `litellm`, so history is
+  replayed by the client.
+  - Bedrock's Responses authorization needs a separate `bedrock:InvokeModel`
+    statement on the account's `project/default`, constrained by `ArnEquals` on
+    `bedrock:ModelArn`. See
+    [AWS's Responses contract](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-responses-api.html).
+  - This deployment never changes IAM, so an administrator must reconcile that
+    policy.
+  - Do not grant the runtime identity stored-response management, IAM
+    administration, or wildcard model access.
+- **Forced tool selection.** Some profiles reject it. Add
+  `verify: {args: [--auto-tool-choice]}`.
+- **Tool-name length.** Bedrock caps tool names at 64 characters. Code Mode keeps
+  connected-app tool names within that limit.
+- **Effort levels.** Advertise only the levels the pinned adapter accepts.
+- **Validators.** Use `verify_capabilities.py`, `verify_shared_search.py`, and
+  `verify_codex_image.py`. The image check needs a correct visual answer for both
+  an attachment and a `view_image` tool result, and the expected answer never
+  appears in the prompt.
+
+### Google Vertex AI
+
+Use `model: vertex_ai/<model>` with `vertex_project` and `vertex_location`. Load a
+restricted service-account key with a
+`{path_env: [VERTEX_CREDENTIALS_PATH, GOOGLE_APPLICATION_CREDENTIALS]}` credential.
+The SDK reads the decrypted file from systemd's private credential directory. No
+key is copied elsewhere. Validate with `verify_capabilities.py` and
+`verify_shared_search.py`.
+
+### Claude subscription adapter
+
+A `claudesdk/<model>` route runs Claude through the Claude Agent SDK, using the
+account's existing `claude auth login`. To renew a login, run that command as the
+configured user and retry. No Claude token appears in LiteLLM YAML, systemd, or
+Git.
+
+**Worker isolation.** The `claude-cli` wrapper starts the SDK's binary with a
+minimal environment. Workers get:
+
+- an empty private working directory;
+- no settings sources;
+- only the declared MCP server.
+
+Every command and edit still runs through Codex and its approvals.
+
+**Catalog settings.** Set `codex.base_instructions_file: claude-instructions.md`,
+`tool_mode: direct`, and `supports_search_tool: false`:
+
+- Claude calls Codex tools directly under their real names.
+- `tool_search` is off because the adapter cannot relay it. Hosted search still
+  works through shared search.
+
+**Supported features:**
+
+- streaming and non-streaming Responses;
+- inline images;
+- JSON schema output;
+- summarized reasoning;
+- namespaced functions and freeform patches.
+
+**Not supported:**
+
+- Image URLs are not fetched.
+- Sampling, token-budget, verbosity, and server-side retrieval controls are
+  rejected.
+
+**Fast mode.** `service_tier: "priority"` selects the worker-local
+`fastMode: true`. This requires Claude usage credits.
+
+- Fast is strict: every message must report `usage.speed: "fast"`, or the request
+  fails.
+- The adapter never retries at standard speed. Claude's runtime can still retry
+  internally before the adapter notices.
+- Speed changes apply on the next user turn.
 
 ```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/local.yml --syntax-check
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/local.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/local.yml
+uv run --no-sync scripts/verify_claude.py --isolated --fast-only   # consumes credits
 ```
 
-Preview renders managed settings but skips large downloads, extraction, and live
-inference. Live setup verifies the backend before installing the matching proxy
-integration, then uses the existing model-refresh transaction to validate and
-publish the picker. The default model and other providers are preserved. Restart
-Grace's desktop connection after publication to load the picker. Shared-search
-validation consumes subscription usage.
+**Sessions.**
+
+- **Identifying a session.** Clients send `thread-id` or `x-claude-chat-id` with
+  the full history. Session identity also includes the caller, the model, and the
+  context window.
+- **Concurrency.** Requests for one session are serialized, and chats run
+  independently.
+- **Partial tool results.** These return the outstanding calls with their
+  original IDs.
+- **Retries.** The last 16 responses per worker can be replayed.
+- **Rebuilding.** Forks, compaction, configuration changes, and lost workers
+  rebuild from readable history. Unknown tool execution is never replayed.
+- **Journals.** Private journals under `~/.local/state/litellm/claude/journals`
+  are conversation data.
+- **Worker cap.** At most 20 idle workers (`MAX_WORKERS`, about 110 MiB each) stay
+  alive, with least-recently-used eviction. Workers do not expire on a timer.
+
+Deployment restarts the proxy, which ends in-memory workers, so deploy while
+Claude is idle. The isolated acceptance suite (`verify_claude.py --isolated`)
+starts a disposable proxy and Codex home and covers:
+
+- efforts, images, and schemas;
+- tool continuations, forks, and compaction;
+- switching providers;
+- cancellation;
+- crash recovery.
+
+### Local inference
+
+With `local_inference: true`, `deploy/local.yml` installs the checksum-pinned
+llama.cpp CUDA build and the model recorded in `scripts/local-model.json`. It uses
+the existing driver and installs no CUDA toolkit. It then deploys the gateway and
+runs the shared refresh to publish the configured `local/...` entry.
+
+**Router behavior.** The `llama-local.service` router listens on `127.0.0.1:18743`.
+
+- It starts with the weights unloaded and loads them on the first request.
+- It unloads after 300 idle seconds.
+- Monitoring endpoints do not wake it.
+- It runs one 16K slot with full GPU offload, 512-token batches, and a 4 GiB RAM
+  prompt cache.
+- A cold start can take five minutes.
+
+**Chat template.** The GGUF's built-in chat template rejects a mid-conversation
+system message. llama.cpp therefore loads
+`deploy/files/qwen3.8-27b-chat-template.jinja`, which changes only that check.
+Deployment stops if the embedded template no longer matches `upstream_sha256`.
+
+- **Regenerating the override:** run
+  `uv run --no-project scripts/gguf_template.py <model.gguf> --extract <path>`,
+  reapply the one-line change, and update `sha256`.
+- **Removing it:** delete the override once llama.cpp #27367 lands.
 
 ```sh
-systemctl status llama-local.service
-sudo systemctl stop llama-local.service
-sudo systemctl start llama-local.service
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/local.yml -e refresh_action=rollback
+ansible-playbook -i deploy/inventory.yml deploy/local.yml --check --diff
+ansible-playbook -i deploy/inventory.yml deploy/local.yml
+ansible-playbook -i deploy/inventory.yml deploy/local.yml -e refresh_action=rollback
+uv run --no-sync scripts/verify_local.py --proxy --lifecycle
 ```
 
-Rollback recovers an **unfinished** activation and stops/disables the local
-service. Normal manual stop releases model memory and prevents incoming requests
-from loading it until started again. Nothing detects games or modifies Steam,
-Sunshine, or GameMode. A request during gaming can still load Qwen unless the
-service is stopped. A load failure is explicit; the router remains available for
-status, and systemd restarts are bounded to three in five minutes.
+- **Stopping it.** Stopping `llama-local.service` releases its memory and keeps
+  requests from loading the model. Nothing detects games or other GPU users.
+- **Restart limit.** Systemd restarts are bounded to three in five minutes.
+- **The lifecycle probe** measures cold and warm latency, idle unload, and memory
+  release. Run it when no other local client is active.
 
-Backend rejection stops/disables the new service without publishing routes.
-Route rejection restores the previous config/catalog using the shared recovery
-directory. Successfully installed runtime archives are removed; model artifacts
-remain at their versioned paths for retries. Ordinary deployment checks the saved
-local snapshot. Updates to model/runtime pins require explicit local activation.
+## Subscription voice
 
-Live acceptance (uses fixture lights, never real devices):
+With `voice: true`, LiteLLM serves a narrow stock-Codex WebRTC signaling and
+control adapter. Client audio travels directly over WebRTC; the server runs no
+audio bridge. `deploy/voice.yml` manages it with these actions:
+
+- `preview`
+- `prepare`
+- `verify`
+- `rollback`
+- `finish` (requires `-e voice_desktop_validated=true`)
+- `waive`
+
+See [docs/VOICE.md](docs/VOICE.md) for the contract, reference client,
+verification, and migration to upstream support. See
+[docs/VOICE-ACCEPTANCE.md](docs/VOICE-ACCEPTANCE.md) for acceptance.
+
+## Browser capability
+
+With `browser: {node: /path/to/node}`, `deploy/browser.yml` installs the `browser/`
+package: a conversation-scoped stdio MCP wrapper around Playwright MCP, plus a
+progressively loaded `browser` skill. It connects directly to stock Codex. LiteLLM
+still carries only model traffic. Chromium starts only on a browser operation.
+
+**Sessions and profiles:**
+
+- `browser_session` accepts `status`, `open`, or `close`.
+- Default browsing is isolated and in memory.
+- `open` with `mode: "saved"` and a profile name uses persistent storage under
+  `~/.local/state/codex-browser/profiles/`.
+- Each profile is locked to one conversation at a time.
+- Browsers close after 15 idle minutes.
+- Browser subprocesses do not inherit provider credentials.
+- No arbitrary Node-execution tool is exposed.
 
 ```sh
-UV_PROJECT_ENVIRONMENT=/home/agent/.local/share/litellm/.venv \
-  uv run --no-sync scripts/verify_local.py --proxy --lifecycle
+ansible-playbook -i deploy/inventory.yml deploy/browser.yml                                         # preview
+ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=stage
+ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=prepare
+ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=activate     # restarts the app server
+ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=verify
+ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=finish -e codex_browser_validated=true
 ```
 
-The lifecycle probe explicitly unloads this model, submits concurrent cold
-requests, checks text/tools, waits the full idle interval, checks memory
-release, and resumes a tool conversation after reload. It prints measured timings
-and GPU memory, not estimated performance. Run it when no other local inference
-client is active. Backend-only validation uses `--backend` without `--lifecycle`.
+The actions:
 
-Acceptance covers backend text/tools, LiteLLM Responses streaming and
-continuation, and stock Codex shared search, shell execution, and resumed
-context. The lifecycle probe reports cold/warm latency, idle duration, and GPU
-memory directly. Sleep releases model allocations; fully stopping the service
-also releases its remaining CUDA/process overhead.
-
-## Modal inference
-
-Modal uses stock LiteLLM's Responses-to-Chat-Completions bridge, configured with
-`use_chat_completions_api: true` on each OpenAI-compatible route. No Modal SDK,
-custom inference adapter, source patch, or additional server is installed.
-The upstream is `https://inference.us-west.modal.direct/v1/chat/completions`.
-
-`scripts/modal-models.json` owns the three existing endpoints and their picker
-metadata: Modal DeepSeek V4.1 Flash, Modal GLM 5.3 Flash, and Modal Kimi K3.
-Their `modal/<endpoint-id>` names, reasoning choices, image inputs, and 1,048,576
-token context limits come from the frozen gateway's Modal model definitions.
-These are explicit configuration, not fresh provider discovery. Change the
-manifest and rerun Modal configuration when the endpoints change.
-
-The unit reuses `/etc/credstore.encrypted/codex-gateway-modal` under its original
-credential name, `modal-inference-token`. Deployment requires this existing
-root-owned mode-0600 encrypted file before changing the installation. Systemd
-decrypts it into the private service credential directory. `scripts/launch.py`
-parses a combined `wk-....ws-...` token, `MODAL_PROXY_TOKEN`, or the retained
-`WK_SECRET`/`WS_SECRET` pair without evaluating shell code, then exports only the
-combined token as `MODAL_API_KEY` to LiteLLM. It never prints the key or writes a
-plaintext copy. The encrypted file is neither renamed nor re-encrypted, so its
-embedded credential name and the documented gateway recovery remain valid.
-After loading credentials, the launcher runs `scripts/serve.py`, preserving the
-subscription request customization, fast-mode forwarding, and reviewer behavior.
-
-### Deploy and activate later
-
-From a clean committed checkout on Grace, first update the launcher and service,
-then preview and activate the Modal routes:
-
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --syntax-check
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml --syntax-check
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml
-```
-
-The preview reads the checked-in manifest and installed Codex version. It does
-not decrypt credentials, contact Modal, write configuration, or restart services.
-Live activation checks the candidate catalog with stock Codex, installs routes,
-restarts LiteLLM if needed, and tests every new or changed model for Responses
-streaming, function-call continuation, and stock Codex shell execution and resumed
-context. Those live tests consume Modal inference. The picker is published only
-after validation succeeds. Restart Grace's connection through the owning desktop
-after a picker change, then try a fresh Modal task. The selected default and all
-subscription routes, metadata, and saved discovery stay intact.
-
-Modal setup owns `modal/`; subscription refresh owns `chatgpt/`. Both reuse the
-same activation lock and recovery directory to prevent concurrent changes.
-Successful Modal activation saves `~/.local/state/litellm/modal-models.json`;
-ordinary deployment checks and preserves both providers' saved snapshots.
-Unchanged activation performs no inference or restart. A failed activation restores
-the previous routes and picker. To recover an interrupted Modal activation:
-
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/modal.yml -e refresh_action=rollback
-```
-
-Recovery refuses concurrent file edits and retains
-`~/.local/state/litellm/model-refresh` only until recovery succeeds. Use the
-playbook that started the transaction; rollback rejects a different namespace.
-
-### Capability boundaries
-
-Modal models use the existing named `litellm` provider with HTTP Responses and
-full tool history and shared hosted search. No WebSocket support is advertised.
-The old gateway's search behavior is adapted through LiteLLM's existing search
-interception hooks. Subscription search is unchanged. Existing gateway tasks are
-not relabeled or migrated, and encrypted
-OpenAI compaction state is not converted for Modal. Begin with a fresh task under
-the `litellm` provider. Local compaction, subagents, and long-running task behavior
-still require deployment-time acceptance testing.
-
-The offline tests below check the pinned LiteLLM async router with an in-memory
-HTTP transport and synthetic credentials, including text streaming, reasoning
-effort, namespaced functions, freeform tools, and tool-result continuation. They
-also check stock Codex catalog parsing, preview, rollback, credential formats,
-and preservation of subscription refresh. They do not establish live endpoint
-availability or validate the retained secret. Installing and activating this
-change is a separate operation.
-
-### Repair installations missing the approval reviewer
-
-An installation missing the reserved route rejects approval requests with
-`Invalid model name passed in model=codex-auto-review`. From a clean committed
-checkout containing this fix, run refresh **before** ordinary deployment: the
-deployment snapshot check intentionally rejects the old, incomplete routing.
-
-```sh
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/refresh-models.yml
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml --check --diff
-ansible-playbook -i deploy/inventory.yml --limit grace deploy/deploy.yml
-uv run --no-sync scripts/verify_review.py
-```
-
-The refresh uses this checkout's scripts and the existing installed environment;
-it requires no reinstall or credential changes. Its preview should show
-`test_reviewer: true`. Unchanged chat routes need no additional inference probes.
-Refresh rolls back routing and metadata if reviewer validation fails; use the
-documented refresh rollback command if the operation is interrupted.
-
-Restart Grace's connection through the owning desktop if refresh reports a
-catalog change. Then exercise one authorized, read-only command that requires
-automatic approval, such as a host service-status check, and confirm an actual
-review decision and command result. `verify_review.py` checks only route access,
-streaming completion, and a JSON response; it does not prove Codex's native
-approval lifecycle. The repository customization forwards `text.format`, but this
-probe also explicitly prompts for JSON and does not itself assert schema enforcement;
-see the separate subscription-backend evidence above.
-
-If the broken reviewer prevents the repair command from being approved, perform
-the repair through a user-approved host terminal. Do not disable or work around
-approval controls from inside the agent task.
+- **stage** installs a content-addressed release under
+  `~/.local/share/codex-browser/` and runs its fixtures.
+- **prepare** registers the skill and MCP without restarting.
+- **activate** adds the `40-browser.conf` drop-in and restarts.
+- **rollback** restores the previous release, or removes the registration.
+- **finish** removes the superseded release.
 
 Development checks:
 
 ```sh
-uv sync --locked
-LITELLM_LOCAL_MODEL_COST_MAP=True uv run --no-sync -m unittest discover -s scripts -p 'test_*.py'
+npm --prefix browser ci --ignore-scripts --no-audit --no-fund
+npm --prefix browser test
+node browser/scripts/verify-codex.mjs
 ```
 
-To run these checks without creating or synchronizing a worktree environment on
-Grace, use the existing locked installation explicitly:
+## Validation
 
 ```sh
-UV_PROJECT_ENVIRONMENT=/home/agent/.local/share/litellm/.venv \
-  LITELLM_LOCAL_MODEL_COST_MAP=True \
-  uv run --no-sync -m unittest discover -s scripts -p 'test_*.py'
+uv run --no-sync scripts/verify.py           # auth rejection, streaming, tool round trip
+uv run --no-sync scripts/verify_codex.py     # stock Codex search and tools
+uv run --no-sync scripts/verify_review.py    # reserved reviewer route
 ```
 
-These checks are offline. The startup test runs the actual shell/uv launcher and
-proxy on a temporary loopback port against a local SSE fixture with synthetic
-credentials. It exercises outgoing fields, exact/absent instructions, ordinary
-requests, tools/continuation, backend errors, and the reserved reviewer verifier.
-Existing tests also retain the reviewer routing, hidden metadata, and refresh
-checks. They neither contact the subscription backend nor restart live services.
+Offline tests run one file at a time against the locked environment:
+
+```sh
+(cd scripts && LITELLM_LOCAL_MODEL_COST_MAP=True uv run --no-sync --project .. -m unittest test_refresh_models)
+```
+
+The startup test runs the real launcher and proxy on a temporary loopback port,
+using a local SSE fixture and synthetic credentials. Tests that need an installed
+Codex binary or Ansible take its path from an environment variable and skip
+explicitly without it:
+
+| Variable | Used by |
+| --- | --- |
+| `CODEX_ERROR_TEST_BINARY` | `test_responses_errors.py` |
+| `CODEX_COMPACTION_TEST_BINARY` | `test_proxy_startup.py` |
+| `ANSIBLE_TEST_BINARY` | `test_ansible_targets.py` |
+
+### Missing approval reviewer
+
+An installation without the reserved route rejects approvals with
+`Invalid model name passed in model=codex-auto-review`. Run `refresh-models.yml`
+before `deploy.yml`, because deployment's snapshot check rejects the incomplete
+routing. Then run `verify_review.py`. If the broken reviewer blocks approval of
+the repair itself, run it from a user-approved terminal. Do not work around
+approval controls.
 
 ### Streaming provider failures
 
-The Responses endpoint translates LiteLLM 1.102.1's bare SSE error objects into
-terminal `response.failed` events. Provider messages and error codes are retained
-(HTTP 429 becomes `rate_limit_exceeded`), so Codex reports the actual quota or
-provider failure instead of a generic missing-`response.completed` disconnect.
-This does not change model selection or bypass subscription limits.
-
-Offline regression: `uv run --no-sync python -m unittest discover -s scripts`.
-To also verify error presentation with an installed stock Codex binary, set
-`CODEX_ERROR_TEST_BINARY` to its absolute path when running
-`test_responses_errors.py`; the test uses a loopback fixture and synthetic
-credentials, without modifying existing chats.
-
-### Subscription voice experiment — October 4, 2026
-
-The selected architecture puts WebRTC on the client (including the planned Echo
-Dot client). Stock Codex on Grace owns conversations, reasoning, tool execution,
-and voice delegation. The client uses Codex's existing app-server control
-connection for session startup and SDP negotiation; WebRTC carries audio between
-the client and the upstream voice service. Grace retains subscription credentials
-and performs signaling/control routing. Do not add a Grace audio bridge or move
-client audio capture, playback, buffering, or interruption handling onto Grace.
-
-An isolated stock Codex 0.159.2 server and the existing subscription credentials
-passed WebRTC speech input/output with `gpt-live-1-codex` and `cove`. A spoken
-request to run `printf` was delegated through the existing LiteLLM text route:
-Codex executed `printf 'voice test'`, returned exit code 0 and output `voice test`,
-and the voice service subsequently spoke “Ran it—output is voice test.” No Codex
-source patch or separately billed API credential was used.
-
-The temporary `scripts/experimental_voice_gateway.py` supplied missing call
-creation and sideband routes on a separate authenticated loopback listener. It
-is a diagnostic prototype, not an installed service or a general LiteLLM adapter.
-The temporary listener and disposable Codex test servers have been stopped;
-production gateway and Codex configuration were not changed. The intended server
-change is narrow subscription signaling/control support in the gateway, with
-audio transport and device behavior implemented by the client.
-
-The direct WebRTC probe requesting `marin` received “Voice session access
-denied”; changing only the voice to `cove` established the session. The standalone
-subscription audio WebSocket remained denied with `cove`. Those failures do not
-establish that the subscription lacks voice access, and that standalone route is
-not a dependency of the selected architecture. The accepted WebSocket sideband
-attaches to an already-created WebRTC call and is a different route.
-
-Remaining validation includes the actual desktop microphone/speaker experience,
-client WebRTC compatibility and resource use on the Dot, interruption and echo
-handling, and reconnect/lifecycle behavior. One earlier spoken trial produced an
-empty delegation transcript; a subsequent trial completed the full tool round
-trip. These successful prototype tests do not establish unattended reliability.
-
-Subsequent desktop evidence supplied by the user on October 4:
-
-- Local Mac chat **Respond to greeting**, ID
-  `01a1082d-3f54-7581-b401-eb7d5c5dd3c3`, has a completed realtime transcript-tail
-  handoff: user “Hey, can you hear me”; assistant “Yeah, I can hear you clearly.”
-  Its host is `local` and its workspace is
-  `/Users/andrew/Documents/Codex/2026-10-04/hel`. This verifies an actual desktop
-  spoken exchange on the Mac. The retrieved history does not record its precise
-  media transport, voice selection, or provider configuration.
-- Archived Grace chat **hello**, ID
-  `01a1082d-a9e5-7a01-9b90-f437a5297dd4`, belongs to
-  `/home/agent/workspaces/card_studio_deno`. Its history contains a successful
-  text greeting only. The user's accompanying screenshot shows voice startup
-  failing with HTTP 404 at `http://127.0.0.1:4000/v1/live`. This is the installed
-  gateway's missing call-creation route; it is not a subscription denial and
-  does not test whether the audio transport would subsequently work.
-
-The desktop microphone/speaker experience is therefore demonstrated for the
-local Mac chat; it remains unverified through Grace's installed gateway. Keep
-these two chats separate when assessing what has actually been deployed.
-
-
-## AWS Bedrock models
-
-Grace and Love publish exactly `bedrock/opus-5.5` and `bedrock/gpt-6.1-sol` through the
-US inference profiles in `scripts/bedrock-models.json`, using `us-east-1`.
-Both models must be discoverable and support streaming before activation.
-No substitute model is selected. The current Codex default stays selected.
-
-GPT uses `bedrock/us.openai.gpt-6.1-sol` in native Responses mode; Opus retains
-its working Converse route. GPT never translates Responses history into Chat
-messages. Native search continuations preserve reasoning items, client tool
-calls, and image-bearing tool outputs. Both routes retain their public slugs.
-GPT requests explicitly use `store: false` and client-replayed history.
-
-The IAM runtime policy generator includes a separate `bedrock:InvokeModel`
-statement for the account's `us-east-1:project/default`, constrained by
-`ArnEquals` on `bedrock:ModelArn` to the exact GPT inference profile. Existing
-installed IAM policies are **not** changed by the playbook: an authorized
-administrator must reconcile that statement before native acceptance. Do not
-grant stored-response management, IAM administration, or wildcard model access
-to the runtime identity. See the [AWS Responses authorization contract](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-responses-api.html).
-
-Image acceptance requires a correct visual answer for both a streamed user
-attachment and a streamed `view_image` function result with its tool declaration.
-The expected answer is absent from the prompt. Stream errors, incomplete streams,
-and incorrect answers reject activation. Before deploying, prove the native
-streamed tool-image path in isolation, then validate Grace before Love. Do not
-cut over while another runtime transaction is pending. The Bedrock playbook
-journals only its managed scripts and credential drop-in using the existing
-runtime recovery mechanism. Restore model routes/catalog first, then their
-matching runtime files, without syncing dependencies or touching credentials.
-Acceptance requires a real stock-Codex search, followed by local image viewing,
-then shell execution retaining the image and search context on both models.
-
-Run one transaction through `bedrock.yml`. The runtime entry point invokes that
-same transaction; runtime-only copying is no longer a deployment path.
-Interrupted recovery uses `bedrock.yml -e refresh_action=rollback` with the
-original committed source. Pending Codex/voice/model transactions block
-preparation. Accepted deployment or completed recovery removes the journals.
-
-The runtime uses the retained IAM identity and encrypted credential at
-`/etc/credstore.encrypted/litellm-bedrock-aws`. Systemd supplies it to the launcher;
-AWS keys are parsed in memory and ambient credential sources are disabled.
-This workflow does not provision IAM users, rotate keys, or enroll models.
-
-For Love's initial cloud setup, run on Grace:
-
-```sh
-mise exec -- uv run --no-sync scripts/provision_cloud.py --target love --provider bedrock
-mise exec -- uv run --no-sync scripts/provision_cloud.py --target love --provider vertex
-```
-
-This explicitly reuses the accepted restricted inference identities. It decrypts
-only in memory, sends plaintext over authenticated SSH into Love's systemd
-encryption process, and installs root-owned 0600 ciphertext with Love's host key.
-It never copies Grace ciphertext, cloud administrator credentials, or ChatGPT
-tokens. Existing Love credentials are validated without replacement. AWS retains
-its existing IAM username `litellm-grace`; both hosts charge the same credited
-account/project. Host-specific identity/key rotation can be performed separately.
-
-Then run the runtime recovery prepare, full deploy, and finish sequence locally
-on Love shown above. This loads both credential drop-ins without changing Codex's
-default. Run `bedrock.yml` and `vertex.yml` locally with `--limit love` to validate
-and publish the cloud entries. Both activation workflows preserve the other
-providers and use the existing model-refresh recovery transaction.
-
-Run from a clean, committed checkout:
-
-```sh
-uv run --no-sync scripts/configure_bedrock.py preview
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/bedrock.yml --syntax-check
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/bedrock.yml --check --diff
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/bedrock.yml
-```
-
-The playbook installs only the Bedrock launcher, search, credential drop-in, and
-activation utilities, preserving pending voice acceptance and its runtime files.
-It requires matching installed dependency locks. It then activates through the shared
-refresh transaction. Both models must pass hosted search, streaming, tool-result
-continuation, and stock Codex checks before the picker and discovery snapshot are
-published. Failed activation restores the previous routes and catalog. Recover an
-interrupted transaction with:
-
-```sh
-mise exec -- ansible-playbook -i deploy/inventory.yml --limit grace deploy/bedrock.yml -e refresh_action=rollback
-```
-
-After successful publication, restart Grace through the owning Codex desktop to
-reload the picker. Ordinary deployments verify the retained Bedrock snapshot;
-subscription and other provider refreshes preserve the Bedrock routes.
-
-Bedrock effort levels are verified against the pinned adapter and live inference:
-Opus offers low, medium, high, and max; GPT offers low, medium, high, and xhigh.
-Opus xhigh is excluded because the pinned Bedrock adapter rejects it.
-
-Bedrock acceptance uses automatic tool choice because the Opus profile rejects
-forced tool selection. Tool-result continuations retain the tool definitions,
-as required by Bedrock Converse. Explicit forced choices are not silently changed.
-
-Both Bedrock entries use Codex Code Mode. Direct Opus tools expand connected-app
-names beyond Bedrock's 64-character tool-name limit; Code Mode exposes those tools
-through compatible entry points while retaining shell and hosted-search access.
-
-Google Vertex AI setup, separate runtime/provider activation, security review,
-and recovery: [docs/VERTEX.md](docs/VERTEX.md).
+The Responses endpoint translates LiteLLM's bare SSE error objects into terminal
+`response.failed` events. Provider messages and codes are retained, and HTTP 429
+becomes `rate_limit_exceeded`, so Codex reports the actual failure instead of a
+generic disconnect.

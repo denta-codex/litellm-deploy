@@ -1,4 +1,4 @@
-"""Exercise pinned stock LiteLLM using an in-memory Modal HTTP transport."""
+"""Exercise pinned stock LiteLLM Chat Completions routes using an in-memory HTTP transport."""
 import json
 import asyncio
 import os
@@ -14,13 +14,20 @@ os.environ['LITELLM_LOCAL_MODEL_COST_MAP'] = 'True'
 os.environ['LITELLM_TELEMETRY'] = 'False'
 
 import litellm
-from configure_modal import MANIFEST, generate
+from refresh_models import configured_models
 
 litellm.telemetry = False
 litellm.turn_off_message_logging = True
 
+SPECS = [{'name': 'example/' + model, 'model_info': {'mode': 'chat'},
+          'litellm': {'model': 'openai/' + model, 'api_base': 'https://bridge.invalid/v1',
+                      'api_key': 'wk-fake.ws-fake', 'use_chat_completions_api': True},
+          'codex': {'display_name': model, 'context_window': 1048576, 'input_modalities': ['text', 'image'],
+                    'supported_reasoning_levels': levels, 'default_reasoning_level': 'high'}}
+         for model, levels in (('alpha', ['none', 'low', 'high', 'xhigh', 'max']), ('beta', ['low', 'high', 'max']))]
 
-class ModalBridgeTests(unittest.IsolatedAsyncioTestCase):
+
+class ChatBridgeTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def loop_factory():
         loop = asyncio.new_event_loop()
@@ -32,18 +39,15 @@ class ModalBridgeTests(unittest.IsolatedAsyncioTestCase):
 
     @classmethod
     def setUpClass(cls):
-        config, cls.catalog, _ = generate(json.loads(MANIFEST.read_text()), {}, {}, '')
+        models = configured_models(SPECS)
+        cls.catalog = {'models': [row for _, row, _ in models]}
         cls.requests = []
-
-        cls.routes = config['model_list']
-        for route in cls.routes:
-            route['litellm_params']['api_base'] = 'https://modal.invalid/v1'
-            route['litellm_params']['api_key'] = 'wk-fake.ws-fake'
+        cls.routes = [route for route, _, _ in models]
 
     def upstream(self, request):
         body = json.loads(request.content)
         self.requests.append((request.url.path, request.headers['Authorization'], body))
-        self.assertEqual(str(request.url), 'https://modal.invalid/v1/chat/completions')
+        self.assertEqual(str(request.url), 'https://bridge.invalid/v1/chat/completions')
         output = body.get('tools', [])
         if output:
             name = output[0]['function']['name']
@@ -54,7 +58,7 @@ class ModalBridgeTests(unittest.IsolatedAsyncioTestCase):
                      'function': {'name': name, 'arguments': arguments}}]}
             reason = 'tool_calls'
         else:
-            delta = {'role': 'assistant', 'content': 'MODAL_BRIDGE_OK'}
+            delta = {'role': 'assistant', 'content': 'BRIDGE_OK'}
             reason = 'stop'
         events = []
         for choice in ({'index': 0, 'delta': delta, 'finish_reason': None},
@@ -91,11 +95,11 @@ class ModalBridgeTests(unittest.IsolatedAsyncioTestCase):
         for route in self.routes:
             with self.subTest(model=route['model_name']):
                 events = await self.response(route['model_name'], input='Say hello', reasoning={'effort': 'high'})
-                self.assertIn('MODAL_BRIDGE_OK', ''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'))
+                self.assertIn('BRIDGE_OK', ''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'))
                 path, auth, body = self.requests[-1]
                 self.assertEqual(path, '/v1/chat/completions')
                 self.assertEqual(auth, 'Bearer wk-fake.ws-fake')
-                self.assertEqual(body['model'], route['model_name'].removeprefix('modal/'))
+                self.assertEqual(body['model'], route['model_name'].removeprefix('example/'))
                 self.assertEqual(body['reasoning_effort'], 'high')
                 self.assertTrue(body['stream_options']['include_usage'])
 
@@ -124,7 +128,7 @@ class ModalBridgeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any(m['role'] == 'tool' and m['content'] == 'PROBE_RESULT' for m in messages))
 
     def test_stock_codex_accepts_catalog(self):
-        with tempfile.TemporaryDirectory(prefix='modal-catalog-') as directory:
+        with tempfile.TemporaryDirectory(prefix='bridge-catalog-') as directory:
             catalog = Path(directory) / 'models.json'
             catalog.write_text(json.dumps(self.catalog))
             result = subprocess.run(['codex', 'debug', 'models', '-c', 'model_catalog_json=' + json.dumps(str(catalog))],

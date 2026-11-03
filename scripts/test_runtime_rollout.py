@@ -6,39 +6,57 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import yaml
+
+import deploy_config
 import runtime_rollout as runtime
+
+SOURCE = Path(__file__).resolve().parent.parent
 
 
 class RuntimeTemplates(unittest.TestCase):
-    def test_current_service_templates_can_be_rendered(self):
-        source=Path(__file__).resolve().parent.parent
-        result=runtime.candidates(source)
-        compaction=result['/etc/systemd/system/litellm.service.d/30-compaction-recovery.conf']['text']
-        self.assertIn('COMPACTION_FALLBACK_ENABLED=true',compaction)
-        self.assertIn('LoadCredentialEncrypted=vertex-ai-credentials:',
-            result['/etc/systemd/system/litellm.service.d/50-vertex.conf']['text'])
+    """The rollout renders the same files as deploy.yml, driven only by the configuration."""
+    def setUp(self):
+        self.config = deploy_config.load(SOURCE/'deploy/config.example.yml')
+        home = Path(self.config['home'])
+        for name, value in [('CONFIG', self.config), ('HOME', home), ('ROOT', home/'.local/share/litellm'),
+                            ('UV', '/managed/uv')]:
+            self.enterContext(patch.object(runtime, name, value))
+        self.result = runtime.candidates(SOURCE)
+        self.unit = self.result[runtime.UNIT]['text']
 
-    def test_bedrock_candidates_match_exact_ansible_copy_list(self):
-        import yaml
-        source = Path(__file__).resolve().parent.parent
-        tasks = yaml.safe_load((source/'deploy/tasks/bedrock-runtime.yml').read_text())
-        copied = next(t['loop'] for t in tasks if t.get('name') == 'Install Bedrock runtime and matching validation utilities')
-        with patch.object(runtime, 'SCOPE', 'bedrock'):
-            targets = runtime.candidates(source)
-        expected = {str(runtime.ROOT/'scripts'/name) for name in copied}
-        expected.add('/etc/systemd/system/litellm.service.d/40-bedrock.conf')
-        self.assertEqual(set(targets), expected)
+    def test_unit_loads_every_configured_credential(self):
+        for credential in self.config['credentials']:
+            self.assertIn(f"LoadCredentialEncrypted={credential['name']}:{credential['path']}\n", self.unit)
+        self.assertIn('LoadCredentialEncrypted=litellm-proxy-key:/etc/credstore.encrypted/litellm-proxy-key', self.unit)
+        self.assertIn('COMPACTION_FALLBACK_ENABLED=true', self.unit)
+        self.assertIn('LITELLM_VOICE_ENABLED=false', self.unit)
+        self.assertIn('ExecStart=/home/example/.local/share/litellm/scripts/start-litellm /managed/uv ', self.unit)
 
-    def test_bedrock_packages_host_settings_helper_for_installed_validators(self):
-        self.assertIn('deployment.py', runtime.BEDROCK_FILES)
-        import yaml
-        source = Path(__file__).resolve().parent.parent
-        tasks = yaml.safe_load((source/'deploy/tasks/bedrock-runtime.yml').read_text())
-        for name in ('Verify existing provider snapshots', 'Verify retained Bedrock routes'):
-            task = next(t for t in tasks if t.get('name') == name)
-            # Preflight uses the installed generator first; source resolves
-            # helper imports until the journalled runtime copy installs them.
-            self.assertEqual(task['environment']['PYTHONPATH'], '{{ source_root }}/scripts')
+    def test_unit_without_credentials_loads_only_the_gateway_key(self):
+        with patch.object(runtime, 'CONFIG', self.config | {'credentials': [], 'voice': True}):
+            unit = runtime.candidates(SOURCE)[runtime.UNIT]['text']
+        self.assertEqual(unit.count('LoadCredentialEncrypted='), 1)
+        self.assertIn('LITELLM_VOICE_ENABLED=true', unit)
+
+    def test_credential_map_matches_configuration(self):
+        exports = json.loads(self.result['/home/example/.config/litellm/credentials.json']['text'])
+        self.assertEqual(exports, deploy_config.credential_exports(self.config))
+        self.assertEqual(exports['litellm-proxy-key'], {'env': 'LITELLM_MASTER_KEY'})
+
+    def test_deployment_settings_name_no_host(self):
+        settings = json.loads(self.result['/home/example/.config/litellm/deployment.json']['text'])
+        self.assertEqual(settings['home'], '/home/example')
+        self.assertNotIn('host', settings)
+
+    def test_retired_files_are_journalled_as_removals(self):
+        retired = yaml.safe_load((SOURCE/'deploy/retired.yml').read_text())
+        for name in retired['scripts']:
+            self.assertIsNone(self.result[str(runtime.ROOT/'scripts'/name)])
+            self.assertFalse((SOURCE/'scripts'/name).exists(), name)
+        for name in retired['dropins']:
+            self.assertIsNone(self.result[f'{runtime.UNIT}.d/{name}'])
+
 
 class RuntimeRecovery(unittest.TestCase):
     def setUp(self):
@@ -86,6 +104,17 @@ class RuntimeRecovery(unittest.TestCase):
         self.assertEqual(self.config.read_text(),'Bedrock routes')
         self.assertTrue(any('sync' in c.args[0] and '--locked' in c.args[0] for c in run.call_args_list))
 
+    def test_removed_file_is_restored_on_rollback(self):
+        retired = self.root/'old_provider.py'
+        journal = json.loads(runtime.JOURNAL.read_text())
+        journal['before'][str(retired)] = {'text': 'legacy', 'mode': 0o700}
+        journal['after'][str(retired)] = None
+        runtime.JOURNAL.write_text(json.dumps(journal))
+        with patch('runtime_rollout.subprocess.run', return_value=subprocess.CompletedProcess([], 0)), \
+                patch.object(runtime, 'wait_for_health'):
+            runtime.rollback()
+        self.assertEqual(retired.read_text(), 'legacy')
+
     def test_failed_first_install_does_not_sync_or_restart_a_missing_previous_runtime(self):
         self.lock.unlink()
         journal=json.loads(runtime.JOURNAL.read_text())
@@ -102,94 +131,23 @@ class RuntimeRecovery(unittest.TestCase):
         self.assertFalse(any('sync' in call.args[0] or 'restart' in call.args[0] for call in run.call_args_list))
         self.assertFalse(runtime.JOURNAL.exists())
 
-    def test_journal_from_another_host_is_rejected_before_mutation(self):
-        journal=json.loads(runtime.JOURNAL.read_text())
-        journal['host']='love'
-        runtime.JOURNAL.write_text(json.dumps(journal))
-        with patch('runtime_rollout.subprocess.run') as run:
-            for action in (runtime.finish, runtime.rollback):
-                with self.assertRaisesRegex(ValueError, 'different host'):
-                    action()
-            run.assert_not_called()
-        self.assertTrue(runtime.JOURNAL.exists())
+    def test_journal_for_another_home_or_layout_is_rejected_before_mutation(self):
+        original = json.loads(runtime.JOURNAL.read_text())
+        for change in ({'home': '/elsewhere'}, {'schema': 1}):
+            runtime.JOURNAL.write_text(json.dumps(original | change))
+            with patch('runtime_rollout.subprocess.run') as run:
+                for action in (runtime.finish, runtime.rollback):
+                    with self.assertRaisesRegex(ValueError, 'different configuration'):
+                        action()
+                run.assert_not_called()
+            self.assertTrue(runtime.JOURNAL.exists())
 
-
-class BedrockRuntimeRecovery(RuntimeRecovery):
-    def setUp(self):
-        super().setUp()
-        self.enterContext(patch.object(runtime, 'SCOPE', 'bedrock'))
-        self.enterContext(patch.object(runtime, 'unrelated_models', return_value={'fixture': 'unchanged'}))
-        journal = json.loads(runtime.JOURNAL.read_text())
-        journal.update(scope='bedrock', unrelated_models={'fixture': 'unchanged'},
-                       model_before={str(self.config): runtime.record(self.config)})
-        runtime.JOURNAL.write_text(json.dumps(journal))
-
-    def test_bedrock_does_not_sync_environment(self):
-        runtime.restore(self.after)
-        with patch('runtime_rollout.subprocess.run', return_value=subprocess.CompletedProcess([], 0)) as run, patch.object(runtime, 'wait_for_health'):
-            runtime.rollback()
-        self.assertEqual(self.file.read_text(), 'old')
-        self.assertFalse(any('sync' in c.args[0] for c in run.call_args_list))
-        self.assertFalse(runtime.JOURNAL.exists())
-
-    def test_pending_model_recovery_blocks_runtime_restore(self):
+    def test_pending_model_refresh_blocks_runtime_restore(self):
         (self.state/'model-refresh').mkdir()
         with patch('runtime_rollout.subprocess.run') as run:
             with self.assertRaisesRegex(ValueError, 'routes/catalog'):
                 runtime.rollback()
             run.assert_not_called()
-
-    def test_recovery_restores_models_before_runtime(self):
-        from unittest.mock import Mock
-        transaction = self.state/'model-refresh'
-        transaction.mkdir()
-        refresh = Mock()
-        refresh.transaction = transaction
-        refresh.originals.return_value = {'config': 'old'}
-        refresh.journal.return_value = {'originals': {'config': 'old'}}
-        order = []
-        refresh.rollback.side_effect = lambda: order.append('models')
-        def rollback():
-            self.assertFalse(transaction.exists())
-            order.append('runtime')
-            return {'restored': True}
-        with patch('configure_bedrock.BedrockSetup', return_value=refresh), patch.object(runtime, 'rollback', side_effect=rollback):
-            self.assertEqual(runtime.recover_bedrock(self.home), {'restored': True})
-        self.assertEqual(order, ['models', 'runtime'])
-
-    def test_model_files_must_be_restored_before_runtime(self):
-        self.config.write_text('new Bedrock route')
-        with patch.object(runtime, 'assert_records', wraps=runtime.assert_records), patch('runtime_rollout.subprocess.run') as run:
-            with self.assertRaises(ValueError):
-                runtime.rollback()
-            run.assert_not_called()
-
-    def test_unrelated_model_change_is_rejected(self):
-        with patch.object(runtime, 'unrelated_models', return_value={'fixture': 'other'}), patch('runtime_rollout.subprocess.run') as run:
-            with self.assertRaisesRegex(ValueError, 'Unrelated model'):
-                runtime.finish()
-            run.assert_not_called()
-
-    def test_scope_mismatch_rejected(self):
-        with patch.object(runtime, 'SCOPE', 'full'):
-            with self.assertRaisesRegex(ValueError, 'scope'):
-                runtime.rollback()
-
-    def test_finish_requires_all_candidates_and_preserves_recovery(self):
-        with self.assertRaises(ValueError):
-            runtime.finish()
-        runtime.restore(self.after)
-        runtime.finish()
-        self.assertFalse(runtime.JOURNAL.exists())
-        self.assertTrue((self.state/'bedrock-runtime-installed.json').exists())
-        self.assertFalse((self.state/'runtime-installed.json').exists())
-
-    def test_partial_deployment_can_restore_saved_lock_and_files(self):
-        self.test_bedrock_does_not_sync_environment()
-
-    def test_failed_first_install_does_not_sync_or_restart_a_missing_previous_runtime(self):
-        # Bedrock scope is only permitted on an existing gateway, not a first install.
-        self.test_bedrock_does_not_sync_environment()
 
 
 if __name__=='__main__':unittest.main()

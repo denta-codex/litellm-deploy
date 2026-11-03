@@ -12,15 +12,12 @@ def main():
     args = parser.parse_args()
     install()
     from litellm.proxy.proxy_server import app
-    if os.environ.get('LITELLM_CLAUDE_ENABLED', 'true') == 'true':
-        from claude_provider import install as install_claude
-        install_claude(app)
-    else:
-        # Shared search/compaction and Responses errors also need request context.
-        from claude_context import CaptureRequest
-        app.add_middleware(CaptureRequest)
+    # Registers the lazy claudesdk provider (used only if a configured route
+    # names it) and the request-context middleware shared search needs.
+    from claude_provider import install as install_claude
+    install_claude(app)
     # Temporary subscription signaling adapter; retirement steps: docs/VOICE.md.
-    if os.environ.get('LITELLM_VOICE_ENABLED', 'true') == 'true':
+    if os.environ.get('LITELLM_VOICE_ENABLED') == 'true':
         from live_voice import install as install_voice
         install_voice(app)
     from shared_search import install as install_search

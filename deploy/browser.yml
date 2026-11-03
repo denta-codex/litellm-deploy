@@ -1,4 +1,4 @@
-- name: Stage, prepare, activate, verify, or roll back Grace's browser capability
+- name: Stage, prepare, activate, verify, or roll back the browser capability
   hosts: all
   gather_facts: true
   vars:
@@ -7,22 +7,20 @@
     browser_root: "{{ litellm_home }}/.local/share/codex-browser"
     browser_state: "{{ litellm_home }}/.local/state/codex-browser"
     browser_skill: "{{ litellm_home }}/.codex/skills/browser"
-    browser_node: "{{ litellm_home }}/.local/share/mise/installs/node/26.8.1/bin/node"
-    browser_npm: "{{ litellm_home }}/.local/share/mise/installs/node/26.8.1/bin/npm"
+    browser_node: "{{ litellm_browser.node }}"
+    browser_npm: "{{ litellm_browser.node | dirname }}/npm"
     browser_dropin: /etc/systemd/system/codex-app-server.service.d/40-browser.conf
   pre_tasks:
-    - name: Validate the selected local host
+    - name: Load and validate the deployment configuration
       ansible.builtin.import_tasks: tasks/target.yml
       tags: [always]
-      vars:
-        supported_hosts: [grace]
   tasks:
-    - name: Validate target and action
+    - name: Validate configuration and action
       ansible.builtin.assert:
         that:
-          - ansible_facts.hostname == 'grace'
-          - ansible_facts.user_id == litellm_user
+          - litellm_browser is mapping
           - codex_browser_action in ['preview', 'stage', 'prepare', 'activate', 'verify', 'rollback', 'finish']
+        fail_msg: Set browser.node in the deployment configuration to enable the browser capability.
 
     - name: Calculate the immutable source release
       ansible.builtin.command:

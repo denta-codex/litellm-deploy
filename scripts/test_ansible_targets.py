@@ -8,71 +8,71 @@ from unittest.mock import patch
 
 import yaml
 
+import deploy_config
 import runtime_rollout as runtime
 
 SOURCE = Path(__file__).resolve().parent.parent
 ANSIBLE = os.environ.get('ANSIBLE_TEST_BINARY')
+HOME = '/mnt/volume/example/home'
 
 
 @unittest.skipUnless(ANSIBLE, 'set ANSIBLE_TEST_BINARY for read-only Ansible integration')
 class AnsibleContracts(unittest.TestCase):
     def setUp(self):
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.example = yaml.safe_load((SOURCE / 'deploy/config.example.yml').read_text())
+        self.example |= {'user': 'example', 'home': HOME}
 
-    def run_play(self, play, limit=None):
+    def write_config(self, value):
+        path = self.directory / 'config.yml'
+        path.write_text(yaml.safe_dump(value, sort_keys=False))
+        return path
+
+    def run_play(self, play, config):
         path = self.directory / 'play.yml'
         path.write_text(yaml.safe_dump([play], sort_keys=False))
-        argv = [ANSIBLE, '-i', str(SOURCE / 'deploy/inventory.yml'), str(path), '--check']
-        if limit is not None:
-            argv += ['--limit', limit]
-        return subprocess.run(argv, text=True, capture_output=True, timeout=30,
+        argv = [ANSIBLE, '-i', str(SOURCE / 'deploy/inventory.yml'), str(path), '--check',
+                '-e', 'config=' + str(config)]
+        return subprocess.run(argv, text=True, capture_output=True, timeout=60,
             env=os.environ | {'ANSIBLE_LOCAL_TEMP': str(self.directory / 'local'),
                               'ANSIBLE_REMOTE_TEMP': str(self.directory / 'remote')})
 
-    def test_guard_rejects_wrong_identity_and_unsupported_workflows(self):
-        facts = {'hostname': 'love', 'user_id': 'agent',
-                 'user_dir': runtime.inventory(SOURCE, 'love')['litellm_home']}
-        for name, changes, supported, limit, success in [
-            ('valid', {}, ['grace', 'love'], 'love', True),
-            ('wrong-account', {'user_id': 'root'}, ['grace', 'love'], 'love', False),
-            ('wrong-home', {'user_dir': '/home/agent'}, ['grace', 'love'], 'love', False),
-            ('unsupported', {}, ['grace'], 'love', False),
-            ('missing-selector', {}, ['grace', 'love'], None, False),
-            ('multiple-selector', {}, ['grace', 'love'], 'grace,love', False),
+    def test_guard_requires_a_documented_configuration_for_the_running_account(self):
+        facts = {'user_id': 'example', 'user_dir': HOME}
+        for name, config, fact_changes, success in [
+            ('valid', {}, {}, True),
+            ('unknown-key', {'modal': True}, {}, False),
+            ('wrong-account', {}, {'user_id': 'root'}, False),
+            ('wrong-home', {}, {'user_dir': '/home/example'}, False),
         ]:
             with self.subTest(name=name):
+                path = self.write_config(self.example | {'mise': '/usr/bin/true'} | config)
                 play = {'hosts': 'all', 'gather_facts': False,
-                    'vars': {'ansible_facts': facts | changes, 'supported_hosts': supported,
-                             'codex_mise': '/usr/bin/true'},
+                    'vars': {'ansible_facts': facts | fact_changes},
                     'tasks': [{'ansible.builtin.import_tasks': str(SOURCE / 'deploy/tasks/target.yml')}]}
-                result = self.run_play(play, limit)
+                result = self.run_play(play, path)
                 self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
                 self.assertIn('changed=0', result.stdout)
 
-    def test_recovery_candidates_match_ansibles_actual_templates_on_both_hosts(self):
-        templates = {'litellm.service.j2': '/etc/systemd/system/litellm.service',
-            'compaction-recovery.conf.j2': '/etc/systemd/system/litellm.service.d/30-compaction-recovery.conf',
-            'bedrock.conf.j2': '/etc/systemd/system/litellm.service.d/40-bedrock.conf',
-            'vertex.conf.j2': '/etc/systemd/system/litellm.service.d/50-vertex.conf'}
-        for host in ('grace', 'love'):
-            with self.subTest(host=host):
-                variables = runtime.inventory(SOURCE, host)
-                home = Path(variables['litellm_home'])
-                uv = '/selected/managed/uv'
-                templates['deployment.json.j2'] = str(home / '.config/litellm/deployment.json')
-                paths = {name: self.directory / (host + '-' + name) for name in templates}
-                tasks = [{'ansible.builtin.template': {'src': str(SOURCE / 'deploy/templates' / name),
-                          'dest': str(path)}, 'check_mode': False} for name, path in paths.items()]
-                result = self.run_play({'hosts': 'all', 'gather_facts': False,
-                    'vars': {'litellm_uv': uv, 'litellm_codex': str(home /
-                        f".local/share/mise/installs/codex/{variables['codex_version']}/bin/codex")},
-                    'tasks': tasks}, host)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                with patch.object(runtime, 'HOST', host), patch.object(runtime, 'HOME', home), \
-                        patch.object(runtime, 'ROOT', Path(variables['litellm_root'])), patch.object(runtime, 'UV', uv):
-                    candidates = runtime.candidates(SOURCE)
-                for name, target in templates.items():
-                    self.assertEqual(paths[name].read_text(), candidates[target]['text'], name)
+    def test_recovery_candidates_match_ansibles_actual_templates(self):
+        config = deploy_config.validate(self.example)
+        uv = '/selected/managed/uv'
+        variables = deploy_config.variables(config) | {'litellm_uv': uv}
+        home = Path(HOME)
+        templates = {'litellm.service.j2': runtime.UNIT,
+                     'deployment.json.j2': str(home / '.config/litellm/deployment.json'),
+                     'credentials.json.j2': str(home / '.config/litellm/credentials.json')}
+        paths = {name: self.directory / name for name in templates}
+        tasks = [{'ansible.builtin.template': {'src': str(SOURCE / 'deploy/templates' / name),
+                  'dest': str(path)}, 'check_mode': False} for name, path in paths.items()]
+        result = self.run_play({'hosts': 'all', 'gather_facts': False, 'vars': variables, 'tasks': tasks},
+                               self.write_config(self.example))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with patch.object(runtime, 'CONFIG', config), patch.object(runtime, 'HOME', home), \
+                patch.object(runtime, 'ROOT', Path(variables['litellm_root'])), patch.object(runtime, 'UV', uv):
+            candidates = runtime.candidates(SOURCE)
+        for name, target in templates.items():
+            self.assertEqual(paths[name].read_text(), candidates[target]['text'], name)
 
 
 if __name__ == '__main__':

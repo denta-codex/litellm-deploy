@@ -586,27 +586,6 @@ wheels = [
 ]
 
 [[package]]
-name = "grace-litellm-deploy"
-version = "0.1.0"
-source = { virtual = "." }
-dependencies = [
-    { name = "claude-agent-sdk" },
-    { name = "google-auth" },
-    { name = "litellm", extra = ["proxy"] },
-    { name = "prisma" },
-    { name = "tomlkit" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "claude-agent-sdk", specifier = "==0.2.161" },
-    { name = "google-auth", specifier = "==2.62.0" },
-    { name = "litellm", extras = ["proxy"], specifier = "==1.106.5" },
-    { name = "prisma", specifier = "==0.15.0" },
-    { name = "tomlkit", specifier = ">=0.15,<0.16" },
-]
-
-[[package]]
 name = "granian"
 version = "2.8.3"
 source = { registry = "https://pypi.org/simple" }
@@ -1040,6 +1019,27 @@ proxy = [
     { name = "uvicorn" },
     { name = "uvloop", marker = "sys_platform != 'win32'" },
     { name = "websockets" },
+]
+
+[[package]]
+name = "litellm-deploy"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "claude-agent-sdk" },
+    { name = "google-auth" },
+    { name = "litellm", extra = ["proxy"] },
+    { name = "prisma" },
+    { name = "tomlkit" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "claude-agent-sdk", specifier = "==0.2.161" },
+    { name = "google-auth", specifier = "==2.62.0" },
+    { name = "litellm", extras = ["proxy"], specifier = "==1.106.5" },
+    { name = "prisma", specifier = "==0.15.0" },
+    { name = "tomlkit", specifier = ">=0.15,<0.16" },
 ]
 
 [[package]]

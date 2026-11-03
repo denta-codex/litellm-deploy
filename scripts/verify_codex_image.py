@@ -12,13 +12,13 @@ import tempfile
 import tomlkit
 
 from deployment import codex_binary, proxy_key
-from verify_bedrock import image_fixture
+from verify_capabilities import image_fixture
 from verify_claude import RPC, stop
 
 
 async def verify(args):
     state = Path.home()/'.local/state/litellm'
-    directory = Path(tempfile.mkdtemp(prefix='bedrock-image-acceptance-', dir=state))
+    directory = Path(tempfile.mkdtemp(prefix='image-acceptance-', dir=state))
     process = None
     success = False
     try:
@@ -28,19 +28,19 @@ async def verify(args):
             'model_catalog_json': str(args.catalog.resolve()), 'model_reasoning_effort': 'low',
             'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'live',
             'features': {'shell_snapshot': False, 'code_mode_host': True},
-            'shell_environment_policy': {'exclude': ['BEDROCK_TEST_PROXY_KEY']},
-            'model_providers': {'image_acceptance': {'name': 'Bedrock image acceptance',
+            'shell_environment_policy': {'exclude': ['IMAGE_TEST_PROXY_KEY']},
+            'model_providers': {'image_acceptance': {'name': 'Image acceptance',
                 'base_url': args.base_url.rstrip('/')+'/v1', 'wire_api': 'responses',
-                'env_key': 'BEDROCK_TEST_PROXY_KEY', 'requires_openai_auth': False,
+                'env_key': 'IMAGE_TEST_PROXY_KEY', 'requires_openai_auth': False,
                 'supports_websockets': False, 'request_max_retries': 0, 'stream_max_retries': 0}}}
         (directory/'config.toml').write_text(tomlkit.dumps(config))
         with (directory/'codex.log').open('w') as log:
             process = await asyncio.create_subprocess_exec(str(codex_binary()), 'app-server', cwd=directory,
-                env=os.environ | {'CODEX_HOME': str(directory), 'BEDROCK_TEST_PROXY_KEY': proxy_key()},
+                env=os.environ | {'CODEX_HOME': str(directory), 'IMAGE_TEST_PROXY_KEY': proxy_key()},
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=log, start_new_session=True)
             rpc = RPC(process)
             try:
-                await rpc.call('initialize', {'clientInfo': {'name': 'bedrock_image_acceptance', 'version': '1'},
+                await rpc.call('initialize', {'clientInfo': {'name': 'image_acceptance', 'version': '1'},
                     'capabilities': {'experimentalApi': True}})
                 await rpc.send({'method': 'initialized', 'params': {}})
                 thread = (await rpc.call('thread/start', {'model': args.model, 'modelProvider': 'image_acceptance',
@@ -80,7 +80,7 @@ async def verify(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--model', default='bedrock/gpt-6.1-sol')
+    parser.add_argument('--model', required=True)
     parser.add_argument('--catalog', type=Path, required=True)
     parser.add_argument('--base-url', default='http://127.0.0.1:4000')
     asyncio.run(verify(parser.parse_args()))

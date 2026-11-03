@@ -1,25 +1,23 @@
-- name: Install, preview, apply, verify, roll back, or finish the selected Codex runtime
+- name: Install, preview, apply, verify, roll back, or finish the pinned Codex runtime
   hosts: all
   gather_facts: true
   vars:
     codex_runtime_action: preview
     source_root: "{{ playbook_dir }}/.."
     runtime_script: "{{ litellm_root }}/scripts/codex_runtime.py"
-    runtime_options: "{{ ['--version', codex_version, '--home', litellm_home, '--credential-mode', litellm_credential_mode, '--uv', litellm_uv, '--connection-mode', codex_connection_mode] + (['--forward-agent'] if codex_forward_agent else []) }}"
+    runtime_options: "{{ ['--version', codex_version, '--home', litellm_home, '--credential-mode', litellm_credential_mode, '--uv', litellm_uv] + (['--forward-agent'] if codex_forward_agent else []) }}"
     runtime_command: "{{ [litellm_root ~ '/.venv/bin/python', runtime_script, codex_runtime_action] + runtime_options }}"
   pre_tasks:
-    - name: Validate the selected local host
+    - name: Load and validate the deployment configuration
       ansible.builtin.import_tasks: tasks/target.yml
       tags: [always]
   tasks:
-    - name: Check target and requested action
+    - name: Check the requested action
       tags: [always]
       ansible.builtin.assert:
         that:
-          - ansible_facts.hostname == inventory_hostname
-          - ansible_facts.user_id == litellm_user
           - codex_runtime_action in ['install', 'preview', 'apply', 'verify', 'rollback', 'finish']
-          - codex_runtime_action != 'finish' or codex_connection_mode == 'ssh' or (codex_desktop_validated | default(false) | bool)
+          - codex_runtime_action != 'finish' or (codex_desktop_validated | default(false) | bool)
 
     - name: Inspect deployment source
       tags: [always]

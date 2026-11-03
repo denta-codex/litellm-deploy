@@ -1,3 +1,0 @@
-# One transactional cutover: runtime-only copying is no longer a supported path.
-- name: Run the Bedrock integration transaction
-  ansible.builtin.import_playbook: bedrock.yml

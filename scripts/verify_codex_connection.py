@@ -1,3 +1,6 @@
+# /// script
+# requires-python = ">=3.14"
+# ///
 """Check stock SSH proxy clients without exposing RPC data or changing live history."""
 
 import argparse

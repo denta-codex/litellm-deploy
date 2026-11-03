@@ -1,4 +1,0 @@
-[Service]
-{% if litellm_bedrock_enabled | default(false) %}
-LoadCredentialEncrypted=bedrock-aws-credentials:{{ litellm_bedrock_credential }}
-{% endif %}

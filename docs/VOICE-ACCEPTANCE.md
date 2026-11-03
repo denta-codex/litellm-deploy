@@ -1,4 +1,7 @@
-# Grace voice acceptance — October 4, 2026
+# Historical voice acceptance — October 4, 2026
+
+This records one deployment's acceptance, not validation of every machine or a
+later release. Repeat live acceptance after the configuration-driven cutover.
 
 Installed application commit: `e31c9e8812076337de6de77986b067fc4afc5a97`.
 Client contract: [VOICE.md](VOICE.md), version 1. Codex 0.159.2 and LiteLLM
@@ -9,7 +12,7 @@ on port 4000; the temporary candidate on port 48769 was stopped.
 
 | Gate | Evidence |
 | --- | --- |
-| Desktop microphone and playback | User reported that everything worked in Grace chat `01a10846-528a-7f11-aac7-aa862432e7fe`. Its recorded realtime tail contains spoken input, replies, and session end. |
+| Desktop microphone and playback | User reported that everything worked in remote chat `01a10846-528a-7f11-aac7-aa862432e7fe`. Its recorded realtime tail contains spoken input, replies, and session end. |
 | Desktop interruption and restart | Included in the hardware check requested of the user; the user reported everything worked. These were not independently instrumented. |
 | Remote WebRTC and actual tools | Reference client used the existing authenticated remote WSS endpoint with no voice-base override. An audio-only request caused successful `cat /tmp/voice-proof.txt`; a fresh session spoke the actual unpredictable value. Receipt `production-retry.json` passed. |
 | Concurrent isolation | Two simultaneous remote clients returned their respective distinct phrases with audible media and successful stop. Both receipts passed. |

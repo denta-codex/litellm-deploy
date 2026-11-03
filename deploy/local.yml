@@ -6,9 +6,7 @@
   ansible.builtin.import_playbook: deploy.yml
   when: (refresh_action | default('refresh')) != 'rollback'
 
-- name: Activate local route using existing model transaction
+- name: Publish the configured local route through the model transaction
   ansible.builtin.import_playbook: refresh-models.yml
   vars:
-    supported_hosts: [grace]
-    refresh_script: configure_local.py
     refresh_failure_service: llama-local.service

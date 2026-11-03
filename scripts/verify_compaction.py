@@ -1,4 +1,4 @@
-"""Metadata-only live acceptance of a synthetic compaction through Grace's proxy."""
+"""Metadata-only live acceptance of a synthetic compaction through the local proxy."""
 import argparse
 import json
 from pathlib import Path

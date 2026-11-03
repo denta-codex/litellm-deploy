@@ -1,4 +1,13 @@
-"""Explicit subscription discovery and recoverable activation; invoked by Ansible."""
+"""Subscription discovery plus configured models, with recoverable activation; invoked by Ansible.
+
+ChatGPT subscription rows come from discovery. Every other route and picker row
+comes from the ``models`` list of the per-machine deployment configuration
+(``--config``). A validated refresh publishes that list as ``models.json``
+beside the LiteLLM config, so rollback restores it with the routes and later
+snapshot checks compare against what is installed. Each entry's ``litellm``
+mapping is passed to LiteLLM unchanged;
+``codex`` overrides the stock catalog row defaults.
+"""
 import argparse
 import copy
 import hashlib
@@ -17,11 +26,29 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import yaml
 
 from catalog_enrichment import enrich_catalog, fetch_sources, stock_catalog
+import deploy_config
 from deployment import codex_binary
 from recommended import with_separator
 
 PREFIX = 'chatgpt/'
 REVIEW_MODEL = 'codex-auto-review'
+SCRIPTS = Path(__file__).parent
+CONFIGURED_NAME = re.compile(r'[a-z0-9][a-z0-9_-]*/[A-Za-z0-9][A-Za-z0-9._-]*')
+# Stock Codex catalog defaults for configured rows; ``codex`` keys override them.
+ROW_DEFAULTS = {
+    'base_instructions': "You are Codex, a coding agent. Follow the user's request and use tools when needed.",
+    'model_messages': {}, 'visibility': 'list', 'supported_in_api': True,
+    'truncation_policy': {'mode': 'tokens', 'limit': 10000}, 'input_modalities': ['text'],
+    'default_reasoning_summary': 'none', 'supports_parallel_tool_calls': True,
+    'supports_reasoning_summaries': False, 'supports_search_tool': True,
+    'web_search_tool_type': 'text_and_image', 'supports_reasoning_summary_parameter': False,
+    'supports_reasoning_effort_updates': False, 'supports_image_detail_original': False,
+    'support_verbosity': False, 'use_responses_lite': False, 'prefer_websockets': False,
+    'tool_mode': 'code_mode_only', 'shell_type': 'shell_command', 'apply_patch_tool_type': 'freeform',
+    'experimental_supported_tools': [], 'service_tiers': [], 'additional_speed_tiers': [],
+    'availability_nux': None, 'available_access_programs': {'cyber': []}, 'priority': 100,
+}
+REQUIRED_ROW = ('display_name', 'context_window', 'supported_reasoning_levels', 'default_reasoning_level')
 
 
 def encode(value):
@@ -78,7 +105,70 @@ def validate_source(source):
         raise ValueError('Discovery returned no selectable models')
 
 
-def generate(source, config, catalog, selected):
+def configured_model(spec):
+    """Return (route, catalog row, verification) for one ``models`` entry."""
+    if not isinstance(spec, dict) or set(spec) - {'name', 'litellm', 'model_info', 'codex', 'verify'}:
+        raise ValueError('Configured models accept only name, litellm, model_info, codex and verify')
+    name = spec.get('name')
+    if (not isinstance(name, str) or not CONFIGURED_NAME.fullmatch(name) or name.startswith(PREFIX)):
+        raise ValueError(f'Invalid configured model name {name!r}; use provider/model outside {PREFIX}')
+    litellm = spec.get('litellm')
+    if not isinstance(litellm, dict) or not isinstance(litellm.get('model'), str):
+        raise ValueError(f'{name}: litellm.model is required')
+    model_info = copy.deepcopy(spec.get('model_info') or {})
+    if not isinstance(model_info, dict):
+        raise ValueError(f'{name}: model_info must be a mapping')
+    model_info.setdefault('mode', 'chat')
+    route = {'model_name': name, 'model_info': model_info, 'litellm_params': copy.deepcopy(litellm)}
+    codex = copy.deepcopy(spec.get('codex') or {})
+    if not isinstance(codex, dict) or 'slug' in codex:
+        raise ValueError(f'{name}: codex must be a mapping of catalog fields other than slug')
+    missing = [key for key in REQUIRED_ROW if key not in codex]
+    if missing:
+        raise ValueError(f'{name}: codex requires {", ".join(missing)}')
+    instructions = codex.pop('base_instructions_file', None)
+    row = {'slug': name, 'description': codex['display_name'], **copy.deepcopy(ROW_DEFAULTS)}
+    row['max_context_window'] = codex['context_window']
+    row.update(codex)
+    if instructions is not None:
+        if not isinstance(instructions, str) or '/' in instructions:
+            raise ValueError(f'{name}: base_instructions_file names a file shipped in scripts/')
+        row['base_instructions'] = (SCRIPTS / instructions).read_text()
+    levels = []
+    for level in row['supported_reasoning_levels']:
+        if isinstance(level, str):
+            level = {'effort': level, 'description': level}
+        if not isinstance(level, dict) or not isinstance(level.get('effort'), str):
+            raise ValueError(f'{name}: invalid reasoning level')
+        levels.append(level)
+    row['supported_reasoning_levels'] = levels
+    if row['default_reasoning_level'] not in {level['effort'] for level in levels}:
+        raise ValueError(f'{name}: default_reasoning_level must be a supported level')
+    if row['visibility'] not in ('list', 'hide'):
+        raise ValueError(f'{name}: visibility must be list or hide')
+    verify = spec.get('verify') or {}
+    args, validators, timeout = verify.get('args', []), verify.get('validators', []), verify.get('timeout', 600)
+    if (not isinstance(verify, dict) or set(verify) - {'args', 'validators', 'timeout'}
+            or not isinstance(args, list) or not all(isinstance(a, str) for a in args)
+            or not isinstance(validators, list)
+            or not all(isinstance(v, list) and v and all(isinstance(a, str) for a in v) and '/' not in v[0]
+                       for v in validators)
+            or type(timeout) is not int or timeout <= 0):
+        raise ValueError(f'{name}: verify accepts args, validators (script from scripts/ plus arguments) and timeout')
+    return route, row, {'args': args, 'validators': validators, 'timeout': timeout}
+
+
+def configured_models(specs):
+    if not isinstance(specs, list):
+        raise ValueError('models must be a list')
+    result = [configured_model(spec) for spec in specs]
+    names = [route['model_name'] for route, _, _ in result]
+    if len(names) != len(set(names)):
+        raise ValueError('Configured model names must be unique')
+    return result
+
+
+def generate_subscription(source, config, catalog, selected):
     validate_source(source)
     rows = [compatible_model(row) for row in source['models']]
     if not any(row['slug'] == REVIEW_MODEL for row in rows):
@@ -162,20 +252,49 @@ def generate(source, config, catalog, selected):
     }
 
 
-class Refresh:
-    prefix = PREFIX
-    playbook = 'refresh-models.yml'
-    verify_args = ()
-    generate = staticmethod(generate)
+def generate(source, config, catalog, selected, specs=()):
+    """Subscription rows from discovery; every other route and row from configuration."""
+    models = configured_models(list(specs))
+    names = {route['model_name'] for route, _, _ in models}
+    if '/' in selected and not selected.startswith(PREFIX) and selected not in names:
+        raise ValueError(f'Selected model {selected} is no longer configured; select another model first')
+    result_config, result_catalog, summary = generate_subscription(source, config, catalog, selected)
+    owned = [r for r in result_config['model_list'] if r['model_name'].startswith(PREFIX) or r['model_name'] == REVIEW_MODEL]
+    result_config['model_list'] = [*(route for route, _, _ in models), *owned]
+    kept = [r for r in result_catalog['models'] if '/' not in r['slug'] or r['slug'].startswith(PREFIX)]
+    result_catalog['models'] = [*kept, *(row for _, row, _ in models)]
+    old_routes = {r['model_name']: r for r in config.get('model_list', [])}
+    old_rows = {r['slug']: compatible_model(r) for r in catalog.get('models', [])}
+    before = {slug for slug, row in old_rows.items()
+              if '/' in slug and not slug.startswith(PREFIX) and row.get('visibility') == 'list'}
+    after = {row['slug'] for _, row, _ in models if row['visibility'] == 'list'}
+    changed = {route['model_name'] for route, row, _ in models
+               if old_routes.get(route['model_name']) != route or old_rows.get(row['slug']) != row}
+    summary.update(
+        added=sorted(set(summary['added']) | (after - before)),
+        removed=sorted(set(summary['removed']) | (before - after)),
+        changed=sorted(set(summary['changed']) | (changed & before)),
+        test_models=sorted(set(summary['test_models']) | changed),
+        before=sorted(set(summary['before']) | before),
+        after=sorted(set(summary['after']) | after),
+        configured=sorted(names),
+        verification={route['model_name']: verify for route, _, verify in models})
+    return result_config, result_catalog, summary
 
-    def __init__(self, home, root, uv):
+
+class Refresh:
+    playbook = 'refresh-models.yml'
+
+    def __init__(self, home, root, uv, models=None):
         self.home, self.root, self.uv = home, root, uv
+        self.models = models
         self.codex = home / '.local/bin/codex'
         self.state = home / '.local/state/litellm'
         self.transaction = self.state / 'model-refresh'
         self.paths = {
             'config': home / '.config/litellm/config.yaml',
             'catalog': home / '.config/litellm/codex-models.json',
+            'models': home / '.config/litellm/models.json',
             'snapshot': self.state / 'subscription-models.json',
         }
 
@@ -212,15 +331,20 @@ class Refresh:
         originals = self.originals()
         if originals['config'] is None:
             raise ValueError('Deploy LiteLLM before refreshing models')
+        # The deployment configuration is authoritative; the installed copy
+        # only records what the active routes were generated from.
+        if self.models is not None:
+            specs = copy.deepcopy(self.models)
+        else:
+            specs = json.loads(originals['models']) if originals['models'] is not None else []
         config = yaml.safe_load(originals['config'])
         catalog = json.loads(originals['catalog']) if originals['catalog'] else {'models': []}
         current = tomllib.loads((self.home / '.codex/config.toml').read_text())
         selected = current.get('model', '') if current.get('model_provider') == 'litellm' else ''
-        new_config, new_catalog, summary = self.generate(snapshot['catalog'], config, catalog, selected)
-        # Every namespace owner publishes the same derived separator row.
+        new_config, new_catalog, summary = generate(snapshot['catalog'], config, catalog, selected, specs)
+        verification = summary.pop('verification')
         new_catalog = with_separator(new_catalog)
-        # Namespace owners may group their rows differently. Row order alone must
-        # not trigger a restart or make another provider's snapshot inconsistent.
+        # Row order alone must not trigger a restart or a picker publication.
         for generated, current, field, key in ((new_config, config, 'model_list', 'model_name'),
                                                 (new_catalog, catalog, 'models', 'slug')):
             if sorted(generated.get(field, []), key=lambda r: r[key]) == sorted(current.get(field, []), key=lambda r: r[key]):
@@ -229,29 +353,29 @@ class Refresh:
         summary['codex_version_changed'] = previous_snapshot.get('codex_version') != snapshot['codex_version']
         if summary['codex_version_changed']:
             summary['test_models'] = summary['after']
-            if 'test_reviewer' in summary:
-                summary['test_reviewer'] = True
+            summary['test_reviewer'] = True
         pricing_summary = {}
         if refresh_pricing:
-            manifest = json.loads(Path(__file__).with_name('modal-models.json').read_text())
-            new_catalog, pricing_summary = enrich_catalog(new_catalog, new_config, manifest, self.pricing_sources())
+            new_catalog, pricing_summary = enrich_catalog(new_catalog, new_config, self.pricing_sources())
         candidates = {
             'config': originals['config'] if new_config == config else yaml.safe_dump(new_config, sort_keys=False),
             'catalog': originals['catalog'] if new_catalog == catalog else encode(new_catalog),
+            'models': (originals['models'] if originals['models'] is not None
+                       and json.loads(originals['models']) == specs else encode(specs)),
             'snapshot': encode(snapshot),
         }
         summary.update(routing_changed=new_config != config,
                        catalog_changed=stock_catalog(new_catalog) != stock_catalog(catalog),
                        enrichment_changed=new_catalog.get('remote_codex') != catalog.get('remote_codex'),
                        catalog_document_changed=new_catalog != catalog,
+                       models_changed=originals['models'] != candidates['models'],
                        snapshot_changed=originals['snapshot'] != candidates['snapshot'], **pricing_summary)
         summary['any_changes'] = any(originals[k] != candidates[k] for k in originals)
-        return {'originals': originals, 'candidates': candidates, 'summary': summary, 'prefix': self.prefix,
+        return {'originals': originals, 'candidates': candidates, 'summary': summary, 'verification': verification,
                 'codex_config_sha256': hashlib.sha256((self.home / '.codex/config.toml').read_bytes()).hexdigest()}
 
     def prepare(self, preview=False):
         if self.transaction.exists():
-            self.journal()
             raise ValueError(f'Unfinished refresh exists. Run {self.playbook} -e refresh_action=rollback first')
         journal = self.candidate(self.discover(), refresh_pricing=True)
         if preview or not journal['summary']['any_changes']:
@@ -270,7 +394,7 @@ class Refresh:
                     raise ValueError('Stock Codex rejected the candidate catalog: ' + result.stderr[-1500:])
                 parsed = json.loads(result.stdout)
                 expected = set(journal['summary']['after'])
-                actual = {r['slug'] for r in parsed['models'] if r.get('visibility') == 'list' and r['slug'].startswith(self.prefix)}
+                actual = {r['slug'] for r in parsed['models'] if r.get('visibility') == 'list' and '/' in r['slug']}
                 if expected != actual:
                     raise ValueError('Stock Codex did not load the expected selectable models')
         except BaseException:
@@ -279,14 +403,7 @@ class Refresh:
         return journal['summary']
 
     def journal(self):
-        journal = json.loads((self.transaction / 'journal.json').read_text())
-        owner = journal.get('prefix', PREFIX)
-        if owner != self.prefix:
-            playbook = {'modal/': 'modal.yml', 'claude/': 'claude.yml', 'local/': 'local.yml', 'bedrock/': 'bedrock.yml', 'vertex/': 'vertex.yml', PREFIX: 'refresh-models.yml'}.get(owner)
-            if playbook is None:
-                raise ValueError(f'Unknown pending transaction owner: {owner}')
-            raise ValueError(f'Pending transaction belongs to {owner}; recover with {playbook} -e refresh_action=rollback')
-        return journal
+        return json.loads((self.transaction / 'journal.json').read_text())
 
     def activate(self):
         journal = self.journal()
@@ -302,23 +419,26 @@ class Refresh:
         journal = self.journal()
         rows = {r['slug']: r for r in json.loads(journal['candidates']['catalog'])['models']}
         log = self.transaction / 'validation.log'
+        catalog = str(self.transaction / 'catalog.json')
+
+        def script(name, *args):
+            return [self.uv, 'run', '--no-sync', '--project', str(self.root), str(SCRIPTS / name), *args]
+
         def verify(name):
             if name == REVIEW_MODEL:
-                command = [self.uv, 'run', '--no-sync', '--project', str(self.root),
-                           str(Path(__file__).with_name('verify_review.py'))]
-                result = subprocess.run(command, capture_output=True, text=True, timeout=240)
+                result = subprocess.run(script('verify_review.py'), capture_output=True, text=True, timeout=240)
                 if result.returncode:
                     raise ValueError(f'{name}: validation failed\n{result.stdout[-1500:]}\n{result.stderr[-2000:]}')
                 return name
-            commands = [
-                [self.uv, 'run', '--no-sync', '--project', str(self.root), str(Path(__file__).with_name('verify.py')), '--model', name, *self.verify_args],
-                [self.uv, 'run', '--no-sync', '--project', str(self.root), str(Path(__file__).with_name('verify_codex.py')),
-                 '--model', name, '--catalog', str(self.transaction / 'catalog.json')],
-            ]
-            if not rows[name].get('supports_search_tool', False):
-                commands[1].append('--skip-search')
+            spec = journal.get('verification', {}).get(name, {'args': [], 'validators': [], 'timeout': 600})
+            # Configured validators run first: provider-specific checks fail fastest.
+            commands = [script(*(arg.format(model=name, catalog=catalog) for arg in validator))
+                        for validator in spec['validators']]
+            commands.append(script('verify.py', '--model', name, *spec['args']))
+            commands.append(script('verify_codex.py', '--model', name, '--catalog', catalog,
+                                   *([] if rows[name].get('supports_search_tool', False) else ['--skip-search'])))
             for command in commands:
-                result = subprocess.run(command, capture_output=True, text=True, timeout=600)
+                result = subprocess.run(command, capture_output=True, text=True, timeout=spec['timeout'])
                 if result.returncode:
                     raise ValueError(f'{name}: validation failed\n{result.stdout[-1500:]}\n{result.stderr[-2000:]}')
             return name
@@ -350,7 +470,7 @@ class Refresh:
         expected = journal['originals'] | {'config': journal['candidates']['config']}
         if self.originals() != expected:
             raise ValueError('Configuration changed during validation; refusing to overwrite')
-        for name in ('catalog', 'snapshot'):
+        for name in ('catalog', 'models', 'snapshot'):
             if journal['originals'][name] != journal['candidates'][name]:
                 atomic_write(self.paths[name], journal['candidates'][name])
         summary = journal['summary']
@@ -375,7 +495,8 @@ class Refresh:
         if not self.paths['snapshot'].exists():
             return {'snapshot_present': False}
         candidate = self.candidate(json.loads(self.paths['snapshot'].read_text()))
-        if candidate['summary']['routing_changed'] or (candidate['summary']['catalog_changed'] and not routes_only):
+        summary = candidate['summary']
+        if summary['routing_changed'] or ((summary['catalog_changed'] or summary['models_changed']) and not routes_only):
             raise ValueError(f'Installed model files differ from saved discovery; run {self.playbook} to reconcile')
         return {'snapshot_present': True, 'models': candidate['summary']['after']}
 
@@ -392,14 +513,19 @@ def main(refresh_type=Refresh):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('action', choices=['preview', 'prepare', 'activate', 'validate', 'finish', 'rollback', 'cleanup-rollback',
                                       'check-snapshot', 'check-routes'])
-    p.add_argument('--home', type=Path, default=Path.home())
-    p.add_argument('--root', type=Path, default=Path.home() / '.local/share/litellm')
     p.add_argument('--uv', default=shutil.which('uv'))
+    p.add_argument('--config', type=Path, default=deploy_config.DEFAULT, help='per-machine deployment configuration')
     args = p.parse_args()
     os.umask(0o077)
-    refresh = refresh_type(args.home, args.root, args.uv)
+    config = deploy_config.load(args.config)
+    home = Path(config['home'])
+    if home != Path.home():
+        raise SystemExit('Run as the configured deployment user')
+    # Only discovery reads the configured list; checks compare installed files.
+    models = config['models'] if args.action in ('preview', 'prepare') else None
+    refresh = refresh_type(home, home / '.local/share/litellm', args.uv, models)
     if args.action in ('preview', 'prepare', 'validate'):
-        refresh.codex = Path(codex_binary(args.home))
+        refresh.codex = Path(codex_binary(home))
     if args.action in ('preview', 'prepare'):
         result = refresh.prepare(preview=args.action == 'preview')
     elif args.action == 'cleanup-rollback':

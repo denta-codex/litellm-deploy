@@ -1,12 +1,15 @@
-"""Validate every advertised Bedrock effort and image input through the live proxy."""
+"""Validate one configured model's advertised efforts and image input through the live proxy."""
 import argparse
 import base64
-import struct
-import zlib
 import json
-from pathlib import Path
-from deployment import proxy_key
+import struct
 import urllib.request
+import zlib
+from pathlib import Path
+
+from deployment import proxy_key
+
+EXPECTED = 'CAPABILITY_OK'
 
 
 def image_fixture():
@@ -18,40 +21,47 @@ def image_fixture():
     return 'data:image/png;base64,' + base64.b64encode(png).decode()
 
 
-def verify(catalog, base_url):
+def row_for(catalog, model):
+    rows = [r for r in json.loads(Path(catalog).read_text())['models'] if r['slug'] == model]
+    if len(rows) != 1:
+        raise SystemExit('Catalog must contain exactly one row for ' + model)
+    return rows[0]
+
+
+def verify(model, catalog, base_url):
     key = proxy_key()
-    rows = [r for r in json.loads(catalog.read_text())['models'] if r['slug'].startswith('bedrock/')]
-    assert {r['slug'] for r in rows} == {'bedrock/opus-5.5', 'bedrock/gpt-6.1-sol'}
-    for row in rows:
-        for effort in row['supported_reasoning_levels']:
-            payload = {'model': row['slug'], 'input': 'Reply with exactly BEDROCK_CAPABILITY_OK.',
-                       'reasoning': {'effort': effort['effort']}, 'stream': False}
-            check(base_url, key, payload)
-            print('PASS ' + row['slug'] + ': effort=' + effort['effort'], flush=True)
-        if 'image' in row['input_modalities']:
-            question = 'What is the dominant color of the supplied image? Reply with only the color name.'
-            image = image_fixture()
-            payload = {'model': row['slug'], 'stream': True, 'store': False,
-                'input': [{'role': 'user', 'content': [
-                    {'type': 'input_text', 'text': question},
-                    {'type': 'input_image', 'image_url': image}]}]}
-            check(base_url, key, payload, expected='blue', exact=True)
-            print('PASS ' + row['slug'] + ': streamed user-image recognition', flush=True)
-            payload['tools'] = [{'type': 'function', 'name': 'view_image',
-                'description': 'Load an image and return its visual content.',
-                'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False, 'required': []}}]
-            payload['tool_choice'] = 'auto'
-            payload['input'] = [
-                {'role': 'user', 'content': question},
-                {'type': 'function_call', 'call_id': 'call_image_probe', 'name': 'view_image', 'arguments': '{}'},
-                {'type': 'function_call_output', 'call_id': 'call_image_probe', 'output': [
-                    {'type': 'input_text', 'text': 'Image loaded by view_image.'},
-                    {'type': 'input_image', 'image_url': image}]}]
-            check(base_url, key, payload, expected='blue', exact=True)
-            print('PASS ' + row['slug'] + ': streamed tool-image recognition', flush=True)
+    row = row_for(catalog, model)
+    for effort in row.get('supported_reasoning_levels') or [{'effort': None}]:
+        payload = {'model': model, 'input': 'Reply with exactly ' + EXPECTED + '.', 'stream': False}
+        if effort['effort']:
+            payload['reasoning'] = {'effort': effort['effort']}
+        check(base_url, key, payload)
+        print('PASS ' + model + ': effort=' + str(effort['effort']), flush=True)
+    if 'image' not in row.get('input_modalities', []):
+        return
+    question = 'What is the dominant color of the supplied image? Reply with only the color name.'
+    image = image_fixture()
+    payload = {'model': model, 'stream': True, 'store': False,
+        'input': [{'role': 'user', 'content': [
+            {'type': 'input_text', 'text': question},
+            {'type': 'input_image', 'image_url': image}]}]}
+    check(base_url, key, payload, expected='blue', exact=True)
+    print('PASS ' + model + ': streamed user-image recognition', flush=True)
+    payload['tools'] = [{'type': 'function', 'name': 'view_image',
+        'description': 'Load an image and return its visual content.',
+        'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False, 'required': []}}]
+    payload['tool_choice'] = 'auto'
+    payload['input'] = [
+        {'role': 'user', 'content': question},
+        {'type': 'function_call', 'call_id': 'call_image_probe', 'name': 'view_image', 'arguments': '{}'},
+        {'type': 'function_call_output', 'call_id': 'call_image_probe', 'output': [
+            {'type': 'input_text', 'text': 'Image loaded by view_image.'},
+            {'type': 'input_image', 'image_url': image}]}]
+    check(base_url, key, payload, expected='blue', exact=True)
+    print('PASS ' + model + ': streamed tool-image recognition', flush=True)
 
 
-def check(base_url, key, payload, expected='BEDROCK_CAPABILITY_OK', exact=False):
+def check(base_url, key, payload, expected=EXPECTED, exact=False):
     request = urllib.request.Request(base_url.rstrip('/') + '/v1/responses',
         data=json.dumps(payload).encode(), headers={'Content-Type': 'application/json', 'Authorization': 'Bearer ' + key})
     with urllib.request.urlopen(request, timeout=180) as response:
@@ -81,7 +91,8 @@ def check(base_url, key, payload, expected='BEDROCK_CAPABILITY_OK', exact=False)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--model', required=True)
     parser.add_argument('--catalog', type=Path, required=True)
     parser.add_argument('--base-url', default='http://127.0.0.1:4000')
     args = parser.parse_args()
-    verify(args.catalog, args.base_url)
+    verify(args.model, args.catalog, args.base_url)

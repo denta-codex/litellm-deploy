@@ -1,5 +1,5 @@
 [Unit]
-Description=LiteLLM subscription and Modal proxy
+Description=LiteLLM proxy
 After=network-online.target
 Wants=network-online.target
 RequiresMountsFor={{ litellm_home }}
@@ -17,11 +17,12 @@ Environment=LITELLM_TELEMETRY=False
 Environment=UV_OFFLINE=1
 Environment=UV_PYTHON_DOWNLOADS=never
 Environment=LITELLM_VOICE_ENABLED={{ litellm_voice_enabled | bool | ternary('true', 'false') }}
-Environment=LITELLM_CLAUDE_ENABLED={{ litellm_claude_enabled | bool | ternary('true', 'false') }}
+Environment=COMPACTION_FALLBACK_ENABLED={{ compaction_fallback_enabled | bool | ternary('true', 'false') }}
+Environment=COMPACTION_MODEL_CATALOG={{ litellm_config }}/codex-models.json
 LoadCredentialEncrypted=litellm-proxy-key:{{ litellm_system_credential }}
-{% if litellm_modal_enabled %}
-LoadCredentialEncrypted=modal-inference-token:{{ litellm_modal_credential }}
-{% endif %}
+{% for credential in litellm_credentials %}
+LoadCredentialEncrypted={{ credential.name }}:{{ credential.path }}
+{% endfor %}
 ExecStart={{ litellm_root }}/scripts/start-litellm {{ litellm_uv }} {{ litellm_root }} {{ litellm_config }}/config.yaml
 Restart=on-failure
 RestartSec=3

@@ -63,16 +63,16 @@ class SubscriptionProvider:
         auth = Authenticator()
         record = auth._read_auth_file()
         if not record:
-            raise VoiceError(401, 'subscription_login_required', 'Restore the existing ChatGPT subscription login on Grace.')
+            raise VoiceError(401, 'subscription_login_required', 'Restore the existing ChatGPT subscription login on this server.')
         token = record.get('access_token')
         if force or not token or auth._is_token_expired(record, token):
             if not record.get('refresh_token'):
-                raise VoiceError(401, 'subscription_login_required', 'Refresh the ChatGPT subscription login on Grace.')
+                raise VoiceError(401, 'subscription_login_required', 'Refresh the ChatGPT subscription login on this server.')
             try:
                 # Reuse upstream refresh/storage without its interactive-login fallback.
                 token = auth._refresh_tokens(record['refresh_token'])['access_token']
             except Exception:
-                raise VoiceError(401, 'subscription_refresh_failed', 'ChatGPT subscription refresh failed; sign in again on Grace.') from None
+                raise VoiceError(401, 'subscription_refresh_failed', 'ChatGPT subscription refresh failed; sign in again on this server.') from None
         headers = get_chatgpt_default_headers(token, auth.get_account_id())
         headers.pop('accept', None)
         headers.pop('content-type', None)
