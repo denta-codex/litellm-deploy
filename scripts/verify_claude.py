@@ -20,6 +20,7 @@ import tomlkit
 import yaml
 
 from configure_claude import MANIFEST, generate
+from deployment import codex_binary, proxy_key
 
 ROOT = Path(__file__).resolve().parent.parent
 MODEL = 'claude/opus-5.5'
@@ -248,7 +249,7 @@ class Acceptance:
         (home / 'config.toml').write_text(tomlkit.dumps(config))
         log = (self.directory / 'codex.log').open('w')
         self.logs.append(log)
-        process = await asyncio.create_subprocess_exec('codex', 'app-server', cwd=work,
+        process = await asyncio.create_subprocess_exec(str(codex_binary()), 'app-server', cwd=work,
             env=self.env | {'CODEX_HOME': str(home), 'CLAUDE_TEST_PROXY_KEY': self.key}, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=log, start_new_session=True)
         rpc = RPC(process)
@@ -382,8 +383,7 @@ class Acceptance:
         else:
             self.catalog = self.args.catalog
             if not self.key:
-                self.key = subprocess.check_output(['systemd-creds', 'decrypt', '--user', '--name=litellm-proxy-key',
-                    str(Path.home() / '.config/litellm/proxy-key.cred'), '-'], text=True).strip()
+                self.key = proxy_key()
         try:
             if not self.args.codex_only and not self.args.fast_only:
                 await self.api_checks()

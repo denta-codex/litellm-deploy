@@ -31,7 +31,7 @@ mounted volume. Both hosts run an independent loopback gateway on `127.0.0.1:400
 | Voice prepare/acceptance/recovery (`voice.yml`) | Supported | Follow-up; adapter disabled |
 | Modal (`modal.yml`) | Supported | Follow-up; credential not required |
 | AWS/Bedrock (`bedrock-runtime.yml`, `bedrock.yml`) | Supported | Supported with host-encrypted credentials |
-| Claude subscription (`claude.yml`) | Supported | Follow-up; adapter disabled |
+| Claude subscription (`claude.yml`) | Supported | Supported with its own Claude login |
 | Google Vertex (`vertex.yml`) | Supported | Supported with host-encrypted credentials |
 | Remove Grace's original `codex-gateway` (`finalize.yml`) | Supported | Unsupported; do not run on Love |
 
@@ -409,9 +409,12 @@ There is no model fallback or API-key fallback.
 
 The adapter uses the agent account's existing `claude auth login`. To renew login,
 run that command as `agent`, then retry the request. No Claude token belongs in
-LiteLLM YAML, systemd environment variables, or Git. The repository's `claude-cli`
-wrapper starts the SDK-bundled binary with a minimal environment; unrelated proxy,
-Modal, and OpenAI credentials are excluded. Workers use an empty private working
+LiteLLM YAML, systemd environment variables, or Git. Each host keeps its own
+login under its agent home (`~/.claude`); never copy Grace's credentials to Love,
+because the hosts would then share one rotating refresh token. Log in on Love once
+before activation with `~/.local/share/litellm/scripts/claude-cli auth login`.
+The repository's `claude-cli` wrapper starts the SDK-bundled binary with a minimal
+environment; unrelated proxy, Modal, and OpenAI credentials are excluded. Workers use an empty private working
 directory, no settings sources, and only the declared MCP server. The sole native
 tool allowed for schema output is the SDK's local `StructuredOutput` formatter.
 Every client command or file edit still runs through Codex and its approvals.
@@ -531,7 +534,8 @@ configuration preservation and rollback without deliberately exhausting a quota.
 Activation publishes the picker only after the live acceptance suite passes;
 failure restores the previous configuration. Recover an interrupted transaction
 with `deploy/claude.yml -e refresh_action=rollback`. Activation changes no Codex
-default. Restart Grace's connection through the owning desktop to load the picker.
+default. Restart the host's connection through the owning desktop to load the picker.
+Love uses the same sequence with `--limit love` after its own Claude login.
 The official SDK remains an agent runtime; this adapter is not full raw-inference
 API equivalence. Packaging for public distribution is a later decision.
 

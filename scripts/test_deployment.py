@@ -132,9 +132,11 @@ class HostInventoryTests(unittest.TestCase):
     def test_love_enables_basic_gateway_and_cloud_providers(self):
         love, grace = inventory(SOURCE, 'love'), inventory(SOURCE, 'grace')
         self.assertEqual(love['litellm_home'], str(LOVE_HOME))
-        for feature in ('modal', 'voice', 'claude'):
+        for feature in ('modal', 'voice'):
             self.assertFalse(love['litellm_' + feature + '_enabled'])
             self.assertTrue(grace['litellm_' + feature + '_enabled'])
+        self.assertTrue(love['litellm_claude_enabled'])
+        self.assertTrue(grace['litellm_claude_enabled'])
         for feature in ('bedrock', 'vertex'):
             self.assertTrue(love['litellm_' + feature + '_enabled'])
             self.assertEqual(love['litellm_' + feature + '_credential'],

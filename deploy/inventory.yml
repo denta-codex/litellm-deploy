@@ -39,6 +39,6 @@ all:
       litellm_vertex_credential: /etc/credstore.encrypted/litellm-vertex-ai
       litellm_bedrock_credential: /etc/credstore.encrypted/litellm-bedrock-aws
       litellm_voice_enabled: false
-      litellm_claude_enabled: false
+      litellm_claude_enabled: true
       codex_forward_agent: false
       codex_connection_mode: ssh
