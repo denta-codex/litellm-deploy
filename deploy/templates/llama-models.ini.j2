@@ -7,8 +7,8 @@ ctx-size = {{ local_model.context_window }}
 parallel = 1
 batch-size = 512
 ubatch-size = 512
-n-gpu-layers = 999
-fit = off
+# Leave GPU layers unset so fitting uses available VRAM without shrinking the fixed context.
+fit = on
 flash-attn = on
 jinja = true
 chat-template-file = {{ litellm_config }}/{{ local_model.chat_template.name }}

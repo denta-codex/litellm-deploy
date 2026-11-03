@@ -750,8 +750,10 @@ runs the shared refresh to publish the configured `local/...` entry.
 - It starts with the weights unloaded and loads them on the first request.
 - It unloads after 300 idle seconds.
 - Monitoring endpoints do not wake it.
-- It runs one 16K slot with full GPU offload, 512-token batches, and a 4 GiB RAM
-  prompt cache.
+- It runs one fixed 16K slot with 512-token batches and a 4 GiB RAM prompt cache.
+  llama.cpp fits GPU offload to available VRAM at each load, leaving its default
+  1 GiB margin and keeping any remaining layers on the CPU. It does not shrink
+  the advertised context to fit.
 - A cold start can take five minutes.
 
 **Chat template.** The GGUF's built-in chat template rejects a mid-conversation
