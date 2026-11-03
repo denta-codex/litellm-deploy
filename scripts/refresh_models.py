@@ -118,6 +118,9 @@ def configured_model(spec):
     model_info = copy.deepcopy(spec.get('model_info') or {})
     if not isinstance(model_info, dict):
         raise ValueError(f'{name}: model_info must be a mapping')
+    pricing = model_info.get('catalog_pricing', {})
+    if not isinstance(pricing, dict) or type(pricing.get('zero_rate', False)) is not bool:
+        raise ValueError(f'{name}: catalog_pricing must be a mapping with a boolean zero_rate')
     model_info.setdefault('mode', 'chat')
     route = {'model_name': name, 'model_info': model_info, 'litellm_params': copy.deepcopy(litellm)}
     codex = copy.deepcopy(spec.get('codex') or {})

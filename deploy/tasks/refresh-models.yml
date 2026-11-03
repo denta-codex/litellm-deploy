@@ -21,7 +21,7 @@
   ansible.builtin.command:
     argv: "{{ refresh_command + [('preview' if ansible_check_mode else 'prepare')] }}"
   register: discovery
-  changed_when: (discovery.stdout | from_json).any_changes
+  changed_when: discovery.rc == 0 and (discovery.stdout | from_json).any_changes
   check_mode: false
   when: refresh_action == 'refresh'
 - name: Show model additions removals and capability changes

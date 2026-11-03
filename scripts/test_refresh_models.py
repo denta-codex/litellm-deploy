@@ -212,6 +212,8 @@ class ConfiguredModelTests(unittest.TestCase):
             variant(codex=dict(SPEC['codex'], default_reasoning_level='max')),
             variant(codex=dict(SPEC['codex'], visibility='none')),
             variant(codex=dict(SPEC['codex'], base_instructions_file='../secret')),
+            variant(model_info={'catalog_pricing': 'zai/glm'}),
+            variant(model_info={'catalog_pricing': {'zero_rate': 'true'}}),
             variant(verify={'validators': [['/bin/sh', '-c', 'x']]}),
             variant(verify={'timeout': 0}),
         ]
