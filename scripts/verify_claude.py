@@ -19,7 +19,7 @@ import httpx
 import tomlkit
 import yaml
 
-from deployment import proxy_key
+from deployment import codex_binary, proxy_key
 from refresh_models import configured_model
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -255,7 +255,7 @@ class Acceptance:
         (home / 'config.toml').write_text(tomlkit.dumps(config))
         log = (self.directory / 'codex.log').open('w')
         self.logs.append(log)
-        process = await asyncio.create_subprocess_exec('codex', 'app-server', cwd=work,
+        process = await asyncio.create_subprocess_exec(str(codex_binary()), 'app-server', cwd=work,
             env=self.env | {'CODEX_HOME': str(home), 'CLAUDE_TEST_PROXY_KEY': self.key}, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=log, start_new_session=True)
         rpc = RPC(process)

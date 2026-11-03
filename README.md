@@ -662,6 +662,11 @@ account's existing `claude auth login`. To renew a login, run that command as th
 configured user and retry. No Claude token appears in LiteLLM YAML, systemd, or
 Git.
 
+Each machine keeps its own login under `~/.claude`. Never copy that login between
+machines: doing so would share one rotating refresh token. On a new machine, log
+in with `~/.local/share/litellm/scripts/claude-cli auth login` before publishing
+its Claude route.
+
 **Worker isolation.** The `claude-cli` wrapper starts the SDK's binary with a
 minimal environment. Workers get:
 
