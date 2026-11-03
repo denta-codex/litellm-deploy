@@ -13,7 +13,7 @@ from litellm.types.utils import ModelResponseStream
 from litellm.llms.custom_llm import CustomLLMError
 
 from claude_context import CaptureRequest, identity, validate_request
-from claude_session import MODEL, Session, configuration, content_blocks, digest, history_prompt, unresolved_calls
+from claude_session import MODEL, MODELS, Session, configuration, content_blocks, digest, history_prompt, unresolved_calls
 
 # Each idle worker is a Claude CLI process (~110 MiB). Evict the least recently
 # used idle worker beyond this; busy workers are never evicted.
@@ -128,11 +128,13 @@ class ClaudeProvider(CustomLLM):
         return session, None
 
     async def _chunks(self, model, messages, **kwargs):
-        if model != MODEL:
-            raise CustomLLMError(400, 'Only ' + MODEL + ' is configured')
+        if model not in MODELS:
+            raise CustomLLMError(400, 'Unsupported Claude model: ' + str(model))
         params = kwargs.get('optional_params', {})
         try:
             fast_mode = validate_request()
+            if fast_mode and model != MODEL:
+                raise ValueError('Claude Fast mode is only supported on ' + MODEL)
             config = configuration(messages, params, fast_mode=fast_mode)
             key = identity(model, params)
         except (ValueError, KeyError, TypeError) as exc:
@@ -215,7 +217,7 @@ class ClaudeProvider(CustomLLM):
             if reasoning is not None:
                 # Pinned LiteLLM's generic dict handler nests this field, whereas
                 # its Responses translator reads delta.reasoning_content.
-                yield ModelResponseStream(model=MODEL, choices=[{'index': 0,
+                yield ModelResponseStream(model=model, choices=[{'index': 0,
                     'delta': {'reasoning_content': reasoning}, 'finish_reason': None}])
             else:
                 yield item
@@ -230,7 +232,7 @@ class ClaudeProvider(CustomLLM):
         if reasoning:
             message['reasoning_content'] = reasoning
         usage = next((item['usage'] for item in reversed(chunks) if item.get('usage') is not None), None)
-        response = ModelResponse(id='chatcmpl-' + uuid.uuid4().hex, created=int(time.time()), model=MODEL,
+        response = ModelResponse(id='chatcmpl-' + uuid.uuid4().hex, created=int(time.time()), model=model,
             choices=[{'index': 0, 'message': message, 'finish_reason': chunks[-1]['finish_reason']}], usage=usage)
         if usage is None:
             response.usage = None

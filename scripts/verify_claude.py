@@ -429,6 +429,8 @@ def main():
         asyncio.run(Acceptance(args, directory).run())
     except BaseException:
         # Retain diagnostics, not the disposable native login or credential link.
+        for auth in directory.glob('**/auth.json'):
+            auth.unlink(missing_ok=True)
         (directory / 'codex/auth.json').unlink(missing_ok=True)
         (directory / 'claude-config/.credentials.json').unlink(missing_ok=True)
         print('Acceptance failed; diagnostic state retained at ' + str(directory), file=sys.stderr)

@@ -657,7 +657,8 @@ key is copied elsewhere. Validate with `verify_capabilities.py` and
 
 ### Claude subscription adapter
 
-A `claudesdk/<model>` route runs Claude through the Claude Agent SDK, using the
+The adapter supports Opus, Sonnet, and Haiku 5.5; each configured
+`claudesdk/<model>` route runs Claude through the Claude Agent SDK, using the
 account's existing `claude auth login`. To renew a login, run that command as the
 configured user and retry. No Claude token appears in LiteLLM YAML, systemd, or
 Git.

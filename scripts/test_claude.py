@@ -19,7 +19,7 @@ from litellm.llms.custom_llm import CustomLLMError
 from claude_context import REQUEST, validate_request
 import claude_provider
 from claude_provider import ClaudeProvider, usage_counts
-from claude_session import (CORRELATION, EFFORTS, MODEL, WORKSPACE_NOTE, Session, configuration, content_blocks,
+from claude_session import (CORRELATION, EFFORTS, MODEL, MODELS, WORKSPACE_NOTE, Session, configuration, content_blocks,
                             digest, history_prompt, mcp_names)
 from refresh_models import configured_model
 
@@ -47,9 +47,17 @@ CLAUDE_SPEC = {
 }
 
 
-def claude_routes():
-    route, _, _ = configured_model(CLAUDE_SPEC)
-    return {'model_list': [route]}
+def claude_routes(models=(MODEL,)):
+    routes = []
+    for model in models:
+        spec = copy.deepcopy(CLAUDE_SPEC)
+        spec['name'] = 'claude/' + model.removeprefix('claude-').replace('-5-5', '-5.5')
+        spec['litellm']['model'] = 'claudesdk/' + model
+        if model != MODEL:
+            spec['codex'].update(service_tiers=[], additional_speed_tiers=[])
+        route, _, _ = configured_model(spec)
+        routes.append(route)
+    return {'model_list': routes}
 
 
 def stream_event(kind, **fields):
@@ -83,7 +91,7 @@ class FakeClient:
         self.interrupted.set()
 
     async def receive_response(self):
-        yield SystemMessage('init', {'model': MODEL, 'session_id': 'fake-session'})
+        yield SystemMessage('init', {'model': self.options.model, 'session_id': 'fake-session'})
         script = self.__class__.scripted.pop(0) if self.__class__.scripted else ['ANSWER']
         for item in script:
             if item == 'wait':
@@ -165,14 +173,21 @@ class ContractTests(unittest.TestCase):
     def test_all_efforts_reach_pinned_cli_flags(self):
         from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
         with tempfile.TemporaryDirectory() as state:
-            for effort in EFFORTS:
-                session = Session((effort,), configuration([], {'reasoning_effort': effort}), state)
-                options = session.options()
-                command = SubprocessCLITransport(prompt='probe', options=options)._build_command()
-                self.assertEqual(command[command.index('--effort') + 1], effort)
-                self.assertEqual(command[command.index('--model') + 1], MODEL)
-                self.assertEqual(command[command.index('--thinking-display') + 1], 'summarized')
-                self.assertEqual(options.tools, [])
+            for model in MODELS:
+                for effort in EFFORTS:
+                    session = Session((effort, model), configuration([], {'reasoning_effort': effort}), state)
+                    options = session.options()
+                    command = SubprocessCLITransport(prompt='probe', options=options)._build_command()
+                    self.assertEqual(command[command.index('--effort') + 1], effort)
+                    self.assertEqual(command[command.index('--model') + 1], model)
+                    self.assertEqual(command[command.index('--thinking-display') + 1], 'summarized')
+                    settings = json.loads(command[command.index('--settings') + 1])
+                    if model == 'claude-haiku-5-5':
+                        self.assertEqual(settings['modelPicker']['options'],
+                                         [{'model': model, 'behavesAs': 'claude-sonnet-5-5'}])
+                    else:
+                        self.assertEqual(settings, {'fastMode': False})
+                    self.assertEqual(options.tools, [])
 
     def test_cli_environment_drops_unrelated_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -549,11 +564,12 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         mapping = [{'provider': 'claudesdk', 'custom_handler': self.provider}]
         with patch.object(litellm, 'custom_provider_map', mapping):
             custom_llm_setup()
-            router = litellm.Router(model_list=claude_routes()['model_list'], num_retries=0)
-            events = [e.model_dump() async for e in await router.aresponses(
-                model='claude/opus-5.5', input='hello', reasoning={'effort': 'high'}, stream=True)]
-            self.assertTrue(any(e['type'] == 'response.completed' for e in events))
-            self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'ANSWER')
+            router = litellm.Router(model_list=claude_routes(MODELS)['model_list'], num_retries=0)
+            for slug in ('claude/opus-5.5', 'claude/sonnet-5.5', 'claude/haiku-5.5'):
+                events = [e.model_dump() async for e in await router.aresponses(
+                    model=slug, input='hello', reasoning={'effort': 'high'}, stream=True)]
+                self.assertTrue(any(e['type'] == 'response.completed' for e in events))
+                self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'ANSWER')
 
     async def test_pinned_router_uses_captured_fast_tier(self):
         from litellm.utils import custom_llm_setup
@@ -568,6 +584,9 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any(e['type'] == 'response.completed' for e in events))
                 self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'FAST')
                 self.assertTrue(json.loads(FakeClient.instances[-1].options.settings)['fastMode'])
+            for model in ('claude-sonnet-5-5', 'claude-haiku-5-5'):
+                with self.assertRaisesRegex(CustomLLMError, 'Fast mode is only supported'):
+                    [c async for c in self.provider.astreaming(model, [{'role': 'user', 'content': 'hello'}], optional_params={})]
         finally:
             REQUEST.reset(token)
 
