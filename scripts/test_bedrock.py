@@ -80,7 +80,7 @@ class BedrockTests(unittest.TestCase):
 
     def test_both_models_use_code_mode_for_full_codex_tool_catalog(self):
         _, catalog, _ = generate(fixture_source(), {}, {}, '')
-        self.assertEqual(len(catalog['models']), 2)
+        self.assertEqual(len(catalog['models']), len(json.loads(MANIFEST.read_text())['models']))
         for row in catalog['models']:
             self.assertEqual(row['tool_mode'], 'code_mode_only')
             self.assertTrue(row['supports_search_tool'])
@@ -121,10 +121,8 @@ class BedrockTests(unittest.TestCase):
                 source['models'][0]['streaming'] = False
             with self.subTest(edit=edit), self.assertRaises(ValueError):
                 generate(source, {}, {}, '')
-        source = fixture_source()
-        source['models'] = source['models'][:1]
-        with self.assertRaisesRegex(ValueError, 'Both requested'):
-            generate(source, {}, {}, 'bedrock/gpt-6.1-sol')
+        with self.assertRaisesRegex(ValueError, 'disappeared'):
+            generate(fixture_source(), {}, {}, 'bedrock/opus-5.5')
 
     def test_runtime_policy_cannot_invoke_other_models_or_manage_iam(self):
         source = fixture_source()
@@ -144,8 +142,11 @@ class BedrockTests(unittest.TestCase):
             runtime_policy({'models': []})
 
     def test_project_permission_is_not_added_for_converse_only_models(self):
-        source = fixture_source()
-        source['models'] = [m for m in source['models'] if m['model_id'].startswith('anthropic.')]
+        source = {'region': 'us-east-1', 'models': [{
+            'model_id': 'anthropic.claude-opus-5-5',
+            'profile_arn': 'arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-5-5',
+            'model_arns': ['arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-opus-5-5'],
+        }]}
         self.assertEqual(len(runtime_policy(source)['Statement']), 3)
 
     def test_native_project_permission_rejects_malformed_account_identity(self):
@@ -174,7 +175,7 @@ class BedrockTests(unittest.TestCase):
         self.assertEqual(discover(session), source)
         client.get_foundation_model_availability.return_value['agreementAvailability'] = {'status': 'NOT_AVAILABLE'}
         self.assertEqual(discover(session)['models'], [])
-        self.assertEqual(len(discover(session, require_agreement=False)['models']), 2)
+        self.assertEqual(len(discover(session, require_agreement=False)['models']), len(source['models']))
         client.get_inference_profile.side_effect = None
         client.get_inference_profile.return_value = {'inferenceProfileId': 'us.wrong', 'status': 'ACTIVE',
             'type': 'SYSTEM_DEFINED', 'models': [{'modelArn': 'arn:aws:bedrock:us-east-1::foundation-model/wrong'}]}
@@ -275,14 +276,15 @@ class BedrockActivationTests(unittest.TestCase):
         self.prepare()
         self.refresh.activate()
         self.assertEqual(self.refresh.paths['catalog'].read_text(), self.originals['catalog'])
+        count = len(self.snapshot['catalog']['models'])
         with patch('configure_bedrock.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')) as run:
             self.refresh.validate()
-            self.assertEqual(run.call_count, 9)
+            self.assertEqual(run.call_count, 1 + 4 * count)
             image_checks = [call.args[0] for call in run.call_args_list
                             if any(str(arg).endswith('verify_bedrock_codex.py') for arg in call.args[0])]
-            self.assertEqual(len(image_checks), 2)
+            self.assertEqual(len(image_checks), count)
         probes = [call.args[0] for call in run.call_args_list if any(str(arg).endswith('/verify.py') for arg in call.args[0])]
-        self.assertEqual(len(probes), 2)
+        self.assertEqual(len(probes), count)
         self.assertTrue(all('--auto-tool-choice' in command for command in probes))
         self.refresh.finish()
         catalog = json.loads(self.refresh.paths['catalog'].read_text())
@@ -296,10 +298,34 @@ class BedrockActivationTests(unittest.TestCase):
     def test_preserves_explicit_pricing_policy(self):
         config, catalog, _ = generate(fixture_source(), self.config, self.catalog, '')
         policy = {'provider': 'amazon-bedrock', 'model': 'anthropic.claude-opus-5-5'}
-        config['model_list'][-2]['model_info']['catalog_pricing'] = policy
+        config['model_list'][-1]['model_info']['catalog_pricing'] = policy
         regenerated, _, summary = generate(fixture_source(), config, catalog, '')
-        self.assertEqual(regenerated['model_list'][-2]['model_info']['catalog_pricing'], policy)
+        self.assertEqual(regenerated['model_list'][-1]['model_info']['catalog_pricing'], policy)
         self.assertEqual(summary['test_models'], [])
+
+    def test_check_routes_validates_against_installed_manifest_before_removal(self):
+        prior_manifest = {'region': 'us-east-1', 'models': [
+            {'slug': 'bedrock/opus-5.5', 'model_id': 'anthropic.claude-opus-5-5',
+             'profile_id': 'us.anthropic.claude-opus-5-5', 'display_name': 'Claude Opus 5.5 (AWS Bedrock)',
+             'context_window': 200000, 'reasoning_levels': ['low', 'medium', 'high', 'max'],
+             'default_reasoning_level': 'high', 'tool_mode': 'code_mode_only'},
+            *json.loads(MANIFEST.read_text())['models'],
+        ]}
+        prior_source = {'region': 'us-east-1', 'models': [dict(m,
+            profile_arn='arn:aws:bedrock:us-east-1:123456789012:inference-profile/' + m['profile_id'],
+            model_arns=['arn:aws:bedrock:us-east-1::foundation-model/' + m['model_id']],
+            input_modalities=['text', 'image'], streaming=True) for m in prior_manifest['models']], 'unavailable': []}
+        installed_scripts = self.home / 'runtime/scripts'
+        installed_scripts.mkdir(parents=True)
+        (installed_scripts / 'bedrock-models.json').write_text(json.dumps(prior_manifest))
+        config, catalog, _ = generate(prior_source, self.config, self.catalog, '', prior_manifest)
+        self.refresh.paths['config'].write_text(yaml.safe_dump(config))
+        self.refresh.paths['catalog'].write_text(encode(catalog))
+        self.refresh.paths['snapshot'].write_text(encode({'version': 1, 'codex_version': 'test', 'catalog': prior_source}))
+        self.assertEqual(self.refresh.check_routes()['models'], ['bedrock/gpt-6.1-sol', 'bedrock/opus-5.5'])
+        candidate = self.refresh.candidate(self.snapshot)
+        self.assertEqual(candidate['summary']['removed'], ['bedrock/opus-5.5'])
+        self.assertEqual(candidate['summary']['after'], ['bedrock/gpt-6.1-sol'])
 
 
 if __name__ == '__main__':

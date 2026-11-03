@@ -16,6 +16,8 @@ from claude_agent_sdk.types import AssistantMessage, HookMatcher, RateLimitEvent
 from litellm.llms.custom_llm import CustomLLMError
 
 MODEL = 'claude-opus-5-5'
+MODELS = ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5')
+BEHAVES_AS = {'claude-haiku-5-5': 'claude-sonnet-5-5'}
 LOG = logging.getLogger(__name__)
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 CORRELATION = '_litellm_tool_use_id'
@@ -181,6 +183,7 @@ def configuration(messages, params, *, fast_mode=False):
 class Session:
     def __init__(self, key, config, state, client_factory=ClaudeSDKClient):
         self.key, self.config, self.state = key, config, Path(state)
+        self.model = next((item for item in key if item in MODELS), MODEL)
         self.client_factory = client_factory
         self.generation = uuid.uuid4().hex
         self.path = self.state / 'journals' / (digest(key) + '.json')
@@ -275,10 +278,13 @@ class Session:
         # usage; it requires separately paid usage credits. The live probe hit a
         # rejected SDK rate-limit signal, not a confirmed Fast response. Offline
         # tests cover the adapter contract; this is not a blanket Pro access ban.
-        return ClaudeAgentOptions(model=MODEL, tools=format_tools, mcp_servers={'codex': create_sdk_mcp_server('codex', tools=definitions)},
+        settings = {'fastMode': self.config['fast_mode']}
+        if self.model in BEHAVES_AS:
+            settings['modelPicker'] = {'options': [{'model': self.model, 'behavesAs': BEHAVES_AS[self.model]}]}
+        return ClaudeAgentOptions(model=self.model, tools=format_tools, mcp_servers={'codex': create_sdk_mcp_server('codex', tools=definitions)},
             allowed_tools=format_tools + [MCP_PREFIX + t.name for t in definitions], permission_mode='dontAsk',
             hooks={'PreToolUse': [HookMatcher(hooks=[before_tool])]}, strict_mcp_config=True, setting_sources=[],
-            settings=json.dumps({'fastMode': self.config['fast_mode']}),
+            settings=json.dumps(settings),
             system_prompt=system, include_partial_messages=True, cwd=str(cwd), effort=self.config['effort'],
             thinking={'type': 'adaptive', 'display': 'summarized'}, output_format=self.config['output_format'],
             cli_path=str(Path(__file__).with_name('claude-cli')), env={'DISABLE_AUTOUPDATER': '1'},
@@ -402,7 +408,7 @@ class Session:
         if isinstance(message, SystemMessage) and message.subtype == 'init':
             self.sdk_id = message.data.get('session_id')
             self.effective.update({k: message.data[k] for k in ('model', 'effort', 'tools') if k in message.data})
-            if message.data.get('model') != MODEL:
+            if message.data.get('model') != self.model:
                 raise RuntimeError('Claude initialized a different model')
             self.save()
         elif isinstance(message, StreamEvent):
@@ -444,7 +450,7 @@ class Session:
                 }.get(message.error, (502, 'subscription runtime error'))
                 await self.queue.put(('error', CustomLLMError(status, 'Claude ' + label)))
                 return
-            if message.model != MODEL:
+            if message.model != self.model:
                 raise RuntimeError('Claude answered with a different model')
             for block in message.content:
                 if isinstance(block, ToolUseBlock):

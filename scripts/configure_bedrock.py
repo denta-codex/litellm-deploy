@@ -13,8 +13,8 @@ PREFIX = 'bedrock/'
 CREDENTIAL = Path('/etc/credstore.encrypted/litellm-bedrock-aws')
 
 
-def generate(source, config, catalog, selected):
-    manifest = json.loads(MANIFEST.read_text())
+def generate(source, config, catalog, selected, manifest=None):
+    manifest = manifest or json.loads(MANIFEST.read_text())
     if source.get('region') != manifest['region']:
         raise ValueError('Unexpected Bedrock region')
     expected = {m['slug']: m for m in manifest['models']}
@@ -105,6 +105,17 @@ class BedrockSetup(Refresh):
     def discover(self):
         version = subprocess.check_output([self.codex, '--version'], text=True).strip().removeprefix('codex-cli ')
         return {'version': 1, 'codex_version': version, 'catalog': discover(encrypted_session(CREDENTIAL))}
+
+    def check_routes(self):
+        installed = self.root / 'scripts/bedrock-models.json'
+        if installed.is_file():
+            manifest = json.loads(installed.read_text())
+            self.generate = lambda source, config, catalog, selected: generate(source, config, catalog, selected, manifest)
+            try:
+                return super().check_routes()
+            finally:
+                self.generate = generate
+        return super().check_routes()
 
     def validate(self):
         # Run explicit hosted-search validation even for Claude direct-tool entries:

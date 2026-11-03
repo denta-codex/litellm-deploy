@@ -20,7 +20,7 @@ from litellm.llms.custom_llm import CustomLLMError
 from claude_context import REQUEST, validate_request
 import claude_provider
 from claude_provider import ClaudeProvider, usage_counts
-from claude_session import (CORRELATION, EFFORTS, MODEL, WORKSPACE_NOTE, Session, configuration, content_blocks,
+from claude_session import (CORRELATION, EFFORTS, MODEL, MODELS, WORKSPACE_NOTE, Session, configuration, content_blocks,
                             digest, history_prompt, mcp_names)
 from configure_claude import INSTRUCTIONS, MANIFEST, ClaudeSetup, generate
 from refresh_models import Refresh
@@ -60,7 +60,7 @@ class FakeClient:
         self.interrupted.set()
 
     async def receive_response(self):
-        yield SystemMessage('init', {'model': MODEL, 'session_id': 'fake-session'})
+        yield SystemMessage('init', {'model': self.options.model or MODEL, 'session_id': 'fake-session'})
         script = self.__class__.scripted.pop(0) if self.__class__.scripted else ['ANSWER']
         for item in script:
             if item == 'wait':
@@ -79,6 +79,8 @@ class ContractTests(unittest.TestCase):
         config, new, summary = generate(json.loads(MANIFEST.read_text()), original, catalog, 'chatgpt/gpt-6-astra')
         self.assertEqual(config['model_list'][0], original['model_list'][0])
         self.assertEqual(new['models'][0], catalog['models'][0])
+        self.assertEqual([m['slug'] for m in new['models'][1:]],
+                         ['claude/opus-5.5', 'claude/sonnet-5.5', 'claude/haiku-5.5'])
         row = new['models'][1]
         self.assertEqual(row['display_name'], 'Claude Opus 5.5')
         self.assertEqual(row['available_access_programs'], {'cyber': []})
@@ -88,6 +90,11 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(row['tool_mode'], 'direct')
         self.assertEqual(row['service_tiers'][0]['id'], 'priority')
         self.assertEqual(row['additional_speed_tiers'], ['fast'])
+        for other, title in zip(new['models'][2:], ('Claude Sonnet 5.5', 'Claude Haiku 5.5')):
+            self.assertEqual(other['display_name'], title)
+            self.assertEqual(other['description'], title + ' through your Claude subscription.')
+            self.assertEqual(other['service_tiers'], [])
+            self.assertEqual(other['additional_speed_tiers'], [])
         self.assertEqual(row['base_instructions'], INSTRUCTIONS.read_text())
         self.assertIn('apply_patch', row['base_instructions'])
         self.assertEqual(generate(json.loads(MANIFEST.read_text()), config, new, '')[2]['test_models'], [])
@@ -155,14 +162,21 @@ class ContractTests(unittest.TestCase):
     def test_all_efforts_reach_pinned_cli_flags(self):
         from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
         with tempfile.TemporaryDirectory() as state:
-            for effort in EFFORTS:
-                session = Session((effort,), configuration([], {'reasoning_effort': effort}), state)
-                options = session.options()
-                command = SubprocessCLITransport(prompt='probe', options=options)._build_command()
-                self.assertEqual(command[command.index('--effort') + 1], effort)
-                self.assertEqual(command[command.index('--model') + 1], MODEL)
-                self.assertEqual(command[command.index('--thinking-display') + 1], 'summarized')
-                self.assertEqual(options.tools, [])
+            for model in MODELS:
+                for effort in EFFORTS:
+                    session = Session((effort, model), configuration([], {'reasoning_effort': effort}), state)
+                    options = session.options()
+                    command = SubprocessCLITransport(prompt='probe', options=options)._build_command()
+                    self.assertEqual(command[command.index('--effort') + 1], effort)
+                    self.assertEqual(command[command.index('--model') + 1], model)
+                    self.assertEqual(command[command.index('--thinking-display') + 1], 'summarized')
+                    settings = json.loads(command[command.index('--settings') + 1])
+                    if model == 'claude-haiku-5-5':
+                        self.assertEqual(settings['modelPicker']['options'],
+                                         [{'model': 'claude-haiku-5-5', 'behavesAs': 'claude-sonnet-5-5'}])
+                    else:
+                        self.assertEqual(settings, {'fastMode': False})
+                    self.assertEqual(options.tools, [])
 
     def test_cli_environment_drops_unrelated_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -549,10 +563,11 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             custom_llm_setup()
             routes, _, _ = generate(json.loads(MANIFEST.read_text()), {}, {}, '')
             router = litellm.Router(model_list=routes['model_list'], num_retries=0)
-            events = [e.model_dump() async for e in await router.aresponses(
-                model='claude/opus-5.5', input='hello', reasoning={'effort': 'high'}, stream=True)]
-            self.assertTrue(any(e['type'] == 'response.completed' for e in events))
-            self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'ANSWER')
+            for slug in ('claude/opus-5.5', 'claude/sonnet-5.5', 'claude/haiku-5.5'):
+                events = [e.model_dump() async for e in await router.aresponses(
+                    model=slug, input='hello', reasoning={'effort': 'high'}, stream=True)]
+                self.assertTrue(any(e['type'] == 'response.completed' for e in events))
+                self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'ANSWER')
 
     async def test_pinned_router_uses_captured_fast_tier(self):
         from litellm.utils import custom_llm_setup
@@ -568,6 +583,9 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any(e['type'] == 'response.completed' for e in events))
                 self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'FAST')
                 self.assertTrue(json.loads(FakeClient.instances[-1].options.settings)['fastMode'])
+            for non_fast in ('claude-sonnet-5-5', 'claude-haiku-5-5'):
+                with self.assertRaisesRegex(CustomLLMError, 'Fast mode is only supported'):
+                    [c async for c in self.provider.astreaming(non_fast, [{'role': 'user', 'content': 'hello'}], optional_params={})]
         finally:
             REQUEST.reset(token)
 

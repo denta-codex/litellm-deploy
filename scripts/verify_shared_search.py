@@ -8,7 +8,7 @@ import secrets
 import shutil
 import socket
 import subprocess
-from deployment import proxy_key
+from deployment import codex_binary, proxy_key
 import sys
 import tempfile
 
@@ -92,7 +92,7 @@ async def main(args):
             (home / 'config.toml').write_text(tomlkit.dumps(config))
             log = (home / 'codex.log').open('w')
             logs.append(log)
-            process = await asyncio.create_subprocess_exec('codex', 'app-server', cwd=home,
+            process = await asyncio.create_subprocess_exec(str(codex_binary()), 'app-server', cwd=home,
                 env=env | {'CODEX_HOME': str(home), 'SEARCH_TEST_KEY': key}, stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=log, start_new_session=True)
             rpc = RPC(process)

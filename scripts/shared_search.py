@@ -412,7 +412,7 @@ class SearchResponses:
         if route_type == 'aresponses' and model == 'bedrock/gpt-6.1-sol':
             data = copy.deepcopy(data)
             data['store'] = False
-        eligible = model in ('claude/opus-5.5', 'local/qwen3.8-27b', 'vertex/gemini-4-argon') or model.startswith(('modal/', 'bedrock/'))
+        eligible = model in ('local/qwen3.8-27b', 'vertex/gemini-4-argon') or model.startswith(('claude/', 'modal/', 'bedrock/'))
         hosted = [t for t in data.get('tools', []) if t.get('type') in HOSTED]
         history = isinstance(data.get('input'), list) and any(i.get('type') == 'web_search_call' and i.get('id', '').startswith('ws_shared') for i in data['input'])
         if route_type != 'aresponses' or not eligible or not (hosted or history):

@@ -401,8 +401,9 @@ It is independent of the uninstalled gateway service; do not copy it into
 
 ### Claude subscription adapter
 
-`claude/opus-5.5` is an opt-in route to the exact `claude-opus-5-5` model through
-Claude Agent SDK 0.2.161. Its picker name is **Claude Opus 5.5**. It offers low,
+`claude/opus-5.5`, `claude/sonnet-5.5`, and `claude/haiku-5.5` are opt-in routes to
+`claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5` through
+Claude Agent SDK 0.2.161. Their picker names are **Claude Opus 5.5**, **Claude Sonnet 5.5**, and **Claude Haiku 5.5**. Each offers low,
 medium, high, xhigh, and max effort, defaults to high, and advertises a conservative
 200,000-token context window. The default model remains `chatgpt/gpt-6-astra`.
 There is no model fallback or API-key fallback.
@@ -1296,9 +1297,9 @@ these two chats separate when assessing what has actually been deployed.
 
 ## AWS Bedrock models
 
-Grace and Love publish exactly `bedrock/opus-5.5` and `bedrock/gpt-6.1-sol` through the
-US inference profiles in `scripts/bedrock-models.json`, using `us-east-1`.
-Both models must be discoverable and support streaming before activation.
+Grace and Love publish `bedrock/gpt-6.1-sol` through the
+US inference profile in `scripts/bedrock-models.json`, using `us-east-1`.
+The model must be discoverable and support streaming before activation.
 No substitute model is selected. The current Codex default stays selected.
 
 GPT uses `bedrock/us.openai.gpt-6.1-sol` in native Responses mode; Opus retains

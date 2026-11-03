@@ -5,6 +5,7 @@ import struct
 import zlib
 import json
 from pathlib import Path
+from bedrock_aws import MANIFEST
 from deployment import proxy_key
 import urllib.request
 
@@ -21,7 +22,7 @@ def image_fixture():
 def verify(catalog, base_url):
     key = proxy_key()
     rows = [r for r in json.loads(catalog.read_text())['models'] if r['slug'].startswith('bedrock/')]
-    assert {r['slug'] for r in rows} == {'bedrock/opus-5.5', 'bedrock/gpt-6.1-sol'}
+    assert {r['slug'] for r in rows} == {m['slug'] for m in json.loads(MANIFEST.read_text())['models']}
     for row in rows:
         for effort in row['supported_reasoning_levels']:
             payload = {'model': row['slug'], 'input': 'Reply with exactly BEDROCK_CAPABILITY_OK.',

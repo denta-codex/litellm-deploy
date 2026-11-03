@@ -97,6 +97,8 @@ async def stop(process):
 class Acceptance:
     def __init__(self, args, directory):
         self.args, self.directory = args, directory
+        self.models = getattr(args, 'model', None) or [m['slug'] for m in json.loads(MANIFEST.read_text())['models']]
+        self.model = self.models[0]
         self.proxy = None
         self.logs = []
         self.passes = []
@@ -141,7 +143,7 @@ class Acceptance:
         raise RuntimeError('Isolated proxy startup timed out')
 
     async def request(self, prompt, *, chat=None, stream=True, **extra):
-        payload = {'model': MODEL, 'input': prompt, 'stream': stream, **extra}
+        payload = {'model': self.model, 'input': prompt, 'stream': stream, **extra}
         headers = {'Authorization': 'Bearer ' + self.key, 'x-claude-chat-id': chat or secrets.token_hex(12)}
         async with httpx.AsyncClient(timeout=240) as client:
             response = await client.post(self.base + '/v1/responses', json=payload, headers=headers)
@@ -171,7 +173,7 @@ class Acceptance:
             response, events = await self.request('Reply exactly OPUS_ACCEPTED.', reasoning={'effort': effort})
             assert 'OPUS_ACCEPTED' in self.reply(response)
             assert response.get('usage', {}).get('output_tokens', 0) > 0
-            self.passed('Opus 5.5 streaming, usage, effort=' + effort)
+            self.passed(self.model + ' streaming, usage, effort=' + effort)
         response, _ = await self.request('Reply exactly NONSTREAM_OK.', stream=False)
         assert 'NONSTREAM_OK' in self.reply(response)
         self.passed('nonstreaming Responses')
@@ -226,12 +228,13 @@ class Acceptance:
         self.passed('parallel calls with partial and out-of-order results')
 
     async def codex_checks(self):
-        home, work = self.directory / 'codex', self.directory / 'work'
-        home.mkdir(exist_ok=True)
-        work.mkdir(exist_ok=True)
+        sub = self.directory / self.model.replace('/', '-') if len(self.models) > 1 else self.directory
+        home, work = sub / 'codex', sub / 'work'
+        home.mkdir(parents=True, exist_ok=True)
+        work.mkdir(parents=True, exist_ok=True)
         marker = 'CODEX_' + secrets.token_hex(12)
         (work / 'marker.txt').write_text(marker)
-        config = {'model': MODEL, 'model_provider': 'claude_acceptance', 'model_catalog_json': str(self.catalog),
+        config = {'model': self.model, 'model_provider': 'claude_acceptance', 'model_catalog_json': str(self.catalog),
             'model_reasoning_effort': 'low', 'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'disabled',
             'features': {'shell_snapshot': False, 'fast_mode': self.args.fast}, 'shell_environment_policy': {'exclude': ['CLAUDE_TEST_PROXY_KEY']},
             'model_providers': {'claude_acceptance': {'name': 'Claude acceptance', 'base_url': self.base + '/v1',
@@ -247,7 +250,7 @@ class Acceptance:
             config['service_tier'] = 'default'
             config['model_providers']['claude_acceptance']['requires_openai_auth'] = True
         (home / 'config.toml').write_text(tomlkit.dumps(config))
-        log = (self.directory / 'codex.log').open('w')
+        log = (sub / 'codex.log').open('w')
         self.logs.append(log)
         process = await asyncio.create_subprocess_exec(str(codex_binary()), 'app-server', cwd=work,
             env=self.env | {'CODEX_HOME': str(home), 'CLAUDE_TEST_PROXY_KEY': self.key}, stdin=asyncio.subprocess.PIPE,
@@ -258,7 +261,7 @@ class Acceptance:
             await rpc.send({'method': 'initialized', 'params': {}})
             async def new_thread(sandbox='read-only'):
                 # Use the catalog's Claude instructions, as a real chat would.
-                result = await rpc.call('thread/start', {'model': MODEL, 'modelProvider': 'claude_acceptance', 'cwd': str(work),
+                result = await rpc.call('thread/start', {'model': self.model, 'modelProvider': 'claude_acceptance', 'cwd': str(work),
                     'approvalPolicy': 'never', 'sandbox': sandbox})
                 return result['thread']['id']
             if self.args.fast:
@@ -289,7 +292,7 @@ class Acceptance:
             self.passed('quote-heavy edit through apply_patch')
             reply, _ = await rpc.turn(thread, 'Repeat the marker without using tools.')
             assert marker in reply
-            fork = await rpc.call('thread/fork', {'threadId': thread, 'model': MODEL, 'modelProvider': 'claude_acceptance'})
+            fork = await rpc.call('thread/fork', {'threadId': thread, 'model': self.model, 'modelProvider': 'claude_acceptance'})
             reply, items = await rpc.turn(fork['thread']['id'], 'Repeat the earlier marker without tools.')
             assert marker in reply and not any(i['type'] == 'commandExecution' for i in items)
             self.passed('follow-up and real Codex fork')
@@ -309,7 +312,7 @@ class Acceptance:
             self.passed('real Codex compaction and continuity')
             reply, _ = await rpc.turn(thread, 'Repeat the earlier command marker without tools.', model='chatgpt/gpt-6-astra')
             assert marker in reply
-            reply, _ = await rpc.turn(thread, 'Repeat the earlier command marker without tools.', model=MODEL)
+            reply, _ = await rpc.turn(thread, 'Repeat the earlier command marker without tools.', model=self.model)
             assert marker in reply
             self.passed('Claude to ChatGPT and back with retained history')
             offset = len(rpc.events)
@@ -385,10 +388,13 @@ class Acceptance:
             if not self.key:
                 self.key = proxy_key()
         try:
-            if not self.args.codex_only and not self.args.fast_only:
-                await self.api_checks()
-            if not self.args.api_only:
-                await self.codex_checks()
+            models = [MODEL] if self.args.fast else self.models
+            for model in models:
+                self.model = model
+                if not self.args.codex_only and not self.args.fast_only:
+                    await self.api_checks()
+                if not self.args.api_only:
+                    await self.codex_checks()
             if self.args.report:
                 self.args.report.write_text(json.dumps({'passed': self.passes, 'complete': True}, indent=2))
         finally:
@@ -404,6 +410,7 @@ def main():
     parser.add_argument('--codex-only', action='store_true')
     parser.add_argument('--fast', action='store_true', help='Opt in to paid Claude Fast acceptance, including Codex tool continuation')
     parser.add_argument('--fast-only', action='store_true', help='Run only the paid standard/Fast/standard Codex probe; implies --fast')
+    parser.add_argument('--model', action='append')
     parser.add_argument('--base-url', default='http://127.0.0.1:4000')
     parser.add_argument('--catalog', type=Path, default=Path.home() / '.config/litellm/codex-models.json')
     parser.add_argument('--report', type=Path)
@@ -418,6 +425,8 @@ def main():
         asyncio.run(Acceptance(args, directory).run())
     except BaseException:
         # Retain diagnostics, not the disposable native login or credential link.
+        for auth in directory.glob('**/auth.json'):
+            auth.unlink(missing_ok=True)
         (directory / 'codex/auth.json').unlink(missing_ok=True)
         (directory / 'claude-config/.credentials.json').unlink(missing_ok=True)
         print('Acceptance failed; diagnostic state retained at ' + str(directory), file=sys.stderr)
