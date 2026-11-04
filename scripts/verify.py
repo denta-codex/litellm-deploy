@@ -4,6 +4,7 @@ import json
 from deployment import proxy_key
 import urllib.error
 import urllib.request
+import uuid
 
 p = argparse.ArgumentParser()
 p.add_argument('--model', default='chatgpt/gpt-6-astra')
@@ -15,12 +16,13 @@ p.add_argument('--service-tier', choices=['priority', 'default'],
 args = p.parse_args()
 key = proxy_key(args.credential)
 base = args.base_url.rstrip('/')
+session = str(uuid.uuid4())
 
 def verify_tier(response):
     print(f'TIER requested={args.service_tier or "omitted"} returned={response.get("service_tier")!r}', flush=True)
 
 def request(path, payload=None, authenticated=True):
-    headers = {'Content-Type': 'application/json'}
+    headers = {'Content-Type': 'application/json', 'session-id': session}
     if authenticated:
         headers['Authorization'] = f'Bearer {key}'
     if payload is not None and args.service_tier:
