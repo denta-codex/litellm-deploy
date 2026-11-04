@@ -39,7 +39,8 @@ def configure(path):
     account = pwd.getpwnam(variables['litellm_user'])
     if os.geteuid() != account.pw_uid or Path(account.pw_dir) != home:
         raise ValueError('Run as the configured user, whose home must match the configuration')
-    UV = subprocess.check_output([variables['codex_mise'], 'which', 'uv'], cwd=home, text=True).strip()
+    UV = str(Path(subprocess.check_output(
+        [variables['codex_mise'], 'which', 'uv'], cwd=home, text=True).strip()).resolve(strict=True))
     CONFIG, HOME = config, home
     ROOT, STATE = Path(variables['litellm_root']), Path(variables['litellm_state'])
     JOURNAL = STATE/'runtime-upgrade.json'

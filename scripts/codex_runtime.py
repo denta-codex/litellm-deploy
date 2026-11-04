@@ -440,7 +440,7 @@ class Runtime:
 
     def check_remote_connection(self):
         self.run_remote_check('connection-check.py',
-                              ['--url', 'ws://127.0.0.1:8787/codex/rpc', '--todo', '--event'])
+                              ['--url', 'ws://127.0.0.1:8787/codex/rpc', '--todo'])
         self.run_ssh_check('live')
 
     def run_ssh_check(self, action):

@@ -1,8 +1,10 @@
 """Runtime recovery restores only managed changes and refuses concurrent edits."""
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -56,6 +58,25 @@ class RuntimeTemplates(unittest.TestCase):
             self.assertFalse((SOURCE/'scripts'/name).exists(), name)
         for name in retired['dropins']:
             self.assertIsNone(self.result[f'{runtime.UNIT}.d/{name}'])
+
+
+class RuntimeToolchain(unittest.TestCase):
+    def test_configuration_resolves_managed_uv_alias_to_exact_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            binary = home/'uv-versioned'
+            binary.touch()
+            alias = home/'uv-latest'
+            alias.symlink_to(binary)
+            config = deploy_config.load(SOURCE/'deploy/config.example.yml') | {'home': str(home)}
+            for name in ('HOME', 'ROOT', 'STATE', 'JOURNAL', 'UV', 'CONFIG'):
+                self.enterContext(patch.object(runtime, name, getattr(runtime, name)))
+            with patch.object(runtime.deploy_config, 'load', return_value=config), \
+                    patch.object(runtime.pwd, 'getpwnam', return_value=SimpleNamespace(
+                        pw_uid=os.geteuid(), pw_dir=str(home))), \
+                    patch.object(runtime.subprocess, 'check_output', return_value=str(alias) + '\n'):
+                runtime.configure(home/'config.yml')
+            self.assertEqual(runtime.UV, str(binary))
 
 
 class RuntimeRecovery(unittest.TestCase):

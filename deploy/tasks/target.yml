@@ -64,5 +64,5 @@
 - name: Select managed tool paths
   tags: [always]
   ansible.builtin.set_fact:
-    litellm_uv: "{{ managed_uv.stdout | trim }}"
+    litellm_uv: "{{ managed_uv.stdout | trim | realpath }}"
     litellm_codex: "{{ litellm_home }}/.local/share/mise/installs/codex/{{ codex_version }}/bin/codex"
