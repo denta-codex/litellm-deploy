@@ -71,6 +71,29 @@ class ConfigTests(ConfigFixture):
             runtime.configured_model(self.home)
 
 
+class FailureTests(unittest.TestCase):
+    def test_rate_limit_reports_only_whitelisted_metadata(self):
+        failure = str(runtime.turn_failure({'error': {
+            'codexErrorInfo': {'responseStreamConnectionFailed': {'private': 'fixture-secret'}},
+            'message': 'Rate limit exceeded for fixture-secret; private response text',
+        }}))
+        self.assertIn('responseStreamConnectionFailed', failure)
+        self.assertIn("categories=['rate limit']", failure)
+        self.assertNotIn('fixture-secret', failure)
+        self.assertNotIn('private response text', failure)
+
+    def test_unknown_error_and_message_are_not_echoed(self):
+        failure = str(runtime.turn_failure({'error': {
+            'codexErrorInfo': 'fixture-secret', 'message': 'private response text',
+        }}))
+        self.assertIn('unknown; categories=[]', failure)
+        self.assertNotIn('fixture-secret', failure)
+        self.assertNotIn('private response text', failure)
+
+    def test_absent_error_is_safe(self):
+        self.assertIn('unknown; categories=[]', str(runtime.turn_failure({})))
+
+
 class FakeRPC:
     def __init__(self, model, *, identity='chatgpt', provider='litellm', fast=False, output='KEY_ABSENT'):
         self.model, self.identity, self.provider = model, identity, provider

@@ -50,7 +50,12 @@ def turn_failure(turn):
              'responseStreamDisconnected', 'other')
     kind = info if isinstance(info, str) and info in known else next(
         (name for name in known if isinstance(info, dict) and name in info), 'unknown')
-    return RuntimeError(f'App-server probe turn failed ({kind}); no response content reported')
+    message = str((turn.get('error') or {}).get('message', '')).lower()
+    categories = [phrase for phrase in ('code mode', 'sandbox', 'permission denied', 'read-only',
+                                        'failed to spawn', 'timed out', 'usage limit', 'rate limit')
+                  if phrase in message]
+    return RuntimeError(f'App-server probe turn failed ({kind}; categories={categories}); '
+                        'no response content reported')
 
 
 async def verify(version, socket, home=None):
