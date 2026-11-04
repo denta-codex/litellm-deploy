@@ -125,10 +125,10 @@
       changed_when: false
       when: codex_runtime_action in ['verify', 'finish'] and not ansible_check_mode
 
-    - name: Verify subscription streaming and tool continuation
+    - name: Verify the configured default model streaming and tool continuation
       ansible.builtin.command:
         argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}",
-               "{{ litellm_root }}/scripts/verify.py", --model, "{{ litellm_model }}", --service-tier, priority]
+               "{{ litellm_root }}/scripts/verify.py", --model, "{{ litellm_model }}"]
       changed_when: false
       when: codex_runtime_action == 'verify' and not ansible_check_mode
 
@@ -136,7 +136,7 @@
       ansible.builtin.command:
         argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}",
                "{{ litellm_root }}/scripts/verify_codex.py", --model, "{{ litellm_model }}",
-               --service-tier, priority, --launcher, "{{ litellm_home }}/.local/bin/codex"]
+               --launcher, "{{ litellm_home }}/.local/bin/codex"]
       changed_when: false
       when: codex_runtime_action == 'verify' and not ansible_check_mode
 

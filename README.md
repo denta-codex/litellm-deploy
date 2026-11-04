@@ -290,11 +290,11 @@ ansible-playbook -i deploy/inventory.yml deploy/codex-runtime.yml -e codex_runti
   - Requires a replaced app-server socket.
   - Checks that the live process uses the pinned binary and the proxy credential.
   - Runs a real shell turn to prove the key is absent from tools.
-  - Checks subscription streaming, tool continuation, native search and resume,
+  - Checks the configured default model's streaming, tool continuation, native search and resume,
     and the reserved reviewer route.
 - **`finish`**
   - Reruns a live turn.
-  - Runs the forwarder's authenticated WSS check and the SSH proxy-client check.
+  - Runs the forwarder's authenticated local connection check and the SSH proxy-client check.
   - Records the accepted manifest.
 
 The forwarder checks live in `~/.local/libexec/remote-codex-checks/`. Deploy Remote
@@ -337,9 +337,13 @@ acceptance or after a verified recovery.
 
 After each runtime update, repeat the desktop acceptance:
 
-- a Fast-on turn sends `priority`, including after a restart;
-- a Fast-off turn omits the field;
+- the desktop reconnects to the intended host/model with projects and history intact;
+- for a model advertising Fast, a Fast-on turn sends `priority`, including after a restart;
+- for a model advertising Fast, a Fast-off turn omits the field;
 - the shell sees no proxy key.
+
+Models without a priority tier, such as a configured Vertex model, use the
+default-tier shell/connection check; they do not need a subscription-model test.
 
 ## Refresh models
 

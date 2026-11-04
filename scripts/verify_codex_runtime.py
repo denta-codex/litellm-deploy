@@ -3,15 +3,51 @@
 import argparse
 import asyncio
 import json
-import os
 from pathlib import Path
 import subprocess
+import tomllib
 
 from websockets.asyncio.client import unix_connect
 
 
+def configured_model(home, model=None):
+    """Use the user's selected model and published catalog, not a subscription ID."""
+    home = Path(home)
+    config = tomllib.loads((home / '.codex/config.toml').read_text())
+    provider = config.get('model_provider')
+    settings = config.get('model_providers', {}).get(provider, {})
+    if (provider != 'litellm' or settings.get('wire_api') != 'responses'
+            or settings.get('requires_openai_auth') is not True
+            or settings.get('env_key') != 'LITELLM_PROXY_KEY'):
+        raise RuntimeError('Configured provider must use LiteLLM Responses with genuine ChatGPT identity and proxy auth')
+    selected = model or config.get('model')
+    catalog = Path(config['model_catalog_json'])
+    if not catalog.is_absolute():
+        raise RuntimeError('Configured model catalog must use an absolute path')
+    rows = [row for row in json.loads(catalog.read_text())['models'] if row.get('slug') == selected]
+    if len(rows) != 1 or rows[0].get('visibility') != 'list':
+        raise RuntimeError('Configured model must have exactly one selectable catalog row')
+    return config, rows[0]
+
+
+def service_tiers(model):
+    return ('priority', 'default') if any(
+        tier.get('id') == 'priority' for tier in model.get('service_tiers', [])
+    ) else ('default',)
+
+
+def isolation_prompt(model):
+    tool = ('the `exec` tool by calling `tools.exec_command`' if model.get('tool_mode') == 'code_mode_only'
+            else 'your shell command tool')
+    command = 'if test -z "${LITELLM_PROXY_KEY+x}"; then printf KEY_ABSENT; else printf KEY_PRESENT; fi'
+    return f'Run exactly this shell command using {tool} and report its output: {command}'
+
+
 async def verify(version, socket, home=None):
     home = Path(home) if home is not None else Path.home()
+    config, metadata = configured_model(home)
+    model = metadata['slug']
+    fast = 'priority' in service_tiers(metadata)
     pid = int(subprocess.check_output(
         ['systemctl', 'show', 'codex-app-server.service', '--property=MainPID', '--value'],
         text=True,
@@ -46,21 +82,27 @@ async def verify(version, socket, home=None):
         account = await rpc('account/read', {'refreshToken': False})
         if (account.get('account') or {}).get('type') != 'chatgpt' or not account.get('requiresOpenaiAuth'):
             raise RuntimeError('Live app server does not expose genuine ChatGPT identity')
-        models = await rpc('model/list', {})
-        astra = next((model for model in models.get('data', []) if model.get('model') == 'chatgpt/gpt-6-astra'), None)
-        if not astra or not any(tier.get('id') == 'priority' for tier in astra.get('serviceTiers', [])):
-            raise RuntimeError('Live Astra metadata does not advertise Fast')
+        cursor, listed = None, None
+        while True:
+            models = await rpc('model/list', {'cursor': cursor})
+            listed = next((row for row in models.get('data', []) if row.get('model') == model), None)
+            cursor = models.get('nextCursor')
+            if listed is not None or not cursor:
+                break
+        if listed is None:
+            raise RuntimeError('Live model list does not contain the configured model')
+        if any(tier.get('id') == 'priority' for tier in listed.get('serviceTiers', [])) != fast:
+            raise RuntimeError('Live configured-model Fast capability differs from the catalog')
 
         started = await rpc('thread/start', {
             'cwd': str(home), 'ephemeral': True, 'approvalPolicy': 'never',
             'sandbox': 'read-only', 'serviceTier': 'default',
         })
-        if started.get('modelProvider') != 'litellm' or started.get('model') != 'chatgpt/gpt-6-astra':
-            raise RuntimeError('Live app server does not default to Astra through LiteLLM')
+        if started.get('modelProvider') != config['model_provider'] or started.get('model') != model:
+            raise RuntimeError('Live app server does not use the configured default model and provider')
         thread = started['thread']['id']
-        command = 'if test -z "${LITELLM_PROXY_KEY+x}"; then printf KEY_ABSENT; else printf KEY_PRESENT; fi'
         await rpc('turn/start', {'threadId': thread, 'serviceTier': 'default',
-                                 'input': [{'type': 'text', 'text': 'Run exactly this shell command and report its output: ' + command}]})
+                                 'input': [{'type': 'text', 'text': isolation_prompt(metadata)}]})
         executed = False
         while True:
             event = json.loads(await asyncio.wait_for(ws.recv(), 240))
@@ -78,7 +120,7 @@ async def verify(version, socket, home=None):
         if not executed:
             raise RuntimeError('Live app server did not execute the shell isolation probe')
     print(json.dumps({'version': version, 'service': 'active', 'chatgpt_identity': True,
-                      'fast_capability': True, 'provider': 'litellm', 'model': 'chatgpt/gpt-6-astra',
+                      'fast_capability': fast, 'provider': config['model_provider'], 'model': model,
                       'proxy_auth': True, 'tool_key_absent': True}, sort_keys=True))
 
 

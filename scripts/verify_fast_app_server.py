@@ -8,20 +8,27 @@ import asyncio
 import json
 import os
 from pathlib import Path
-import subprocess
 from deployment import codex_binary, proxy_key
 import tempfile
+from verify_codex_runtime import configured_model, isolation_prompt, service_tiers
 
 from aiohttp import ClientSession, ClientTimeout, web
 import tomlkit
 
 
 async def verify(args, home):
-    native = json.loads((Path.home() / '.codex/auth.json').read_text())
+    source_home = args.home
+    config, metadata = configured_model(source_home, args.model)
+    model = metadata['slug']
+    efforts = [row['effort'] for row in metadata.get('supported_reasoning_levels', [])]
+    effort = 'low' if 'low' in efforts else metadata['default_reasoning_level']
+    provider = config['model_providers'][config['model_provider']]
+    base_url = args.base_url or provider['base_url'].rstrip('/').removesuffix('/v1')
+    native = json.loads((source_home / '.codex/auth.json').read_text())
     native['tokens']['refresh_token'] = ''
     native['OPENAI_API_KEY'] = None
     (home / 'auth.json').write_text(json.dumps(native))
-    key = proxy_key()
+    key = proxy_key(home=source_home)
     observed = []
     async with ClientSession(timeout=ClientTimeout(total=240)) as session:
         async def relay(request):
@@ -35,7 +42,7 @@ async def verify(args, home):
                 print(json.dumps({'proxy_auth': True, 'requested_tier': tier}), flush=True)
             headers = {k: v for k, v in request.headers.items()
                        if k.lower() not in ('host', 'content-length', 'connection', 'accept-encoding')}
-            async with session.request(request.method, args.base_url.rstrip('/') + request.path_qs,
+            async with session.request(request.method, base_url.rstrip('/') + request.path_qs,
                                        data=body, headers=headers) as upstream:
                 response = web.StreamResponse(status=upstream.status, headers={
                     'Content-Type': upstream.headers.get('Content-Type', 'application/json')})
@@ -56,21 +63,17 @@ async def verify(args, home):
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
         doc = {
-            'model_provider': 'litellm', 'model': args.model, 'model_reasoning_effort': 'low',
+            'model_provider': config['model_provider'], 'model': model, 'model_reasoning_effort': effort,
             'service_tier': 'default',
-            'model_catalog_json': str(Path.home() / '.config/litellm/codex-models.json'),
+            'model_catalog_json': config['model_catalog_json'],
             'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'disabled',
             'features': {'fast_mode': True, 'shell_snapshot': False},
             'shell_environment_policy': {'exclude': ['LITELLM_PROXY_KEY']},
-            'model_providers': {'litellm': {
-                'name': 'LiteLLM', 'wire_api': 'responses', 'supports_websockets': False,
-                'base_url': 'http://127.0.0.1:4000/v1',
-                'requires_openai_auth': True, 'env_key': 'LITELLM_PROXY_KEY',
-            }},
+            'model_providers': {config['model_provider']: dict(provider, supports_websockets=False)},
         }
         doc['model_providers']['litellm']['base_url'] = f'http://127.0.0.1:{port}/v1'
         (home / 'config.toml').write_text(tomlkit.dumps(doc))
-        process = await asyncio.create_subprocess_exec(str(args.launcher or codex_binary()), '-c', 'features.code_mode_host=true', 'app-server',
+        process = await asyncio.create_subprocess_exec(str(args.launcher or codex_binary(home=source_home)), '-c', 'features.code_mode_host=true', 'app-server',
             env=os.environ | {'CODEX_HOME': str(home), 'LITELLM_PROXY_KEY': key}, stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         counter = 0
@@ -98,12 +101,13 @@ async def verify(args, home):
             assert account['account']['type'] == 'chatgpt' and account['requiresOpenaiAuth']
             print('PASS native ChatGPT identity with custom provider', flush=True)
             started = await rpc('thread/start', {'cwd': str(home), 'ephemeral': True})
+            if started.get('modelProvider') != config['model_provider'] or started.get('model') != model:
+                raise RuntimeError('Isolated app server does not use the configured model and provider')
             thread = started['thread']['id']
-            for tier in ('priority', 'default'):
+            for tier in service_tiers(metadata):
                 offset = len(observed)
-                command = 'if test -z "${LITELLM_PROXY_KEY+x}"; then printf KEY_ABSENT; else printf KEY_PRESENT; fi'
                 await rpc('turn/start', {'threadId': thread, 'serviceTier': tier,
-                    'input': [{'type': 'text', 'text': 'Run exactly this shell command and report its output: ' + command}]})
+                    'input': [{'type': 'text', 'text': isolation_prompt(metadata)}]})
                 executed = False
                 while True:
                     event = await receive()
@@ -137,12 +141,14 @@ async def verify(args, home):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--model', default='chatgpt/gpt-6-astra')
-    parser.add_argument('--base-url', default='http://127.0.0.1:4000')
+    parser.add_argument('--model', help='Override the selected model with another selectable catalog row')
+    parser.add_argument('--base-url', help='Override the configured proxy origin')
+    parser.add_argument('--home', type=Path, default=Path.home())
     parser.add_argument('--launcher', type=Path, default=None)
     args = parser.parse_args()
     os.umask(0o077)
-    state = Path.home() / '.local/state/litellm'
+    state = args.home / '.local/state/litellm'
+    state.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(prefix='fast-app-probe-', dir=state) as directory:
         asyncio.run(verify(args, Path(directory)))
 

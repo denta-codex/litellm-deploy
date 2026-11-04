@@ -131,6 +131,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual([call.args for call in ssh.call_args_list], [('candidate',), ('live',)])
         self.assertEqual([call.args[0] for call in forwarder.call_args_list],
                          ['candidate-check.py', 'connection-check.py'])
+        self.assertEqual(forwarder.call_args_list[1].args[1],
+                         ['--url', 'ws://127.0.0.1:8787/codex/rpc', '--todo', '--event'])
 
     def test_ssh_check_runs_as_agent_and_redacts_failed_rpc(self):
         result = subprocess.CompletedProcess([], 1, 'private-value', 'private-value')
