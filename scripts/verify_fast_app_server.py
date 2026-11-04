@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from deployment import codex_binary, proxy_key
 import tempfile
-from verify_codex_runtime import configured_model, isolation_prompt, service_tiers
+from verify_codex_runtime import configured_model, isolation_prompt, service_tiers, turn_failure
 
 from aiohttp import ClientSession, ClientTimeout, web
 import tomlkit
@@ -44,6 +44,8 @@ async def verify(args, home):
                        if k.lower() not in ('host', 'content-length', 'connection', 'accept-encoding')}
             async with session.request(request.method, base_url.rstrip('/') + request.path_qs,
                                        data=body, headers=headers) as upstream:
+                if request.path.endswith('/responses'):
+                    print(json.dumps({'upstream_status': upstream.status}), flush=True)
                 response = web.StreamResponse(status=upstream.status, headers={
                     'Content-Type': upstream.headers.get('Content-Type', 'application/json')})
                 await response.prepare(request)
@@ -120,7 +122,8 @@ async def verify(args, home):
                             assert item.get('exitCode') == 0 and 'KEY_ABSENT' in output and 'KEY_PRESENT' not in output
                             executed = True
                     if event.get('method') == 'turn/completed':
-                        assert event['params']['turn']['status'] == 'completed'
+                        if event['params']['turn']['status'] != 'completed':
+                            raise turn_failure(event['params']['turn'])
                         break
                 assert executed, 'No successful real shell-environment probe'
                 sent = observed[offset:]

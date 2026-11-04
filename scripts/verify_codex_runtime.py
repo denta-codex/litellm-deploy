@@ -43,6 +43,16 @@ def isolation_prompt(model):
     return f'Run exactly this shell command using {tool} and report its output: {command}'
 
 
+def turn_failure(turn):
+    info = (turn.get('error') or {}).get('codexErrorInfo')
+    known = ('contextWindowExceeded', 'usageLimitExceeded', 'serverOverloaded', 'sandboxError',
+             'internalServerError', 'httpConnectionFailed', 'responseStreamConnectionFailed',
+             'responseStreamDisconnected', 'other')
+    kind = info if isinstance(info, str) and info in known else next(
+        (name for name in known if isinstance(info, dict) and name in info), 'unknown')
+    return RuntimeError(f'App-server probe turn failed ({kind}); no response content reported')
+
+
 async def verify(version, socket, home=None):
     home = Path(home) if home is not None else Path.home()
     config, metadata = configured_model(home)
@@ -115,7 +125,7 @@ async def verify(version, socket, home=None):
                     executed = True
             if event.get('method') == 'turn/completed':
                 if event['params']['turn']['status'] != 'completed':
-                    raise RuntimeError('Live app-server verification turn did not complete')
+                    raise turn_failure(event['params']['turn'])
                 break
         if not executed:
             raise RuntimeError('Live app server did not execute the shell isolation probe')
