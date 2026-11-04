@@ -47,6 +47,17 @@ class ConfigTests(ConfigFixture):
         _, row = runtime.configured_model(self.home, 'chatgpt/fixture')
         self.assertEqual(runtime.service_tiers(row), ('priority', 'default'))
 
+    def test_required_tier_is_configured_not_every_advertised_capability(self):
+        row = dict(self.row, service_tiers=[{'id': 'priority'}])
+        self.assertEqual(runtime.probe_tiers(self.config, row), ('default',))
+        self.assertEqual(runtime.probe_tiers(self.config, row, all_tiers=True), ('priority', 'default'))
+        self.assertEqual(runtime.probe_tiers(dict(self.config, service_tier='priority'), row), ('priority',))
+
+    def test_invalid_or_unadvertised_configured_tier_is_rejected(self):
+        for tier in ('priority', 'invalid'):
+            with self.subTest(tier=tier), self.assertRaises(RuntimeError):
+                runtime.probe_tiers(dict(self.config, service_tier=tier), self.row)
+
     def test_missing_hidden_or_ambiguous_default_is_not_accepted(self):
         for rows in ([], [dict(self.row, visibility='hide')], [self.row, self.row]):
             with self.subTest(rows=rows):
@@ -167,6 +178,15 @@ class LiveTests(ConfigFixture):
         self.assertTrue(self.run_probe(FakeRPC(self.row['slug'], fast=True))['fast_capability'])
         with self.assertRaisesRegex(RuntimeError, 'Fast capability differs'):
             self.run_probe(FakeRPC(self.row['slug']))
+
+    def test_live_probe_requires_the_configured_priority_tier(self):
+        self.row['service_tiers'] = [{'id': 'priority'}]
+        self.config['service_tier'] = 'priority'
+        self.save()
+        rpc = FakeRPC(self.model, fast=True)
+        self.assertEqual(self.run_probe(rpc)['requested_tier'], 'priority')
+        starts = [m for m in rpc.messages if m['method'] in ('thread/start', 'turn/start')]
+        self.assertTrue(all(m['params']['serviceTier'] == 'priority' for m in starts))
 
     def test_wrong_identity_default_provider_or_leaked_key_fails(self):
         for rpc, error in ((FakeRPC(self.model, identity='apiKey'), 'genuine ChatGPT identity'),

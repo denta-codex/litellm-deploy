@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 from deployment import codex_binary, proxy_key
 import tempfile
-from verify_codex_runtime import configured_model, isolation_prompt, service_tiers, turn_failure
+from verify_codex_runtime import configured_model, isolation_prompt, probe_tiers, turn_failure
 
 from aiohttp import ClientSession, ClientTimeout, web
 import tomlkit
@@ -19,6 +19,7 @@ import tomlkit
 async def verify(args, home):
     source_home = args.home
     config, metadata = configured_model(source_home, args.model)
+    tiers = probe_tiers(config, metadata, all_tiers=args.all_tiers)
     model = metadata['slug']
     efforts = [row['effort'] for row in metadata.get('supported_reasoning_levels', [])]
     effort = 'low' if 'low' in efforts else metadata['default_reasoning_level']
@@ -66,7 +67,7 @@ async def verify(args, home):
         port = site._server.sockets[0].getsockname()[1]
         doc = {
             'model_provider': config['model_provider'], 'model': model, 'model_reasoning_effort': effort,
-            'service_tier': 'default',
+            'service_tier': config.get('service_tier') or 'default',
             'model_catalog_json': config['model_catalog_json'],
             'approval_policy': 'never', 'sandbox_mode': 'read-only', 'web_search': 'disabled',
             'features': {'fast_mode': True, 'shell_snapshot': False},
@@ -106,7 +107,7 @@ async def verify(args, home):
             if started.get('modelProvider') != config['model_provider'] or started.get('model') != model:
                 raise RuntimeError('Isolated app server does not use the configured model and provider')
             thread = started['thread']['id']
-            for tier in service_tiers(metadata):
+            for tier in tiers:
                 offset = len(observed)
                 await rpc('turn/start', {'threadId': thread, 'serviceTier': tier,
                     'input': [{'type': 'text', 'text': isolation_prompt(metadata)}]})
@@ -148,6 +149,8 @@ def main():
     parser.add_argument('--base-url', help='Override the configured proxy origin')
     parser.add_argument('--home', type=Path, default=Path.home())
     parser.add_argument('--launcher', type=Path, default=None)
+    parser.add_argument('--all-tiers', action='store_true',
+                        help='Also test optional advertised tiers; requires account access to each tier')
     args = parser.parse_args()
     os.umask(0o077)
     state = args.home / '.local/state/litellm'

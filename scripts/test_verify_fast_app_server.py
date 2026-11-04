@@ -46,14 +46,16 @@ class FakeSession:
 
 
 class StagedTests(ConfigFixture):
-    def run_probe(self, *, identity='chatgpt', wrong_tier=False, output='KEY_ABSENT', override=None):
+    def run_probe(self, *, identity='chatgpt', wrong_tier=False, output='KEY_ABSENT', override=None,
+                  all_tiers=False):
         isolated = self.home / 'isolated'
         isolated.mkdir()
         auth = {'tokens': {'access_token': 'fixture-access', 'refresh_token': 'never-copy-me'},
                 'OPENAI_API_KEY': 'never-copy-me'}
         (self.home / '.codex/auth.json').write_text(json.dumps(auth))
         before = (self.home / '.codex/auth.json').read_bytes()
-        args = SimpleNamespace(home=self.home, model=override, base_url=None, launcher=None)
+        args = SimpleNamespace(home=self.home, model=override, base_url=None, launcher=None,
+                               all_tiers=all_tiers)
         session = FakeSession()
         handlers, launched = [], []
 
@@ -120,11 +122,11 @@ class StagedTests(ConfigFixture):
         self.assertIn('tools.exec_command', turns[0]['params']['input'][0]['text'])
         self.assertEqual([url for _, url, _ in session.requests], ['http://127.0.0.1:4567/v1/responses'])
 
-    def test_advertised_fast_requests_priority_and_default_and_low_if_supported(self):
+    def test_optional_all_tiers_requests_priority_and_default_and_low_if_supported(self):
         self.row['service_tiers'] = [{'id': 'priority'}]
         self.row['supported_reasoning_levels'].append({'effort': 'low'})
         self.save()
-        (_, _, config, rpc, _), session = self.run_probe()
+        (_, _, config, rpc, _), session = self.run_probe(all_tiers=True)
         self.assertEqual(config['model_reasoning_effort'], 'low')
         self.assertEqual([m['params']['serviceTier'] for m in rpc.messages if m['method'] == 'turn/start'],
                          ['priority', 'default'])
@@ -133,7 +135,7 @@ class StagedTests(ConfigFixture):
 
     def test_explicit_model_override_uses_its_own_reasoning_and_tier_metadata(self):
         self.save([self.row, dict(self.row, slug='claude/fixture', service_tiers=[{'id': 'priority'}])])
-        (_, _, config, rpc, _), _ = self.run_probe(override='claude/fixture')
+        (_, _, config, rpc, _), _ = self.run_probe(override='claude/fixture', all_tiers=True)
         self.assertEqual(config['model'], 'claude/fixture')
         self.assertEqual([m['params']['serviceTier'] for m in rpc.messages if m['method'] == 'turn/start'],
                          ['priority', 'default'])
@@ -146,7 +148,23 @@ class StagedTests(ConfigFixture):
         self.row['service_tiers'] = [{'id': 'priority'}]
         self.save()
         with self.assertRaises(AssertionError):
-            self.run_probe(wrong_tier=True)
+            self.run_probe(wrong_tier=True, all_tiers=True)
+
+    def test_advertised_fast_does_not_require_unconfigured_paid_tier(self):
+        self.row['service_tiers'] = [{'id': 'priority'}]
+        self.save()
+        (_, _, _, rpc, _), _ = self.run_probe()
+        self.assertEqual([m['params']['serviceTier'] for m in rpc.messages if m['method'] == 'turn/start'],
+                         ['default'])
+
+    def test_configured_priority_must_be_forwarded_and_verified(self):
+        self.row['service_tiers'] = [{'id': 'priority'}]
+        self.config['service_tier'] = 'priority'
+        self.save()
+        (_, _, config, rpc, _), _ = self.run_probe()
+        self.assertEqual(config['service_tier'], 'priority')
+        self.assertEqual([m['params']['serviceTier'] for m in rpc.messages if m['method'] == 'turn/start'],
+                         ['priority'])
 
     def test_shell_key_leak_is_rejected(self):
         with self.assertRaises(AssertionError):

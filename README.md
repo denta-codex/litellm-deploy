@@ -342,8 +342,15 @@ After each runtime update, repeat the desktop acceptance:
 - for a model advertising Fast, a Fast-off turn omits the field;
 - the shell sees no proxy key.
 
-Models without a priority tier, such as a configured Vertex model, use the
-default-tier shell/connection check; they do not need a subscription-model test.
+Automated staging and live shell checks require the selected model's configured
+`service_tier` (or `default` when omitted). Advertising Fast does not imply the
+account has access to its optional paid tier. A configured `priority` tier still
+has to pass; failures are never silently downgraded. To validate both advertised
+tiers explicitly, run `verify_fast_app_server.py --all-tiers` with the managed
+environment. Report unavailable Fast separately, and do not claim Fast desktop
+acceptance when its account limit or usage credits prevent a successful turn.
+Models without a priority tier, such as a configured Vertex model, need no
+subscription-model test.
 
 ## Refresh models
 

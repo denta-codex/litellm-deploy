@@ -36,6 +36,16 @@ def service_tiers(model):
     ) else ('default',)
 
 
+def probe_tiers(config, model, *, all_tiers=False):
+    tier = config.get('service_tier') or 'default'
+    if tier not in ('priority', 'default'):
+        raise RuntimeError('Configured service tier must be priority or default')
+    if tier not in service_tiers(model):
+        raise RuntimeError('Configured service tier is not advertised by the selected model')
+    # Model capability is not account entitlement to optional paid Fast usage.
+    return service_tiers(model) if all_tiers else (tier,)
+
+
 def isolation_prompt(model):
     tool = ('the `exec` tool by calling `tools.exec_command`' if model.get('tool_mode') == 'code_mode_only'
             else 'your shell command tool')
@@ -63,6 +73,7 @@ async def verify(version, socket, home=None):
     config, metadata = configured_model(home)
     model = metadata['slug']
     fast = 'priority' in service_tiers(metadata)
+    tier, = probe_tiers(config, metadata)
     pid = int(subprocess.check_output(
         ['systemctl', 'show', 'codex-app-server.service', '--property=MainPID', '--value'],
         text=True,
@@ -111,12 +122,12 @@ async def verify(version, socket, home=None):
 
         started = await rpc('thread/start', {
             'cwd': str(home), 'ephemeral': True, 'approvalPolicy': 'never',
-            'sandbox': 'read-only', 'serviceTier': 'default',
+            'sandbox': 'read-only', 'serviceTier': tier,
         })
         if started.get('modelProvider') != config['model_provider'] or started.get('model') != model:
             raise RuntimeError('Live app server does not use the configured default model and provider')
         thread = started['thread']['id']
-        await rpc('turn/start', {'threadId': thread, 'serviceTier': 'default',
+        await rpc('turn/start', {'threadId': thread, 'serviceTier': tier,
                                  'input': [{'type': 'text', 'text': isolation_prompt(metadata)}]})
         executed = False
         while True:
@@ -136,7 +147,7 @@ async def verify(version, socket, home=None):
             raise RuntimeError('Live app server did not execute the shell isolation probe')
     print(json.dumps({'version': version, 'service': 'active', 'chatgpt_identity': True,
                       'fast_capability': fast, 'provider': config['model_provider'], 'model': model,
-                      'proxy_auth': True, 'tool_key_absent': True}, sort_keys=True))
+                      'requested_tier': tier, 'proxy_auth': True, 'tool_key_absent': True}, sort_keys=True))
 
 
 def main():

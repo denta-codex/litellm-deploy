@@ -98,7 +98,7 @@
       become: true
       when: codex_runtime_action in ['apply', 'rollback'] and not ansible_check_mode
 
-    - name: Validate the staged binary, identity, proxy authentication, tiers, and shell isolation
+    - name: Validate the staged binary, identity, proxy authentication, configured tier, and shell isolation
       ansible.builtin.command:
         argv:
           - "{{ litellm_uv }}"
