@@ -694,6 +694,10 @@ Every command and edit still runs through Codex and its approvals.
 - Claude calls Codex tools directly under their real names.
 - `tool_search` is off because the adapter cannot relay it. Hosted search still
   works through shared search.
+- Claude's own `ToolSearch` loads Codex tools on demand instead. Only
+  `exec_command`, `shell_command`, `write_stdin`, `apply_patch`, `update_plan`
+  and `view_image` stay in context. The CLI runs each search itself and never
+  sends it to Codex, and `claude-cli` sets `ENABLE_TOOL_SEARCH=true`.
 
 **Supported features:**
 

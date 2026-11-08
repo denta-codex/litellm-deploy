@@ -187,7 +187,8 @@ class ContractTests(unittest.TestCase):
                                          [{'model': model, 'behavesAs': 'claude-sonnet-5-5'}])
                     else:
                         self.assertEqual(settings, {'fastMode': False})
-                    self.assertEqual(options.tools, [])
+                    self.assertEqual(options.tools, ['ToolSearch'])
+                    self.assertEqual(command[command.index('--tools') + 1], 'ToolSearch')
 
     def test_cli_environment_drops_unrelated_secrets(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -198,12 +199,13 @@ class ContractTests(unittest.TestCase):
             shutil.copy2(Path(__file__).with_name('claude-cli'), wrapper)
             binary = root / '.venv/lib/python3.14/site-packages/claude_agent_sdk/_bundled/claude'
             binary.parent.mkdir(parents=True)
-            binary.write_text('#!/bin/sh\n/usr/bin/env | /usr/bin/cut -d= -f1\n')
+            binary.write_text('#!/bin/sh\n/usr/bin/env\n')
             binary.chmod(0o700)
             env = os.environ | {name: 'synthetic-secret' for name in ('ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'MODAL_API_KEY', 'LITELLM_MASTER_KEY')}
-            names = subprocess.check_output([str(wrapper)], env=env, text=True).splitlines()
+            names = dict(line.split('=', 1) for line in subprocess.check_output([str(wrapper)], env=env, text=True).splitlines())
             self.assertIn('HOME', names)
             self.assertIn('CLAUDE_CONFIG_DIR', names)
+            self.assertEqual(names.get('ENABLE_TOOL_SEARCH'), 'true')
             self.assertFalse(set(names) & {'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'MODAL_API_KEY', 'LITELLM_MASTER_KEY'})
 
     def test_image_and_usage_mapping(self):
@@ -504,7 +506,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_hook_preserves_sdk_identity_and_arguments(self):
         session = Session(('hook',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
         options = session.options()
-        self.assertEqual(options.allowed_tools, ['mcp__codex__probe'])
+        self.assertEqual(options.allowed_tools, ['ToolSearch', 'mcp__codex__probe'])
         hook = options.hooks['PreToolUse'][0].hooks[0]
         result = await hook({'tool_name': 'mcp__codex__probe', 'tool_input': {'value': 'a'}}, 'sdk-id', {})
         self.assertEqual(result['hookSpecificOutput']['updatedInput'], {'value': 'a', CORRELATION: 'sdk-id'})
@@ -519,11 +521,41 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, 'Conflicting'):
             session.deliver(calls[0]['id'], 'different')
 
+    async def test_tool_search_runs_inside_claude_without_reaching_codex(self):
+        session = Session(('search',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
+        hook = session.options().hooks['PreToolUse'][0].hooks[0]
+        result = await hook({'tool_name': 'ToolSearch', 'tool_input': {'query': 'probe'}}, 'search-id', {})
+        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'allow')
+        await session.consume(AssistantMessage([ToolUseBlock('search-id', 'ToolSearch', {'query': 'probe'})], MODEL))
+        await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))
+        self.assertTrue(session.queue.empty())
+        self.assertEqual((session.call_count, session.pending), (0, {}))
+        await session.consume(AssistantMessage([ToolUseBlock('sdk-id', 'mcp__codex__probe', {'value': 'a'})], MODEL))
+        await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))
+        kind, calls = await session.queue.get()
+        self.assertEqual((kind, [call['name'] for call in calls]), ('tools', ['probe']))
+
+    async def test_only_core_tools_skip_tool_search(self):
+        import claude_agent_sdk
+        core = copy.deepcopy(FUNCTION)
+        core['function']['name'] = 'exec_command'
+        build_meta, built = claude_agent_sdk._build_meta, {}
+
+        def capture(name, version, tools, run_tool):
+            built.update({t.name: t.meta for t in tools})
+            return real_build(name, version, tools, run_tool)
+
+        real_build = claude_agent_sdk.build_tool_server
+        with patch.object(claude_agent_sdk, 'build_tool_server', capture):
+            Session(('pinned',), configuration([], {'tools': [core, FUNCTION]}), self.temp.name, FakeClient).options()
+        self.assertEqual(built, {'exec_command': {'anthropic/alwaysLoad': True}, 'probe': None})
+        self.assertIs(claude_agent_sdk._build_meta, build_meta)
+
     async def test_fallback_tool_name_maps_back_to_client_name(self):
         dotted = copy.deepcopy(FUNCTION)
         dotted['function']['name'] = 'functions.probe'
         session = Session(('dotted',), configuration([], {'tools': [dotted]}), self.temp.name, FakeClient)
-        self.assertEqual(session.options().allowed_tools, ['mcp__codex__functions_probe_0'])
+        self.assertEqual(session.options().allowed_tools, ['ToolSearch', 'mcp__codex__functions_probe_0'])
         await session.consume(AssistantMessage([ToolUseBlock('sdk-id', 'mcp__codex__functions_probe_0', {'value': 'a'})], MODEL))
         await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))
         _, calls = await session.queue.get()

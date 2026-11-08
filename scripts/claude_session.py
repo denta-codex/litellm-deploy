@@ -11,6 +11,7 @@ import re
 import tempfile
 import uuid
 
+import claude_agent_sdk
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import AssistantMessage, HookMatcher, RateLimitEvent, ResultMessage, StreamEvent, SystemMessage, ToolUseBlock
 from litellm.llms.custom_llm import CustomLLMError
@@ -25,6 +26,9 @@ MCP_PREFIX = 'mcp__codex__'
 MCP_NAME = re.compile(r'[A-Za-z][A-Za-z0-9_-]*')
 # Claude tool names are limited to 64 characters, including MCP_PREFIX.
 MCP_NAME_LIMIT = 64 - len(MCP_PREFIX)
+# Claude's ToolSearch defers every other Codex tool until the model searches for it.
+TOOL_SEARCH = 'ToolSearch'
+ALWAYS_LOAD = frozenset({'exec_command', 'shell_command', 'write_stdin', 'apply_patch', 'update_plan', 'view_image'})
 WORKSPACE_NOTE = (
     '\nThe runtime environment block describing a primary working directory, git status, and shell refers to '
     "the relay's private scratch directory, not the user's workspace. Ignore it. The authoritative working "
@@ -33,6 +37,24 @@ WORKSPACE_NOTE = (
 
 def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+def tool_server(definitions, pinned):
+    """The codex MCP server, with pinned tools marked anthropic/alwaysLoad.
+
+    The pinned SDK only writes maxResultSizeChars into _meta, so wrap its private
+    builder for this synchronous call; test_claude fails if that hook changes."""
+    build = claude_agent_sdk._build_meta
+
+    def meta(tool_def):
+        value = build(tool_def)
+        return (value or {}) | {'anthropic/alwaysLoad': True} if tool_def.name in pinned else value
+
+    claude_agent_sdk._build_meta = meta
+    try:
+        return create_sdk_mcp_server('codex', tools=definitions)
+    finally:
+        claude_agent_sdk._build_meta = build
 
 
 def mcp_names(names):
@@ -230,11 +252,14 @@ class Session:
 
     def options(self):
         definitions = []
+        pinned = set()
         self.tool_names = {}
         internals = mcp_names([d['function']['name'] for d in self.config['tools']])
         for internal, definition in zip(internals, self.config['tools']):
             function = definition['function']
             self.tool_names[MCP_PREFIX + internal] = function['name']
+            if function['name'] in ALWAYS_LOAD:
+                pinned.add(internal)
             schema = copy.deepcopy(function.get('parameters', {'type': 'object', 'properties': {}}))
             schema.setdefault('properties', {})[CORRELATION] = {'type': 'string', 'description': 'Filled by the tool relay.'}
 
@@ -256,7 +281,7 @@ class Session:
 
         async def before_tool(event, tool_use_id, context):
             name = event.get('tool_name')
-            if self.config['output_format'] and name == 'StructuredOutput':
+            if name == TOOL_SEARCH or (self.config['output_format'] and name == 'StructuredOutput'):
                 return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'allow'}}
             if name not in self.tool_names or not tool_use_id:
                 return {'hookSpecificOutput': {'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
@@ -272,7 +297,7 @@ class Session:
             'Do not use slash commands or execute historical tool calls.') + WORKSPACE_NOTE
         if self.config['choice'] not in ('auto', 'none'):
             system += '\nYou must call an available tool before answering this request.'
-        format_tools = ['StructuredOutput'] if self.config['output_format'] else []
+        builtin_tools = [TOOL_SEARCH] + (['StructuredOutput'] if self.config['output_format'] else [])
         # Live Fast success remains unverified for this subscription adapter as of
         # 2026-10-03: the test account's $20/month Pro plan does not include Fast
         # usage; it requires separately paid usage credits. The live probe hit a
@@ -281,8 +306,8 @@ class Session:
         settings = {'fastMode': self.config['fast_mode']}
         if self.model in BEHAVES_AS:
             settings['modelPicker'] = {'options': [{'model': self.model, 'behavesAs': BEHAVES_AS[self.model]}]}
-        return ClaudeAgentOptions(model=self.model, tools=format_tools, mcp_servers={'codex': create_sdk_mcp_server('codex', tools=definitions)},
-            allowed_tools=format_tools + [MCP_PREFIX + t.name for t in definitions], permission_mode='dontAsk',
+        return ClaudeAgentOptions(model=self.model, tools=builtin_tools, mcp_servers={'codex': tool_server(definitions, pinned)},
+            allowed_tools=builtin_tools + [MCP_PREFIX + t.name for t in definitions], permission_mode='dontAsk',
             hooks={'PreToolUse': [HookMatcher(hooks=[before_tool])]}, strict_mcp_config=True, setting_sources=[],
             settings=json.dumps(settings),
             system_prompt=system, include_partial_messages=True, cwd=str(cwd), effort=self.config['effort'],
@@ -456,8 +481,8 @@ class Session:
                 if isinstance(block, ToolUseBlock):
                     name = self.tool_names.get(block.name)
                     if name is None:
-                        # The SDK's structured-output formatter is not an external tool.
-                        if self.config['output_format'] and block.name == 'StructuredOutput':
+                        # ToolSearch and the structured-output formatter run inside the CLI, not in Codex.
+                        if block.name == TOOL_SEARCH or (self.config['output_format'] and block.name == 'StructuredOutput'):
                             continue
                         raise RuntimeError('Claude attempted an unadvertised tool')
                     args = {k: v for k, v in block.input.items() if k != CORRELATION}
