@@ -6,6 +6,6 @@ base=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 exec /usr/bin/env -i \
   HOME="$HOME" PATH=/usr/bin:/bin LANG=C.UTF-8 \
   CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" \
-  DISABLE_AUTOUPDATER=1 CLAUDE_CODE_ENTRYPOINT=sdk-py \
+  DISABLE_AUTOUPDATER=1 CLAUDE_CODE_ENTRYPOINT=sdk-py ENABLE_TOOL_SEARCH=true \
   CLAUDE_AGENT_SDK_VERSION=0.2.161 CLAUDE_CODE_SDK_READS_SESSION_STATE=1 \
   "$base/.venv/lib/python3.14/site-packages/claude_agent_sdk/_bundled/claude" "$@"
