@@ -14,6 +14,7 @@ from litellm.llms.custom_llm import CustomLLMError
 
 from claude_context import CaptureRequest, identity, validate_request
 from claude_session import MODEL, MODELS, Session, configuration, content_blocks, digest, history_prompt, unresolved_calls
+from usage_accounting import accounting, publish, sample
 
 # Each idle worker is a Claude CLI process (~110 MiB). Evict the least recently
 # used idle worker beyond this; busy workers are never evicted.
@@ -37,7 +38,8 @@ def usage_counts(usage):
     prompt = usage['input_tokens'] + usage.get('cache_read_input_tokens', 0) + usage.get('cache_creation_input_tokens', 0)
     return {'prompt_tokens': prompt, 'completion_tokens': usage['output_tokens'],
             'total_tokens': prompt + usage['output_tokens'],
-            'prompt_tokens_details': {'cached_tokens': usage.get('cache_read_input_tokens', 0)}}
+            'prompt_tokens_details': {'cached_tokens': usage.get('cache_read_input_tokens', 0),
+                                     'cache_write_tokens': usage.get('cache_creation_input_tokens', 0)}}
 
 
 class ClaudeProvider(CustomLLM):
@@ -140,6 +142,8 @@ class ClaudeProvider(CustomLLM):
         except (ValueError, KeyError, TypeError) as exc:
             raise CustomLLMError(400, str(exc)) from None
         request_id = digest([messages, config])
+        # An instrumented replay has zero new receipts, rather than unknown usage.
+        publish([])
         lock = self.locks.setdefault(key, asyncio.Lock())
         async with lock:
             session = self.sessions.get(key)
@@ -167,6 +171,7 @@ class ClaudeProvider(CustomLLM):
                     raise CustomLLMError(409, 'Claude speed can change only on a new user turn after the current turn finishes; submit tool results at the original speed')
             normal_boundary = False
             emitted = []
+            before_receipts = set(getattr(session, 'usage_receipts', {})) if session else set()
             try:
                 session, waiting = await self.reconcile(key, messages, config)
                 while True:
@@ -195,11 +200,20 @@ class ClaudeProvider(CustomLLM):
                     if normal_boundary:
                         # Persist the terminal boundary before exposing it to the client.
                         session.response_cache[request_id] = emitted
+                        receipts = [r for rid, r in getattr(session, 'usage_receipts', {}).items()
+                                    if rid not in before_receipts]
+                        if hasattr(session, 'response_accounting'):
+                            latest = next((c['usage'] for c in reversed(emitted) if c.get('usage')), None)
+                            session.response_accounting[request_id] = accounting(sample(latest), receipts)
                         while len(session.response_cache) > 16:
-                            del session.response_cache[next(iter(session.response_cache))]
+                            expired = next(iter(session.response_cache))
+                            del session.response_cache[expired]
+                            if hasattr(session, 'response_accounting'):
+                                session.response_accounting.pop(expired, None)
                         if kind == 'done':
                             session.pending.clear()
                         session.save()
+                        publish(receipts)
                     for item in items:
                         yield item
                     if normal_boundary:

@@ -595,6 +595,29 @@ credentials never reach the other providers.
 - Each query has 60 seconds.
 - Results keep up to 4,000 characters and eight sources.
 
+**Context versus consumption.** Standard Responses usage describes the latest
+model request, not the sum of internal ToolSearch or web-search requests. This
+keeps stock Codex's context meter and automatic compaction accurate. Its cumulative
+usage display consequently excludes hidden requests and is not a complete
+subscription-consumption total.
+
+Worker and completed-search journals add `usage_accounting` version 2:
+`latest_request_usage` is the context snapshot; `consumed_usage` sums distinct
+model-request receipts, including cache-read and cache-write details. Claude
+journals also retain the SDK's aggregate query usage. Search-helper usage remains
+separately attributed in the existing helper records. Completed response replays
+do not create consumption receipts or repeat tools.
+
+Inspect the ten newest accounting records without inference or conversation text:
+
+```sh
+uv run --no-sync scripts/verify_claude.py --usage-report
+```
+
+The report also counts legacy records. Old cached replies remain immutable until
+normal eviction or expiry. An existing Codex thread can compact once from a
+previously stored inflated count; deployment does not rewrite conversation history.
+
 **Journals.** Private journals in `~/.local/state/litellm/search` hold search
 calls, findings, and replays, scoped to the authenticated caller. Completed
 records are pruned after 30 days or 100 MiB per caller. Treat them as conversation

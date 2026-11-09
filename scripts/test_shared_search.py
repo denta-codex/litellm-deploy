@@ -109,6 +109,7 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         self.mixed = False
         self.repeat = False
         self.parallel_searches = 1
+        self.upstream_usage = None
         self.backend = Backend()
         self.interceptor = SharedSearchInterceptor()
         self.callbacks = litellm.callbacks
@@ -153,7 +154,8 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
             reason = 'tool_calls'
         return httpx.Response(200, json={'id': 'chatcmpl-fixture', 'object': 'chat.completion', 'created': 1,
             'model': 'fixture', 'choices': [{'index': 0, 'message': message, 'finish_reason': reason}],
-            'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}})
+            'usage': (self.upstream_usage[len(self.requests)-1] if self.upstream_usage else
+                      {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15})})
 
     def use_claude(self, session_factory):
         """Route claude/opus-5.5 through the real provider with a fake SDK session."""
@@ -192,6 +194,27 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(i.get('name') == SEARCH_NAME for i in response['output']))
         self.assertTrue(response['output'][-1]['content'][0]['annotations'])
 
+    async def test_search_context_and_consumption_are_separate(self):
+        for stream in (False, True):
+            self.requests.clear()
+            self.upstream_usage = [
+                {'prompt_tokens': 134784, 'completion_tokens': 280, 'total_tokens': 135064,
+                 'prompt_tokens_details': {'cached_tokens': 133710, 'cache_write_tokens': 1070}},
+                {'prompt_tokens': 135719, 'completion_tokens': 2747, 'total_tokens': 138466,
+                 'prompt_tokens_details': {'cached_tokens': 134780, 'cache_write_tokens': 937}}]
+            result = await self.call(stream=stream, input='fixture ' + str(stream))
+            response = next(e['response'] for e in result if e['type'] == 'response.completed') if stream else result
+            self.assertEqual(response['usage']['input_tokens'], 135719)
+            self.assertEqual(response['usage']['total_tokens'], 138466)
+            self.assertEqual(response['usage']['input_tokens_details']['cached_tokens'], 134780)
+            records = [json.loads(p.read_text()) for p in self.bridge.journal.root.rglob('ws_request*.json')]
+            record = next(r for r in records if r['response']['id'] == response['id']) if not stream else records[-1]
+            usage = record['usage_accounting']['consumed_usage']
+            self.assertEqual(usage['input_tokens'], 270503)
+            self.assertEqual(usage['input_tokens_details']['cached_tokens'], 268490)
+            self.assertEqual(usage['input_tokens_details']['cache_write_tokens'], 2007)
+            self.assertLess(response['usage']['total_tokens'], 180000)
+
     async def test_local_qwen_uses_shared_search(self):
         self.router = litellm.Router(model_list=[{'model_name': 'local/qwen3.8-27b', 'litellm_params': {
             'model': 'openai/fixture', 'api_key': 'modal-only', 'api_base': 'https://modal.invalid/v1',
@@ -200,6 +223,44 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.backend.queries, ['fixture fact'])
         self.assertTrue(any(i['type'] == 'web_search_call' for i in result['output']))
         self.assertEqual(len(self.requests), 2)
+
+    async def test_claude_hidden_search_receipts_survive_shared_search(self):
+        from usage_accounting import sample
+
+        class ReceiptSession(FakeSession):
+            def __init__(self, *args):
+                super().__init__(*args)
+                self.usage_receipts = {}
+                self.response_accounting = {}
+
+            def receipt(self, identity, inputs, outputs):
+                self.usage_receipts[identity] = {'id': identity, 'model': MODEL,
+                    'usage': sample({'input_tokens': inputs, 'output_tokens': outputs})}
+
+            async def start(self, prompt):
+                self.receipt('hidden-search', 100, 10)
+                self.receipt('web-search', 10, 5)
+                await super().start(prompt)
+
+            def deliver(self, call_id, result):
+                if call_id not in self.delivered:
+                    self.delivered[call_id] = result
+                    self.receipt('answer', 20, 7)
+                    self.queue.put_nowait(('text', 'BLUE: https://example.com/fact'))
+                    self.queue.put_nowait(('done', {'input_tokens': 20, 'output_tokens': 7}))
+                    self.idle.set()
+
+        self.use_claude(ReceiptSession)
+        response = await self.call(model='claude/opus-5.5')
+        self.assertEqual(response['usage']['input_tokens'], 20)
+        records = [json.loads(p.read_text()) for p in self.bridge.journal.root.rglob('ws_request*.json')]
+        record = records[0]['usage_accounting']
+        self.assertEqual(record['consumed_usage']['input_tokens'], 130)
+        self.assertEqual(len(record['receipts']), 3)
+        again = await self.call(model='claude/opus-5.5')
+        self.assertEqual(again, response)
+        self.assertEqual(len(self.backend.queries), 1)
+        self.assertEqual(len(REQUEST.get()['usage_receipts']), 3)
 
     async def test_bedrock_converse_search_and_provider_preserving_followup(self):
         from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
