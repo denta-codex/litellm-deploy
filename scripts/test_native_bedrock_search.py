@@ -105,8 +105,8 @@ class NativeBedrockSearchTests(unittest.IsolatedAsyncioTestCase):
         followup = self.requests[-1]['input']
         self.assertIn(image, followup)
         self.assertTrue(any(i.get('encrypted_content') == 'signed-reasoning' for i in followup))
-        self.assertEqual(result['usage']['input_tokens'], 20)
-        self.assertEqual(result['usage']['output_tokens'], 10)
+        self.assertEqual(result['usage']['input_tokens'], 10)
+        self.assertEqual(result['usage']['output_tokens'], 5)
         self.assertTrue(result['output'][-1]['content'][0]['annotations'])
 
     async def test_identical_retry_does_not_repeat_search_or_model_call(self):

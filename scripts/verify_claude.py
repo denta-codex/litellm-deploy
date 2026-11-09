@@ -403,9 +403,29 @@ class Acceptance:
                 log.close()
 
 
+def usage_report(state):
+    """Read accounting metadata only; do not print conversation data or run inference."""
+    records, legacy = [], 0
+    paths = [('claude', p) for p in (state / 'claude/journals').glob('*.json')]
+    paths += [('search', p) for p in (state / 'search').glob('*/ws_request*.json')]
+    for kind, path in paths:
+        value = json.loads(path.read_text())
+        usage = value.get('usage_accounting')
+        if not usage:
+            legacy += 1
+            continue
+        records.append({'kind': kind, 'modified': path.stat().st_mtime,
+                        'usage_accounting_version': usage['usage_accounting_version'],
+                        'latest_request_usage': usage['latest_request_usage'],
+                        'consumed_usage': usage['consumed_usage']})
+    return {'legacy_records': legacy, 'records': sorted(records, key=lambda r: r['modified'], reverse=True)[:10]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--model', required=True, help='configured Claude model name')
+    parser.add_argument('--model', help='configured Claude model name')
+    parser.add_argument('--usage-report', action='store_true', help='Read private accounting metadata without inference')
+    parser.add_argument('--usage-state', type=Path, default=Path.home() / '.local/state/litellm')
     parser.add_argument('--other-model', default='chatgpt/gpt-6-astra',
                         help='model used for the switch-and-return continuity check')
     parser.add_argument('--models', type=Path, default=Path.home() / '.config/litellm/models.json',
@@ -419,6 +439,11 @@ def main():
     parser.add_argument('--catalog', type=Path, default=Path.home() / '.config/litellm/codex-models.json')
     parser.add_argument('--report', type=Path)
     args = parser.parse_args()
+    if args.usage_report:
+        print(json.dumps(usage_report(args.usage_state), indent=2))
+        return
+    if not args.model:
+        parser.error('--model is required unless --usage-report is used')
     args.fast = args.fast or args.fast_only
     if args.fast and (not args.isolated or args.api_only):
         parser.error('--fast/--fast-only requires --isolated and cannot be combined with --api-only')

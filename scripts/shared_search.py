@@ -23,11 +23,12 @@ from litellm.constants import LITELLM_WEB_SEARCH_TOOL_NAME as SEARCH_NAME
 from litellm.integrations.websearch_interception.handler import WebSearchInterceptionLogger
 from litellm.responses.litellm_completion_transformation.transformation import LiteLLMCompletionResponsesConfig as Transform
 from litellm.types.integrations.custom_logger import AgenticLoopPlan
-from litellm.types.llms.openai import ResponsesAPIResponse, ResponseAPIUsage
+from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.utils import BaseLiteLLMOpenAIResponseObject
 
 from claude_context import REQUEST
 from claude_session import atomic_json
+from usage_accounting import accounting, sample
 
 CURRENT = ContextVar('shared_search', default=None)
 HOSTED = ('web_search', 'web_search_preview')
@@ -204,13 +205,12 @@ class Turn:
     rounds: int = 0
     mixed: bool = False
     failure: Exception | None = None
-    usage: dict = field(default_factory=dict)
+    usage_samples: list = field(default_factory=list)
+    receipt_ids: set = field(default_factory=lambda: set(REQUEST.get().get('usage_receipts', {})))
 
     def add_usage(self, response):
         usage = plain(response).get('usage') or {}
-        for key, native in (('prompt_tokens', 'input_tokens'), ('completion_tokens', 'output_tokens'),
-                            ('total_tokens', 'total_tokens')):
-            self.usage[key] = self.usage.get(key, 0) + (usage.get(key, usage.get(native)) or 0)
+        self.usage_samples.append(sample(usage))
 
 
 class SharedSearchInterceptor(WebSearchInterceptionLogger):
@@ -489,13 +489,17 @@ class SearchResponses:
                 sources = list({s['url']: s for s in sources}.values())
                 cite(output, sources)
                 response.output = output
-                if turn.usage and value.get('usage'):
-                    usage = ({'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0} if turn.mixed else value['usage'])
-                    usage['input_tokens'] += turn.usage.get('prompt_tokens', 0)
-                    usage['output_tokens'] += turn.usage.get('completion_tokens', 0)
-                    usage['total_tokens'] += turn.usage.get('total_tokens', 0)
-                    response.usage = ResponseAPIUsage(**usage)
-                self.journal.write(turn.caller, cache_id, {'response': plain(response), 'pending': []})
+                latest = sample(value.get('usage'))
+                receipts = [r for rid, r in REQUEST.get().get('usage_receipts', {}).items()
+                            if rid not in turn.receipt_ids]
+                if 'usage_receipts' not in REQUEST.get():
+                    samples = turn.usage_samples + ([] if turn.mixed else [latest])
+                    receipts = [{'id': cache_id + ':' + str(i), 'model': model, 'usage': u}
+                                for i, u in enumerate(samples) if u is not None]
+                # The standard response usage describes context, not the sum of searches.
+                self.journal.write(turn.caller, cache_id, {
+                    'response': plain(response), 'pending': [],
+                    'usage_accounting': accounting(latest, receipts)})
                 return response
             finally:
                 CURRENT.reset(token)

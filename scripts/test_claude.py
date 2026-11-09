@@ -380,12 +380,14 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         kind, calls = await session.queue.get()
         self.assertEqual(kind, 'tools')
         session.deliver(calls[0]['id'], 'RESULT')
-        await session.consume(stream_event('message_start', message={'usage': {'speed': 'fast'}}))
+        await session.consume(stream_event('message_start', message={'usage': {
+            'speed': 'fast', 'input_tokens': 6, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0}}))
         await session.consume(stream_event('content_block_delta', delta={'type': 'text_delta', 'text': 'RESULT'}))
+        await session.consume(stream_event('message_delta', usage={'output_tokens': 4}))
         await session.consume(stream_event('message_stop'))
         await session.consume(ResultMessage('success', 1, 1, False, 2, 'sid', usage={'input_tokens': 10, 'output_tokens': 6}))
         self.assertEqual(await session.queue.get(), ('text', 'RESULT'))
-        self.assertEqual(await session.queue.get(), ('done', {'input_tokens': 6, 'output_tokens': 4,
+        self.assertEqual(await session.queue.get(), ('done', {'speed': 'fast', 'input_tokens': 6, 'output_tokens': 4,
                                                            'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 0}))
         self.assertEqual(session.effective['verified_messages'], 2)
 
@@ -641,9 +643,55 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))
         self.assertEqual(session.boundary_usage['input_tokens'], 10)
         await session.queue.get()
+        await session.consume(stream_event('message_start', message={'id': 'final', 'usage': {'input_tokens': 20}}))
+        await session.consume(stream_event('message_delta', usage={'output_tokens': 7}))
+        await session.consume(stream_event('message_stop'))
         await session.consume(ResultMessage('success', 1, 1, False, 2, 'sid', usage={'input_tokens': 30, 'output_tokens': 12}))
         kind, usage = await session.queue.get()
         self.assertEqual((kind, usage['input_tokens'], usage['output_tokens']), ('done', 20, 7))
+
+    async def test_hidden_search_usage_is_consumption_not_context(self):
+        session = Session(('usage-search',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
+        session.options()
+        values = [(2, 2087, 51150, 299), (4, 2227, 53237, 374),
+                  (4, 2619, 55464, 38), (2, 12925, 58083, 3390)]
+        aggregate = {'input_tokens': 0, 'cache_creation_input_tokens': 0,
+                     'cache_read_input_tokens': 0, 'output_tokens': 0}
+        for i, (inputs, writes, reads, outputs) in enumerate(values):
+            usage = dict(zip(aggregate, (inputs, writes, reads, outputs)))
+            for field in aggregate:
+                aggregate[field] += usage[field]
+            await session.consume(stream_event('message_start', message={'id': str(i), 'usage': usage}))
+            if i < 2:
+                await session.consume(AssistantMessage([ToolUseBlock('search-' + str(i), 'ToolSearch', {})], MODEL))
+            elif i == 2:
+                await session.consume(AssistantMessage([ToolUseBlock('probe', 'mcp__codex__probe', {})], MODEL))
+            await session.consume(stream_event('message_stop'))
+            if i == 2:
+                self.assertEqual((await session.queue.get())[0], 'tools')
+        await session.consume(ResultMessage('success', 1, 1, False, 4, 'sid', usage=aggregate))
+        kind, usage = await session.queue.get()
+        self.assertEqual(kind, 'done')
+        self.assertEqual(usage_counts(usage)['prompt_tokens'], 71010)
+        self.assertEqual(usage_counts(usage)['total_tokens'], 74400)
+        saved = json.loads(session.path.read_text())
+        accounting = saved['usage_accounting']
+        self.assertEqual(accounting['consumed_usage']['input_tokens'], 237804)
+        self.assertEqual(accounting['consumed_usage']['input_tokens_details']['cached_tokens'], 217934)
+        self.assertEqual(accounting['consumed_usage']['input_tokens_details']['cache_write_tokens'], 19858)
+        self.assertEqual(saved['last_sdk_query_usage'], aggregate)
+        await session.consume(stream_event('message_stop'))
+        self.assertEqual(len(session.usage_receipts), 4)
+
+    async def test_interrupted_hidden_search_keeps_usage_receipt(self):
+        session = Session(('interrupted-search',), configuration([], {}), self.temp.name, FakeClient)
+        await session.consume(stream_event('message_start', message={'id': 'hidden', 'usage': {
+            'input_tokens': 2, 'cache_read_input_tokens': 100, 'cache_creation_input_tokens': 10}}))
+        await session.consume(stream_event('message_delta', usage={'output_tokens': 7}))
+        await session.consume(stream_event('message_stop'))
+        self.assertTrue(session.queue.empty())
+        saved = json.loads(session.path.read_text())['usage_accounting']
+        self.assertEqual(saved['consumed_usage']['total_tokens'], 119)
 
     async def test_split_sdk_messages_form_one_parallel_tool_batch(self):
         session = Session(('batch',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)
@@ -655,7 +703,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         await session.consume(StreamEvent('e', 'sid', {'type': 'message_stop'}))
         kind, calls = await session.queue.get()
         self.assertEqual((kind, len(calls)), ('tools', 2))
-        self.assertEqual(session.reported_usage['output_tokens'], 15)
+        self.assertEqual(sum(r['usage']['output_tokens'] for r in session.usage_receipts.values()), 15)
 
     async def test_stop_then_new_prompt_gets_fresh_worker(self):
         old = await self.stopped_stream()

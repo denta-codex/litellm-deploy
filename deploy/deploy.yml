@@ -5,7 +5,7 @@
     source_root: "{{ playbook_dir }}/.."
     # Files the running proxy imports; changing any of them restarts the service.
     runtime_scripts: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py,
-                      claude_session.py, claude_provider.py, shared_search.py, live_voice.py,
+                      claude_session.py, claude_provider.py, usage_accounting.py, shared_search.py, live_voice.py,
                       compaction_fallback.py, deployment.py]
   pre_tasks:
     - name: Load and validate the deployment configuration

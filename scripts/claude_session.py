@@ -15,6 +15,7 @@ import claude_agent_sdk
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import AssistantMessage, HookMatcher, RateLimitEvent, ResultMessage, StreamEvent, SystemMessage, ToolUseBlock
 from litellm.llms.custom_llm import CustomLLMError
+from usage_accounting import accounting, sample
 
 MODEL = 'claude-opus-5-5'
 MODELS = ('claude-opus-5-5', 'claude-sonnet-5-5', 'claude-haiku-5-5')
@@ -226,10 +227,16 @@ class Session:
         self.call_count = 0
         self.model_usage = {}
         self.effective = {}
-        self.reported_usage = {}
         self.boundary_usage = None
         self.batch = []
         self.message_usage = None
+        self.message_id = None
+        self.message_sequence = 0
+        self.latest_request_usage = None
+        self.usage_receipts = {}
+        self.response_accounting = {}
+        self.last_sdk_query_usage = None
+        self.query_sequence = 0
         self.speed_buffer = []
         self.speed_verified = False
         self.speed_message_open = False
@@ -239,7 +246,11 @@ class Session:
         atomic_json(self.path, {'version': 1, 'key': self.key, 'generation': self.generation,
             'sdk_id': self.sdk_id, 'config_digest': digest(self.config), 'history_digest': digest(self.history),
             'pending': {k: v['spec'] for k, v in self.pending.items()}, 'delivered': self.delivered,
-            'responses': self.response_cache, 'effective': self.effective, 'closed': self.closed})
+            'responses': self.response_cache, 'effective': self.effective, 'closed': self.closed,
+            'usage_accounting': accounting(sample(self.latest_request_usage, claude=True),
+                                            list(self.usage_receipts.values())),
+            'last_sdk_query_usage': self.last_sdk_query_usage,
+            'response_accounting': self.response_accounting})
 
     def register(self, sdk_id, name, args):
         call_id = 'call_' + digest([self.generation, sdk_id])[:32]
@@ -326,7 +337,8 @@ class Session:
                         break
                     self.idle.clear()
                     self.call_count = 0
-                    self.reported_usage = {}
+                    self.query_sequence += 1
+                    self.latest_request_usage = None
                     self.verified_messages = 0
                     self.speed_verified = False
                     self.speed_message_open = False
@@ -445,10 +457,22 @@ class Session:
                 self.effective['speed'] = speed
             if event.get('type') == 'message_start':
                 self.batch = []
+                self.latest_request_usage = None
+                self.message_sequence += 1
+                self.message_id = event.get('message', {}).get('id') or str(self.message_sequence)
                 self.message_usage = event.get('message', {}).get('usage')
             elif event.get('type') == 'message_delta' and event.get('usage'):
                 self.message_usage = (self.message_usage or {}) | event['usage']
-            elif event.get('type') == 'message_stop' and self.batch:
+            elif event.get('type') == 'message_stop':
+                observed = sample(self.message_usage, claude=True)
+                if observed is not None:
+                    self.latest_request_usage = copy.deepcopy(self.message_usage)
+                    receipt_id = self.generation + ':' + str(self.message_id)
+                    self.usage_receipts.setdefault(receipt_id, {
+                        'id': receipt_id, 'model': self.model, 'usage': observed})
+                    self.save()
+                if not self.batch:
+                    return
                 # The SDK emits one AssistantMessage per completed content block,
                 # even when multiple tools belong to the same model response.
                 # message_stop is the actual boundary, not the first tool block.
@@ -456,9 +480,6 @@ class Session:
                 if not self.config['parallel'] and len(self.batch) > 1:
                     raise RuntimeError('Claude returned parallel calls when disabled')
                 self.boundary_usage = self.message_usage
-                if self.message_usage:
-                    for field in ('input_tokens', 'output_tokens', 'cache_read_input_tokens', 'cache_creation_input_tokens'):
-                        self.reported_usage[field] = self.reported_usage.get(field, 0) + self.message_usage.get(field, 0)
                 await self.queue.put(('tools', self.batch))
                 self.batch = []
             if delta.get('type') == 'text_delta' and not self.config['output_format']:
@@ -493,6 +514,7 @@ class Session:
         elif isinstance(message, ResultMessage):
             self.sdk_id = message.session_id
             self.model_usage = message.model_usage or {}
+            self.last_sdk_query_usage = copy.deepcopy(message.usage)
             if message.is_error:
                 status = message.api_error_status or 502
                 label = {401: 'authentication failed; run claude auth login', 403: 'subscription access denied',
@@ -508,12 +530,16 @@ class Session:
                     from jsonschema import validate
                     validate(message.structured_output, self.config['output_format']['schema'])
                     await self.queue.put(('text', json.dumps(message.structured_output, ensure_ascii=False)))
-                usage = dict(message.usage) if message.usage else None
-                if usage:
-                    for field, reported in self.reported_usage.items():
-                        if usage.get(field, 0) < reported:
-                            raise RuntimeError('Inconsistent SDK usage accounting')
-                        usage[field] = usage.get(field, 0) - reported
+                # Aggregate SDK usage is consumption, not the latest context size.
+                usage = copy.deepcopy(self.latest_request_usage)
+                if usage is None and message.num_turns == 1:
+                    usage = dict(message.usage) if message.usage else None
+                    observed = sample(usage, claude=True)
+                    if observed is not None:
+                        self.latest_request_usage = copy.deepcopy(usage)
+                        receipt_id = self.generation + ':result:' + str(self.query_sequence)
+                        self.usage_receipts.setdefault(receipt_id, {
+                            'id': receipt_id, 'model': self.model, 'usage': observed})
                 await self.queue.put(('done', usage))
             self.save()
 
