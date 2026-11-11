@@ -85,6 +85,9 @@ def probe(args, metadata, effort, home):
             'name': 'LiteLLM', 'base_url': 'http://127.0.0.1:4000/v1',
             'wire_api': 'responses', 'supports_websockets': False,
             'requires_openai_auth': True, 'env_key': 'LITELLM_PROXY_KEY',
+            # Acceptance must expose the first provider/stream failure, not
+            # turn a flaky integration green through Codex's default retries.
+            'request_max_retries': 0, 'stream_max_retries': 0,
         }},
     }
     doc['model_providers']['litellm']['base_url'] = args.base_url.rstrip('/') + '/v1'

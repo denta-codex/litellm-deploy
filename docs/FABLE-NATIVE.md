@@ -89,7 +89,9 @@ the existing systemd credentials through `launch.exports`, never copies or
 prints them, and does not restart or modify the live service. It runs bounded,
 no-retry API/tool-loop, capability/image, high-effort stock-Codex, parallel search,
 and stock-Codex search → image → shell continuation acceptance. Successful
-staging is removed; a complete pass saves only fingerprints/check results as
+staging is removed; request and stream retries are disabled in the disposable
+Codex probes so a transient failure cannot silently turn acceptance green.
+A complete pass saves only runtime and verifier fingerprints/check results as
 `fable-acceptance.json` in the chosen state directory. Failed evidence is kept
 until the defect is resolved and acceptance passes, or the route is retired.
 

@@ -57,7 +57,8 @@ async def verify(args):
     report = {'model': MODEL, 'full_acceptance_passed': False, 'checks': [],
               'route_sha256': hashlib.sha256(json.dumps(route, sort_keys=True).encode()).hexdigest(),
               'source_sha256': {name: hashlib.sha256((SCRIPTS / name).read_bytes()).hexdigest()
-                  for name in ('chat_native.py', 'shared_search.py', 'refresh_models.py', 'verify_fable.py')},
+                  for name in ('chat_native.py', 'shared_search.py', 'refresh_models.py', 'verify_fable.py',
+                               'verify_claude.py', *(check[0] for check in CHECKS.values()))},
               'lock_sha256': hashlib.sha256((SCRIPTS.parent / 'uv.lock').read_bytes()).hexdigest()}
     try:
         catalog = directory / 'catalog.json'
