@@ -27,6 +27,12 @@ assistant batches keep their own carriers. Removed batches and their signatures
 must not be transplanted onto rewritten checkpoint text. Subsequent Gemini output
 produces fresh native state.
 
+Stock Codex records absent reasoning content as JSON `null`. Compaction's
+readable-history conversion accepts those optional null fields, preserving any
+readable summaries and completed tool relationships without copying the old
+opaque carriers into a rewritten checkpoint. Normal compaction provider timeouts
+and the existing configured recovery traversal remain unchanged.
+
 ## Key ownership and recovery
 
 Deployment initializes `gemini/state.key` beneath the configured application
@@ -89,8 +95,11 @@ runtime is introduced.
 `gemini_timing` logs contain only provider/model, dispatch timestamp, outcome, and
 milliseconds to first provider content, first public content event, and completion.
 Absent content stays null; cancellation also logs its outcome. No prompts, tool
-arguments/results, state, signatures, or keys enter these timing records. Waiting
-for silent provider computation emits no invented progress. For JSON requests,
+arguments/results, state, signatures, or keys enter these timing records.
+These records use a dedicated metadata-only stderr handler, installed once at
+startup, so a quiet upstream root logger cannot suppress them. Other loggers are
+unchanged.
+Waiting for silent provider computation emits no invented progress. For JSON requests,
 first-content time is the receipt of the complete provider body; for streaming it
 is the first nonempty text/marked summary part.
 

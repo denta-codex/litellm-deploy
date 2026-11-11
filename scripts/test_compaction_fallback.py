@@ -76,6 +76,34 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]['type'], 'response.completed')
         self.assertEqual(events[-1]['response']['metadata']['compaction_model'], 'first/model')
 
+    async def test_stock_codex_nullable_reasoning_recovers_without_old_state(self):
+        for summary in (None, [], [{'type': 'summary_text', 'text': 'READABLE SUMMARY'}]):
+            with self.subTest(summary=summary):
+                self.calls.clear()
+                request = self.request | {'input': [
+                    *self.request['input'],
+                    {'type': 'reasoning', 'id': 'rs_stock', 'summary': summary,
+                     'content': None, 'encrypted_content': 'gemini-native-v1:DO_NOT_REPLAY'},
+                    {'type': 'custom_tool_call', 'id': 'ct_stock', 'call_id': 'completed_tool',
+                     'name': 'exec', 'input': 'historical operation'},
+                    {'type': 'custom_tool_call_output', 'call_id': 'completed_tool',
+                     'output': 'COMPLETED RESULT'},
+                ]}
+                events = await self.events(self.integration({
+                    'first/model': TimeoutError(), 'other/model': complete}), request)
+                self.assertEqual([c['model'] for c in self.calls], ['first/model', 'other/model'])
+                rendered = json.dumps(self.calls[-1]['input'])
+                self.assertIn('MARKER', rendered)
+                self.assertIn('completed_tool', rendered)
+                self.assertIn('COMPLETED RESULT', rendered)
+                self.assertNotIn('DO_NOT_REPLAY', rendered)
+                if summary:
+                    self.assertIn('READABLE SUMMARY', rendered)
+                self.assertEqual(self.calls[-1]['tools'], [])
+                self.assertEqual(self.calls[-1]['tool_choice'], 'none')
+                self.assertEqual(events[-1]['type'], 'response.completed')
+                self.assertNotIn('DO_NOT_REPLAY', json.dumps(events))
+
     async def test_image_heavy_search_history_reaches_unknown_tokenizer_provider(self):
         image = {'type': 'input_image', 'image_url': 'data:image/png;base64,' + 'A' * 300000}
         request = self.request | {'input': [

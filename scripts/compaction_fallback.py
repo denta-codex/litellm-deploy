@@ -127,7 +127,9 @@ def portable_input(data):
             raise UnusableHistory('opaque_compaction')
         if kind == 'reasoning':
             # Hidden reasoning is not a portable checkpoint; its readable summaries are useful.
-            readable = item.get('summary', []) + item.get('content', [])
+            # Stock Codex persists absent optional content as JSON null, even
+            # when the provider returned an otherwise valid reasoning carrier.
+            readable = (item.get('summary') or []) + (item.get('content') or [])
             if readable:
                 content.append({'type': 'input_text', 'text': 'Reasoning summary: ' + json.dumps(readable)})
             continue
