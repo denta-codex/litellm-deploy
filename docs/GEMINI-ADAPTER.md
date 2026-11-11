@@ -27,6 +27,12 @@ assistant batches keep their own carriers. Removed batches and their signatures
 must not be transplanted onto rewritten checkpoint text. Subsequent Gemini output
 produces fresh native state.
 
+Stock Codex records absent reasoning content as JSON `null`. Compaction's
+readable-history conversion accepts those optional null fields, preserving any
+readable summaries and completed tool relationships without copying the old
+opaque carriers into a rewritten checkpoint. Normal compaction provider timeouts
+and the existing configured recovery traversal remain unchanged.
+
 ## Key ownership and recovery
 
 Deployment initializes `gemini/state.key` beneath the configured application
