@@ -16,6 +16,8 @@ def main():
     # names it) and the request-context middleware shared search needs.
     from claude_provider import install as install_claude
     install_claude(app)
+    from gemini_native import install as install_gemini
+    install_gemini()
     # Temporary subscription signaling adapter; retirement steps: docs/VOICE.md.
     if os.environ.get('LITELLM_VOICE_ENABLED') == 'true':
         from live_voice import install as install_voice

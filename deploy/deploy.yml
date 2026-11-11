@@ -6,7 +6,7 @@
     # Files the running proxy imports; changing any of them restarts the service.
     runtime_scripts: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py,
                       claude_session.py, claude_provider.py, usage_accounting.py, shared_search.py, live_voice.py,
-                      compaction_fallback.py, deployment.py]
+                      compaction_fallback.py, gemini_native.py, responses_events.py, deployment.py]
   pre_tasks:
     - name: Load and validate the deployment configuration
       ansible.builtin.import_tasks: tasks/target.yml
@@ -109,6 +109,7 @@
         - "{{ litellm_state }}"
         - "{{ litellm_state }}/chatgpt"
         - "{{ litellm_state }}/claude"
+        - "{{ litellm_state }}/gemini"
     - name: Install locked project
       ansible.builtin.copy:
         src: "{{ source_root }}/{{ item }}"
@@ -165,6 +166,17 @@
         UV_PYTHON_DOWNLOADS: never
       when: project_files.changed or not installed_cli.stat.exists
       notify: Restart LiteLLM
+    - name: Initialize or validate the persistent Gemini state sealing key
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}",
+               "{{ litellm_root }}/scripts/gemini_native.py", provision-key,
+               --key-file, "{{ litellm_state }}/gemini/state.key"]
+      register: gemini_state_key
+      changed_when: gemini_state_key.stdout == 'created'
+      # The key is durable provider state, not a runtime recovery candidate.
+      # Upgrades and rollback must preserve it, including after first cutover.
+      no_log: true
+      when: not ansible_check_mode
     - name: Provision the selected encrypted proxy credential without exposing the key
       ansible.builtin.command:
         argv: ["{{ litellm_root }}/scripts/provision-key", "{{ litellm_home }}", "{{ litellm_user }}", "{{ litellm_credential_mode }}", "{{ litellm_system_credential }}"]
