@@ -15,7 +15,6 @@ def normalize_item(item):
     if not item.get('id'):
         item['id'] = 'item_' + uuid.uuid4().hex
     if item.get('type') == 'reasoning':
-        item.pop('content', None)
         item.pop('role', None)
         item.setdefault('summary', [])
     return item
@@ -53,7 +52,9 @@ class ResponsesEvents:
             if item['type'] == 'message':
                 skeleton['content'] = []; skeleton['status'] = 'in_progress'
             elif item['type'] == 'reasoning':
-                skeleton['summary'] = []; skeleton.pop('encrypted_content', None)
+                # Some Chat Completions models require readable reasoning on
+                # replay. Preserve it without presenting it as a summary.
+                skeleton['summary'] = []; skeleton.pop('encrypted_content', None); skeleton.pop('content', None)
             elif item['type'] in ('function_call', 'custom_tool_call'):
                 skeleton['input' if item['type'] == 'custom_tool_call' else 'arguments'] = ''
                 skeleton['status'] = 'in_progress'

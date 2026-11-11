@@ -16,6 +16,8 @@ def main():
     # names it) and the request-context middleware shared search needs.
     from claude_provider import install as install_claude
     install_claude(app)
+    from chat_native import install as install_chat_native
+    install_chat_native()
     from gemini_native import install as install_gemini
     install_gemini()
     # Temporary subscription signaling adapter; retirement steps: docs/VOICE.md.

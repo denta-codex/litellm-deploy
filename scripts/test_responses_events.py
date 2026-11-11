@@ -1,7 +1,7 @@
 """Responses lifecycle invariants independent of the inference provider."""
 import unittest
 
-from responses_events import ResponsesEvents
+from responses_events import ResponsesEvents, normalize_item
 
 
 def plain(events):
@@ -14,6 +14,18 @@ def message(text='ANSWER', identity='msg_fixture'):
 
 
 class EventsTests(unittest.TestCase):
+    def test_raw_reasoning_is_preserved_without_becoming_display_feedback(self):
+        reasoning = {'type': 'reasoning', 'id': 'rs_kimi', 'role': 'assistant',
+                     'content': [{'type': 'output_text', 'text': 'required replay state', 'annotations': []}]}
+        normalized = normalize_item(reasoning)
+        self.assertEqual(normalized['content'], reasoning['content'])
+        self.assertNotIn('role', normalized)
+        events = plain(ResponsesEvents('modal/kimi').complete(
+            {'status': 'completed', 'output': [reasoning]}))
+        self.assertEqual(events[-1]['response']['output'][0]['content'], reasoning['content'])
+        self.assertFalse(any(e['type'] in ('response.output_text.delta', 'response.reasoning_summary_text.delta')
+                             for e in events))
+
     def test_reasoning_content_is_not_answer_text_and_opaque_state_is_not_displayed(self):
         renderer = ResponsesEvents('fixture')
         reasoning = {'id': 'rs_fixture', 'type': 'reasoning', 'role': 'assistant',

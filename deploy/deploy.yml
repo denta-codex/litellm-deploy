@@ -6,7 +6,7 @@
     # Files the running proxy imports; changing any of them restarts the service.
     runtime_scripts: [start-litellm, launch.py, serve.py, chatgpt_responses.py, claude-cli, claude_context.py,
                       claude_session.py, claude_provider.py, usage_accounting.py, shared_search.py, live_voice.py,
-                      compaction_fallback.py, gemini_native.py, responses_events.py, deployment.py]
+                      compaction_fallback.py, chat_native.py, gemini_native.py, responses_events.py, deployment.py]
   pre_tasks:
     - name: Load and validate the deployment configuration
       ansible.builtin.import_tasks: tasks/target.yml
