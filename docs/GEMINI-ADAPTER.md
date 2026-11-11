@@ -89,8 +89,11 @@ runtime is introduced.
 `gemini_timing` logs contain only provider/model, dispatch timestamp, outcome, and
 milliseconds to first provider content, first public content event, and completion.
 Absent content stays null; cancellation also logs its outcome. No prompts, tool
-arguments/results, state, signatures, or keys enter these timing records. Waiting
-for silent provider computation emits no invented progress. For JSON requests,
+arguments/results, state, signatures, or keys enter these timing records.
+These records use a dedicated metadata-only stderr handler, installed once at
+startup, so a quiet upstream root logger cannot suppress them. Other loggers are
+unchanged.
+Waiting for silent provider computation emits no invented progress. For JSON requests,
 first-content time is the receipt of the complete provider body; for streaming it
 is the first nonempty text/marked summary part.
 

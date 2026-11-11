@@ -34,6 +34,17 @@ LOG = logging.getLogger('gemini_native')
 INSTALLED = None
 
 
+def configure_timing_logging():
+    """Publish this adapter's metadata even when the server root logger is quiet."""
+    LOG.setLevel(logging.INFO)
+    LOG.propagate = False
+    if not any(handler.name == 'gemini-native-metadata' for handler in LOG.handlers):
+        handler = logging.StreamHandler()
+        handler.set_name('gemini-native-metadata')
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        LOG.addHandler(handler)
+
+
 class NativeStateError(ValueError):
     """Deliberately non-secret diagnostics safe at the public Responses boundary."""
     status_code = 400
@@ -435,6 +446,7 @@ class GeminiResponses:
 def install(router=None, codec=None):
     """Version checked, reversible hooks; tests exercise actual pinned LiteLLM."""
     global INSTALLED
+    configure_timing_logging()
     if INSTALLED is not None:
         return INSTALLED
     if version('litellm') != '1.106.5':
