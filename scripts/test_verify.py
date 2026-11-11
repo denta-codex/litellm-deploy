@@ -19,9 +19,10 @@ class StatefulProbeTests(unittest.TestCase):
     def test_authenticated_stream_and_tool_loop_keep_the_same_session(self):
         session = None
         posts = 0
+        tool_prefix = None
 
         def upstream(request, **kwargs):
-            nonlocal session, posts
+            nonlocal session, posts, tool_prefix
             headers = {name.lower(): value for name, value in request.header_items()}
             if headers.get('authorization') != 'Bearer fixture-key':
                 raise urllib.error.HTTPError(request.full_url, 401, 'unauthorized', {}, None)
@@ -37,11 +38,14 @@ class StatefulProbeTests(unittest.TestCase):
             if posts == 1:
                 return stream({'type': 'response.output_text.delta', 'delta': 'LITELLM_STREAM_OK'}, completed)
             if posts == 2:
+                tool_prefix = payload['input']
                 self.assertEqual(payload['tool_choice']['name'], 'deployment_probe')
                 item = {'type': 'function_call', 'name': 'deployment_probe', 'call_id': 'fixture-call',
                         'arguments': '{}'}
             else:
                 self.assertEqual(posts, 3)
+                self.assertEqual(payload['input'][:len(tool_prefix)], tool_prefix,
+                                 'Signed thinking requires an unchanged input prefix')
                 results = [item for item in payload['input'] if item.get('type') == 'function_call_output']
                 self.assertEqual(results, [{'type': 'function_call_output', 'call_id': 'fixture-call',
                                            'output': 'DEPLOYMENT_TOOL_OK'}])

@@ -71,9 +71,10 @@ def completed_response(payload):
 probe_tool = {'type': 'function', 'name': 'deployment_probe', 'description': 'Check deployment.',
               'parameters': {'type': 'object', 'properties': {}, 'additionalProperties': False, 'required': []}}
 
+tool_input = [{'role': 'user', 'content': 'Call deployment_probe, then report its result.'}]
 first = completed_response({
     'model': args.model,
-    'input': [{'role': 'user', 'content': 'Call deployment_probe to check this deployment.'}],
+    'input': tool_input,
     'tools': [probe_tool],
     'tool_choice': 'auto' if args.auto_tool_choice else {'type': 'function', 'name': 'deployment_probe'},
 })
@@ -82,8 +83,7 @@ assert len(calls) == 1 and calls[0]['name'] == 'deployment_probe', 'tool call mi
 second = completed_response({
     'model': args.model,
     'tools': [probe_tool],
-    'input': [{'role': 'user', 'content': 'Call deployment_probe, then report its result.'}]
-    + first['output']
+    'input': tool_input + first['output']
     + [{'type': 'function_call_output', 'call_id': calls[0]['call_id'], 'output': 'DEPLOYMENT_TOOL_OK'}],
 })
 assert second['status'] == 'completed', 'follow-up did not complete'

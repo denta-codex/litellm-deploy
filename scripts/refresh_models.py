@@ -5,7 +5,7 @@ comes from the ``models`` list of the per-machine deployment configuration
 (``--config``). A validated refresh publishes that list as ``models.json``
 beside the LiteLLM config, so rollback restores it with the routes and later
 snapshot checks compare against what is installed. Each entry's ``litellm``
-mapping is passed to LiteLLM unchanged;
+mapping is passed to LiteLLM with documented provider defaults;
 ``codex`` overrides the stock catalog row defaults.
 """
 import argparse
@@ -123,6 +123,21 @@ def configured_model(spec):
         raise ValueError(f'{name}: catalog_pricing must be a mapping with a boolean zero_rate')
     model_info.setdefault('mode', 'chat')
     route = {'model_name': name, 'model_info': model_info, 'litellm_params': copy.deepcopy(litellm)}
+    fable = (litellm['model'].startswith('bedrock/')
+             and litellm['model'].split('/')[-1].split('.')[-1] == 'claude-fable-5-2')
+    if fable:
+        # The pinned bundled map predates this Bedrock model. Router registers
+        # these capabilities for its underlying ID; otherwise LiteLLM silently
+        # strips output_config.effort or translates adaptive to manual thinking.
+        model_info.setdefault('supports_reasoning', True)
+        model_info.setdefault('supports_adaptive_thinking', True)
+        for effort in ('low', 'medium', 'high', 'xhigh', 'max'):
+            model_info.setdefault('supports_' + effort + '_reasoning_effort', True)
+        # Adaptive thinking shares this ceiling with the answer. LiteLLM's
+        # implicit 4096 default can end a high-effort turn before any answer.
+        budget = route['litellm_params'].setdefault('max_tokens', 65536)
+        if type(budget) is not int or not 1 <= budget <= 128000:
+            raise ValueError(f'{name}: max_tokens must be an integer from 1 to 128000')
     codex = copy.deepcopy(spec.get('codex') or {})
     if not isinstance(codex, dict) or 'slug' in codex:
         raise ValueError(f'{name}: codex must be a mapping of catalog fields other than slug')
@@ -172,6 +187,10 @@ def configured_model(spec):
                        for v in validators)
             or type(timeout) is not int or timeout <= 0):
         raise ValueError(f'{name}: verify accepts args, validators (script from scripts/ plus arguments) and timeout')
+    args = list(args)
+    if fable and '--auto-tool-choice' not in args:
+        # Forced tool use is unsupported by Fable's always-on adaptive thinking.
+        args.append('--auto-tool-choice')
     return route, row, {'args': args, 'validators': validators, 'timeout': timeout}
 
 

@@ -47,13 +47,17 @@ def main():
     p.add_argument('--base-url', default='http://127.0.0.1:4000', help='Proxy origin, including an isolated test port')
     p.add_argument('--catalog', type=Path, default=Path.home() / '.config/litellm/codex-models.json')
     p.add_argument('--skip-search', action='store_true', help='Validate tools/context without advertising unsupported search')
+    p.add_argument('--effort', choices=['none', 'low', 'medium', 'high', 'xhigh', 'max'],
+                   help='Exercise this advertised effort instead of the lowest supported effort')
     p.add_argument('--service-tier', choices=['priority', 'default'], help='Exercise Codex with an explicit service tier')
     p.add_argument('--launcher', type=Path, default=None)
     args = p.parse_args()
     args.launcher = args.launcher or codex_binary()
     metadata = next(m for m in json.loads(args.catalog.read_text())['models'] if m['slug'] == args.model)
     efforts = [r['effort'] for r in metadata.get('supported_reasoning_levels', [])]
-    effort = 'low' if 'low' in efforts else metadata.get('default_reasoning_level', 'medium')
+    if args.effort and args.effort not in efforts:
+        p.error('--effort must be advertised by the selected model')
+    effort = args.effort or ('low' if 'low' in efforts else metadata.get('default_reasoning_level', 'medium'))
     state = Path.home() / '.local/state/litellm'
     state.mkdir(parents=True, exist_ok=True, mode=0o700)
     # Codex rejects homes under /tmp. This private disposable home keeps test tasks
@@ -95,6 +99,7 @@ def probe(args, metadata, effort, home):
                                 capture_output=True, text=True, timeout=240)
         if result.returncode:
             raise RuntimeError(f'Codex probe failed ({result.returncode}): {result.stderr[-2000:]}')
+        assert 'OutputTextDelta without active item' not in result.stderr, 'Codex received an invalid text-item lifecycle'
         events = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
         assert any(e['type'] == 'turn.completed' for e in events), 'Codex turn did not complete'
         assert not any(e['type'] in ('error', 'turn.failed') for e in events), 'Codex reported failure'

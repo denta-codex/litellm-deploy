@@ -50,8 +50,11 @@ No database or Redis server is configured.
 ### Providers are LiteLLM configuration
 
 Modal, Bedrock, Vertex, Claude, and local models are not deployment features. Each
-is one `models:` entry whose `litellm:` block is passed to LiteLLM unchanged as
-`litellm_params`, plus whatever credential that provider needs. Each entry has:
+is one `models:` entry whose `litellm:` block supplies `litellm_params`, plus
+whatever credential that provider needs. Documented defaults fill gaps in the
+pinned runtime's provider metadata; explicit output budgets still win. See
+[`docs/FABLE-NATIVE.md`](docs/FABLE-NATIVE.md) for Fable's adaptive-thinking and
+output-budget defaults. Each entry has:
 
 | Key | Purpose |
 | --- | --- |

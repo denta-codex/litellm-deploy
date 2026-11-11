@@ -305,7 +305,8 @@ class SharedSearchInterceptor(WebSearchInterceptionLogger):
                 model = kwargs['model']
                 plan.request_patch.model = model if model.startswith('vertex_ai/') else 'vertex_ai/' + model
             tool_messages = plan.request_patch.messages[len(kwargs['messages']) + 1:]
-            canonical = Transform.transform_responses_api_input_to_messages(rendered['output'], responses_api_request={})
+            canonical = Transform.transform_responses_api_input_to_messages(
+                rendered['output'], responses_api_request={}, replay_reasoning=True)
             plan.request_patch.messages = kwargs['messages'] + canonical + tool_messages
             turn.add_usage(response)
             for item in rendered['output']:
@@ -447,8 +448,9 @@ class SearchResponses:
         turn = Turn(REQUEST.get().get('caller'), settings, copy.deepcopy(data), self.journal, self.backend)
         # Hash request contents; only the completed public response is persisted.
         # Exclude proxy-injected metadata and credentials from replay identity.
-        fields = ('model', 'input', 'instructions', 'tools', 'tool_choice', 'reasoning', 'text', 'parallel_tool_calls')
-        identity = ['typed-events-v2', REQUEST.get().get('headers', {}), {k: data.get(k) for k in fields},
+        fields = ('model', 'input', 'instructions', 'tools', 'tool_choice', 'reasoning', 'text',
+                  'parallel_tool_calls', 'max_output_tokens')
+        identity = ['typed-events-v3', REQUEST.get().get('headers', {}), {k: data.get(k) for k in fields},
                     getattr(self.backend, 'model', type(self.backend).__name__)]
         cache_id = 'ws_request' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         cache_path = self.journal.directory(turn.caller) / (cache_id + '.json')
