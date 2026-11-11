@@ -129,8 +129,18 @@ def configured_model(spec):
     missing = [key for key in REQUIRED_ROW if key not in codex]
     if missing:
         raise ValueError(f'{name}: codex requires {", ".join(missing)}')
+    # Provider-specific operating instructions are a shipped catalog default,
+    # not an injected second agent runtime. Explicit user prompts still win.
+    native_gemini = litellm['model'].startswith(('vertex_ai/gemini-', 'vertex_ai_beta/gemini-'))
+    if native_gemini and not {'base_instructions', 'base_instructions_file'}.intersection(codex):
+        codex['base_instructions_file'] = 'gemini-instructions.md'
     instructions = codex.pop('base_instructions_file', None)
     row = {'slug': name, 'description': codex['display_name'], **copy.deepcopy(ROW_DEFAULTS)}
+    if native_gemini:
+        # Enabled after stock Codex + search + compaction offline acceptance.
+        # These flags expose provider-marked summaries, not decrypted state.
+        row.update(supports_reasoning_summaries=True, supports_reasoning_summary_parameter=True,
+                   default_reasoning_summary='auto')
     row['max_context_window'] = codex['context_window']
     row.update(codex)
     if instructions is not None:

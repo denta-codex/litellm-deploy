@@ -16,6 +16,7 @@ import litellm
 from litellm.types.utils import BaseLiteLLMOpenAIResponseObject
 
 from claude_context import REQUEST, codex_turn_metadata
+from responses_events import ResponsesEvents
 
 LOGGER = logging.getLogger('compaction_fallback')
 ATTEMPT_TIMEOUT = 120
@@ -469,25 +470,10 @@ class CompactionResponses:
                             'metadata': {'compaction_attempts': json.dumps(getattr(exc, 'compaction_attempts', []))}}
                 yield BaseLiteLLMOpenAIResponseObject(type='response.failed', sequence_number=0, response=response)
                 return
-            sequence = 0
-            def event(kind, **fields):
-                nonlocal sequence
-                value = BaseLiteLLMOpenAIResponseObject(type=kind, sequence_number=sequence, **fields)
-                sequence += 1
-                return value
-            yield event('response.created', response=response | {'status': 'in_progress', 'output': []})
-            for index, item in enumerate(response['output']):
-                item_id = item.setdefault('id', 'item_' + uuid.uuid4().hex)
-                yield event('response.output_item.added', output_index=index, item=item)
-                for ci, part in enumerate(item.get('content', [])):
-                    if part.get('type') == 'output_text':
-                        fields = {'output_index': index, 'item_id': item_id, 'content_index': ci}
-                        yield event('response.content_part.added', **fields, part=part | {'text': ''})
-                        yield event('response.output_text.delta', **fields, delta=part['text'])
-                        yield event('response.output_text.done', **fields, text=part['text'])
-                        yield event('response.content_part.done', **fields, part=part)
-                yield event('response.output_item.done', output_index=index, item=item)
-            yield event('response.completed', response=response)
+            renderer = ResponsesEvents(request['model'])
+            yield renderer.created()
+            for event in renderer.complete(response):
+                yield event
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)

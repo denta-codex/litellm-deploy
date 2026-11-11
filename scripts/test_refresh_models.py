@@ -44,6 +44,33 @@ class DiscoveryTests(unittest.TestCase):
         self.config = {'model_list': [self.external], 'general_settings': {'master_key': 'os.environ/LITELLM_MASTER_KEY'}}
         self.catalog = {'models': [copy.deepcopy(ROW), model('retired-native', 'hide')]}
 
+    def test_gemini_prompt_defaults_and_explicit_prompt_override(self):
+        spec = copy.deepcopy(SPEC)
+        spec['name'] = 'vertex/gemini-4-carbon'
+        spec['litellm'] = {'model': 'vertex_ai/gemini-4-carbon', 'reasoning_effort': 'medium'}
+        spec['codex'].update(supported_reasoning_levels=['low', 'medium', 'high'], default_reasoning_level='medium')
+        original = copy.deepcopy(spec)
+        route, row, _ = configured_model(spec)
+        self.assertEqual(spec, original)
+        self.assertEqual(row['base_instructions'], (refresh_models.SCRIPTS / 'gemini-instructions.md').read_text())
+        self.assertEqual(row['tool_mode'], 'code_mode_only')
+        self.assertEqual(row['apply_patch_tool_type'], 'freeform')
+        self.assertEqual(row['default_reasoning_level'], 'medium')
+        self.assertTrue(row['supports_reasoning_summaries'])
+        self.assertTrue(row['supports_reasoning_summary_parameter'])
+        self.assertEqual(row['default_reasoning_summary'], 'auto')
+        self.assertEqual([l['effort'] for l in row['supported_reasoning_levels']], ['low', 'medium', 'high'])
+        self.assertEqual(route['litellm_params']['reasoning_effort'], 'medium')
+        spec['codex']['base_instructions'] = 'Explicit owner prompt'
+        self.assertEqual(configured_model(spec)[1]['base_instructions'], 'Explicit owner prompt')
+        spec['codex'].pop('base_instructions')
+        spec['codex']['base_instructions_file'] = 'claude-instructions.md'
+        self.assertEqual(configured_model(spec)[1]['base_instructions'],
+                         (refresh_models.SCRIPTS / 'claude-instructions.md').read_text())
+        self.assertEqual(configured_model(SPEC)[1], ROW)
+        spec['codex']['supports_reasoning_summaries'] = False
+        self.assertFalse(configured_model(spec)[1]['supports_reasoning_summaries'])
+
     def test_subscription_routes_metadata_and_external_preservation(self):
         config, catalog, summary = generate(self.source, self.config, self.catalog, 'chatgpt/astra')
         self.assertEqual(config['model_list'][0], self.external)
