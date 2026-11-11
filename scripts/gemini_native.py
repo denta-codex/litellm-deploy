@@ -5,15 +5,18 @@ item, not a process cache. Only this module understands the versioned carrier.
 No provider credentials, conversation database, or independent agent is added.
 """
 import argparse
+import asyncio
 import base64
 import copy
 from contextvars import ContextVar
 import hashlib
 from importlib.metadata import version
 import json
+import logging
 import os
 from pathlib import Path
 import stat
+import time
 import uuid
 
 from cryptography.exceptions import InvalidTag
@@ -26,7 +29,73 @@ NATIVE = 'gemini_native_v1'
 MAX_STATE_BYTES = 16 * 1024 * 1024
 TARGET = ContextVar('gemini_target', default=None)
 CALL = ContextVar('gemini_call', default=None)
+FEEDBACK = ContextVar('gemini_feedback', default=None)
+LOG = logging.getLogger('gemini_native')
 INSTALLED = None
+
+
+class NativeStateError(ValueError):
+    """Deliberately non-secret diagnostics safe at the public Responses boundary."""
+    status_code = 400
+
+
+def feedback_event(renderer, entry):
+    """Called by the presentation owner, never by the provider/parser."""
+    kind, value = entry
+    if kind == 'model_delta':
+        call = value['call']
+        call.setdefault('first_public_at', time.monotonic())
+        return list(renderer.delta(value['id'], value['type'], value['delta']))
+    if kind == 'model_timing':
+        call = value
+        started = call['started_at']
+        LOG.info('gemini_timing %s', json.dumps({
+            'provider': call['origin'][0], 'model': call['origin'][1],
+            'dispatch_at': call['dispatch_at'], 'outcome': call['outcome'],
+            'first_content_ms': round(1000 * (call['first_content_at'] - started)) if 'first_content_at' in call else None,
+            'first_public_ms': round(1000 * (call['first_public_at'] - started)) if 'first_public_at' in call else None,
+            'completion_ms': round(1000 * (call['completed_at'] - started))}))
+        return []
+    raise ValueError('Unknown Gemini feedback event')
+
+
+def flush_timings(queue):
+    """Cancellation can leave timing metadata queued without a live renderer."""
+    while not queue.empty():
+        entry = queue.get_nowait()
+        if entry[0] == 'model_timing':
+            feedback_event(None, entry)
+
+
+async def render_execution(renderer, execute, queue):
+    """Stream a single dispatch while retaining cancellation and terminal errors."""
+    task = asyncio.create_task(execute())
+    pending = None
+    try:
+        yield renderer.created()
+        while not task.done() or not queue.empty():
+            if not queue.empty():
+                entry = queue.get_nowait()
+            else:
+                pending = asyncio.create_task(queue.get())
+                ready, _ = await asyncio.wait([task, pending], return_when=asyncio.FIRST_COMPLETED)
+                if pending not in ready:
+                    pending.cancel(); await asyncio.gather(pending, return_exceptions=True)
+                    continue
+                entry = pending.result(); pending = None
+            for event in feedback_event(renderer, entry):
+                yield event
+        for event in renderer.complete(plain(await task)):
+            yield event
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        yield renderer.failed(exc)
+    finally:
+        task.cancel()
+        if pending: pending.cancel()
+        await asyncio.gather(task, *([pending] if pending else []), return_exceptions=True)
+        flush_timings(queue)
 
 
 def plain(value):
@@ -52,14 +121,14 @@ def read_key(path):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     except OSError:
-        raise ValueError('Gemini state key unavailable; provision or restore the existing key before inference') from None
+        raise NativeStateError('Gemini state key unavailable; provision or restore the existing key before inference') from None
     try:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
-            raise ValueError('Gemini state key must be an owner-only regular file')
+            raise NativeStateError('Gemini state key must be an owner-only regular file')
         value = os.read(fd, 33)
         if len(value) != 32:
-            raise ValueError('Invalid Gemini state key')
+            raise NativeStateError('Invalid Gemini state key')
         return value
     finally:
         os.close(fd)
@@ -77,7 +146,7 @@ def provision_key(path):
             os.close(fd)
         return False
     if marker.exists():
-        raise ValueError('Gemini state key was previously provisioned; restore it instead of replacing it')
+        raise NativeStateError('Gemini state key was previously provisioned; restore it instead of replacing it')
     # Link a completely written private file atomically; concurrent deployment
     # must never observe a partially written key or replace the winning key.
     temporary = path.parent / ('.state-key-' + uuid.uuid4().hex)
@@ -102,7 +171,7 @@ def provision_key(path):
 def caller():
     value = REQUEST.get().get('caller')
     if not value:
-        raise ValueError('Gemini native state requires authenticated caller identity')
+        raise NativeStateError('Gemini native state requires authenticated caller identity')
     return value
 
 
@@ -134,14 +203,14 @@ class StateCodec:
     def seal(self, value, owner):
         payload = json.dumps(value, separators=(',', ':')).encode()
         if len(payload) > MAX_STATE_BYTES:
-            raise ValueError('Gemini native state exceeds its response limit')
+            raise NativeStateError('Gemini native state exceeds its response limit')
         nonce = os.urandom(12)
         sealed = AESGCM(read_key(self.path)).encrypt(nonce, payload, (PREFIX + owner).encode())
         return PREFIX + base64.urlsafe_b64encode(nonce + sealed).decode()
 
     def open(self, token, owner):
         if not isinstance(token, str) or not token.startswith(PREFIX) or len(token) > 2 * MAX_STATE_BYTES:
-            raise ValueError('Invalid Gemini native state')
+            raise NativeStateError('Invalid Gemini native state')
         key = read_key(self.path)
         try:
             raw = base64.b64decode(token[len(PREFIX):], altchars=b'-_', validate=True)
@@ -151,7 +220,7 @@ class StateCodec:
                 raise ValueError()
             return value
         except (InvalidTag, ValueError, TypeError):
-            raise ValueError('Gemini native state is invalid or belongs to another caller') from None
+            raise NativeStateError('Gemini native state is invalid or belongs to another caller') from None
 
 
 def hydrate_input(source, request, replay_reasoning, original, codec):
@@ -175,7 +244,7 @@ def hydrate_input(source, request, replay_reasoning, original, codec):
     for index, item in carriers:
         value = codec.open(item['encrypted_content'], owner)
         if item.get('id') != value.get('carrier_id'):
-            raise ValueError('Gemini native state carrier identity changed')
+            raise NativeStateError('Gemini native state carrier identity changed')
         skip.add(index)
         target = TARGET.get()
         if target is not None and target != value.get('origin'):
@@ -184,21 +253,21 @@ def hydrate_input(source, request, replay_reasoning, original, codec):
         for item_id in value.get('batch_ids', []):
             matches = ids.get(item_id, [])
             if len(matches) != 1:
-                raise ValueError('Gemini native state is missing its original assistant batch')
+                raise NativeStateError('Gemini native state is missing its original assistant batch')
             positions.append(matches[0])
         if positions != sorted(positions) or not positions:
-            raise ValueError('Invalid Gemini native assistant batch')
+            raise NativeStateError('Invalid Gemini native assistant batch')
         public = [source[p] for p in positions]
         if digest(public_batch(public)) != value.get('batch_hash'):
-            raise ValueError('Gemini native state does not match its assistant batch')
+            raise NativeStateError('Gemini native state does not match its assistant batch')
         reasoning = value.get('reasoning_ids', [])
         for rid in reasoning:
             skip.update(ids.get(rid, []))
         covered = set(positions) | skip
         if any(p not in covered for p in range(positions[0], positions[-1] + 1)):
-            raise ValueError('Gemini native assistant batch was reordered')
+            raise NativeStateError('Gemini native assistant batch was reordered')
         if positions[0] in batches or any(p in skip for p in positions):
-            raise ValueError('Gemini native assistant batch was duplicated')
+            raise NativeStateError('Gemini native assistant batch was duplicated')
         batches[positions[0]] = (positions, public, value)
         skip.update(positions)
     result = original([], request, replay_reasoning)
@@ -221,7 +290,7 @@ def hydrate_input(source, request, replay_reasoning, original, codec):
             positions, public, value = batches[index]
             converted = [plain(m) for m in original(public, {}, True)]
             if any(m.get('role') != 'assistant' for m in converted):
-                raise ValueError('Invalid Gemini native assistant batch')
+                raise NativeStateError('Invalid Gemini native assistant batch')
             content, calls = [], []
             for message in converted:
                 text = message.get('content')
@@ -254,8 +323,9 @@ def native_messages(messages, model, params, original):
             for message in group:
                 value = (message.get('provider_specific_fields') or {}).get(NATIVE)
                 if value:
-                    if value.get('origin') != origin(model):
-                        raise ValueError('Gemini native state belongs to a different model')
+                    active = (CALL.get() or {}).get('origin', origin(model))
+                    if value.get('origin') != active:
+                        raise NativeStateError('Gemini native state belongs to a different model')
                     parts.extend(copy.deepcopy(value['parts']))
                 else:
                     for content in original([message], model, params):
@@ -340,19 +410,25 @@ class GeminiResponses:
             raise BadRequestError(message='Previous response not found; send self-contained history',
                                   model=data['model'], llm_provider='vertex_ai',
                                   code='previous_response_not_found')
+        if data.get('stream') or FEEDBACK.get() is not None:
+            # A provider retry could replace an already-published batch. Fail
+            # the stream terminally; an explicit client retry is a new request.
+            data = data | {'num_retries': 0, 'max_fallbacks': 0, 'disable_fallbacks': True}
         if not data.get('stream'):
             return await self.dispatch(data=data, route_type=route_type, **kwargs)
         routed = copy.deepcopy(data); routed['stream'] = False
         async def run():
             from responses_events import ResponsesEvents
             events = ResponsesEvents(data['model'])
-            async def stream():
-                yield events.created()
-                call = await self.dispatch(data=routed, route_type=route_type, **kwargs)
-                response = await call
-                for event in events.complete(plain(response)):
-                    yield event
-            return stream()
+            queue = asyncio.Queue()
+            async def execute():
+                token = FEEDBACK.set(queue)
+                try:
+                    call = await self.dispatch(data=routed, route_type=route_type, **kwargs)
+                    return await call
+                finally:
+                    FEEDBACK.reset(token)
+            return render_execution(events, execute, queue)
         return run()
 
 
@@ -364,7 +440,7 @@ def install(router=None, codec=None):
     if version('litellm') != '1.106.5':
         raise RuntimeError('Gemini native bridge requires LiteLLM 1.106.5; revalidate before upgrading')
     from litellm.responses.litellm_completion_transformation.transformation import LiteLLMCompletionResponsesConfig as Transform
-    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import VertexGeminiConfig, VertexLLM
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import VertexGeminiConfig, VertexLLM, ModelResponseIterator
     from litellm.proxy import common_request_processing
     codec = codec or StateCodec()
     hooks = []
@@ -398,21 +474,110 @@ def install(router=None, codec=None):
             candidates = kwargs['raw_response'].json().get('candidates', [])
             if candidates:
                 call['parts'] = copy.deepcopy(candidates[0].get('content', {}).get('parts', []))
+                # The pinned adapter also embeds signatures in call IDs and
+                # tool-cache entries. New Responses history must have only one
+                # state transport: the caller/model-bound sealed carrier.
+                from litellm.litellm_core_utils.prompt_templates.factory import THOUGHT_SIGNATURE_SEPARATOR
+                message = response.choices[0].message
+                for tool in message.tool_calls or []:
+                    tool.id = tool.id.split(THOUGHT_SIGNATURE_SEPARATOR, 1)[0]
+                    tool.provider_specific_fields = {k: v for k, v in
+                        (getattr(tool, 'provider_specific_fields', None) or {}).items() if k != 'thought_signature'}
+                    fields = getattr(tool.function, 'provider_specific_fields', None)
+                    if fields:
+                        tool.function.provider_specific_fields = {k: v for k, v in fields.items() if k != 'thought_signature'}
+                native = {k: call[k] for k in ('origin', 'parts', 'message_id', 'reasoning_id', 'carrier_id')}
                 response.choices[0].message.provider_specific_fields = (
-                    plain(response.choices[0].message).get('provider_specific_fields', {}) | {NATIVE: call})
+                    plain(response.choices[0].message).get('provider_specific_fields', {}) | {NATIVE: native})
         return response
     patch(VertexGeminiConfig, 'transform_response', vertex_response)
+    original_parser = ModelResponseIterator.chunk_parser
+    def chunk_parser(self, chunk):
+        parsed = original_parser(self, chunk)
+        call = CALL.get()
+        if call is not None and 'aggregate' in call:
+            aggregate = call['aggregate']
+            for key, value in chunk.items():
+                if key != 'candidates': aggregate[key] = copy.deepcopy(value)
+            for candidate in chunk.get('candidates', []):
+                if candidate.get('index', 0) != 0: continue
+                target = aggregate['candidates'][0]
+                for key, value in candidate.items():
+                    if key != 'content': target[key] = copy.deepcopy(value)
+                for part in candidate.get('content', {}).get('parts', []):
+                    target['content']['parts'].append(copy.deepcopy(part))
+                    call['received_bytes'] += len(json.dumps(part).encode())
+                    if call['received_bytes'] > MAX_STATE_BYTES:
+                        raise ValueError('Gemini provider stream exceeds its response limit')
+                    text = part.get('text')
+                    if not isinstance(text, str) or not text: continue
+                    call.setdefault('first_content_at', time.monotonic())
+                    thought = part.get('thought') is True
+                    if thought and not call['show_summary']: continue
+                    FEEDBACK.get().put_nowait(('model_delta', {'type': 'reasoning' if thought else 'message',
+                        'id': call['reasoning_id'] if thought else call['message_id'], 'delta': text, 'call': call}))
+        return parsed
+    patch(ModelResponseIterator, 'chunk_parser', chunk_parser)
     original_completion = VertexLLM.async_completion
     async def completion(self, *args, **kwargs):
         model, provider = kwargs.get('model', ''), kwargs.get('custom_llm_provider')
         if not is_gemini(model, provider) or not REQUEST.get().get('caller'):
             return await original_completion(self, *args, **kwargs)
+        read_key(codec.path)  # Fail before inference if durable state is missing.
         call = {'origin': origin(model, provider), 'parts': [],
                 'message_id': 'msg_' + uuid.uuid4().hex, 'reasoning_id': 'rs_' + str(uuid.uuid4()),
-                'carrier_id': 'rs_' + str(uuid.uuid4())}
+                'carrier_id': 'rs_' + str(uuid.uuid4()), 'started_at': time.monotonic(), 'dispatch_at': time.time()}
         token = CALL.set(call)
         try:
-            return await original_completion(self, *args, **kwargs)
+            queue = FEEDBACK.get()
+            if queue is None:
+                try:
+                    response = await original_completion(self, *args, **kwargs)
+                    if any(p.get('text') for p in call['parts']): call['first_content_at'] = time.monotonic()
+                    call['outcome'] = 'completed'
+                    return response
+                except asyncio.CancelledError:
+                    call['outcome'] = 'cancelled'; raise
+                except Exception:
+                    call['outcome'] = 'failed'; raise
+                finally:
+                    call['completed_at'] = time.monotonic()
+                    feedback_event(None, ('model_timing', call))
+            # Only transport streams. The existing LiteLLM agentic engine still
+            # receives one complete ModelResponse per iteration and owns search.
+            call.update(aggregate={'candidates': [{'index': 0, 'content': {'role': 'model', 'parts': []}}]},
+                        received_bytes=0,
+                        show_summary=(REQUEST.get().get('request', {}).get('reasoning') or {}).get('summary') != 'none')
+            stream_kwargs = kwargs | {'stream': True}
+            stream_kwargs['optional_params'] = copy.deepcopy(kwargs['optional_params'])
+            stream_kwargs['data'] = kwargs['data'] | {'optional_params': stream_kwargs['optional_params']}
+            wrapper, raw = None, None
+            try:
+                wrapper = await self.async_streaming(*args, **stream_kwargs)
+                # Consume the provider iterator, not CustomStreamWrapper's
+                # success callbacks: the outer JSON completion accounts once.
+                raw = await wrapper.make_call(client=kwargs.get('client'))
+                async for _ in raw: pass
+                aggregate = call['aggregate']
+                if not aggregate['candidates'][0].get('finishReason') and not aggregate.get('promptFeedback', {}).get('blockReason'):
+                    raise ValueError('Gemini provider stream ended without a finish reason')
+                import httpx
+                response = VertexGeminiConfig().transform_response(
+                    model=model, raw_response=httpx.Response(200, json=aggregate,
+                        headers=getattr(raw, 'response_headers', {})), model_response=kwargs['model_response'],
+                    logging_obj=kwargs['logging_obj'], request_data={}, messages=kwargs['messages'],
+                    optional_params=kwargs['optional_params'], litellm_params=kwargs['litellm_params'], encoding=kwargs['encoding'])
+                call['outcome'] = 'completed'
+                return response
+            except asyncio.CancelledError:
+                call['outcome'] = 'cancelled'; raise
+            except Exception:
+                call['outcome'] = 'failed'; raise
+            finally:
+                if raw is not None: await raw.aclose()
+                if wrapper is not None: await wrapper.aclose()
+                call['completed_at'] = time.monotonic()
+                queue.put_nowait(('model_timing', call))
         finally:
             CALL.reset(token)
     patch(VertexLLM, 'async_completion', completion)

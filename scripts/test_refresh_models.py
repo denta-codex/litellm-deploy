@@ -56,6 +56,10 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(row['tool_mode'], 'code_mode_only')
         self.assertEqual(row['apply_patch_tool_type'], 'freeform')
         self.assertEqual(row['default_reasoning_level'], 'medium')
+        self.assertTrue(row['supports_reasoning_summaries'])
+        self.assertTrue(row['supports_reasoning_summary_parameter'])
+        self.assertEqual(row['default_reasoning_summary'], 'auto')
+        self.assertEqual([l['effort'] for l in row['supported_reasoning_levels']], ['low', 'medium', 'high'])
         self.assertEqual(route['litellm_params']['reasoning_effort'], 'medium')
         spec['codex']['base_instructions'] = 'Explicit owner prompt'
         self.assertEqual(configured_model(spec)[1]['base_instructions'], 'Explicit owner prompt')
@@ -64,6 +68,8 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(configured_model(spec)[1]['base_instructions'],
                          (refresh_models.SCRIPTS / 'claude-instructions.md').read_text())
         self.assertEqual(configured_model(SPEC)[1], ROW)
+        spec['codex']['supports_reasoning_summaries'] = False
+        self.assertFalse(configured_model(spec)[1]['supports_reasoning_summaries'])
 
     def test_subscription_routes_metadata_and_external_preservation(self):
         config, catalog, summary = generate(self.source, self.config, self.catalog, 'chatgpt/astra')

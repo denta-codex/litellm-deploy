@@ -29,6 +29,8 @@ from litellm.types.utils import BaseLiteLLMOpenAIResponseObject
 from claude_context import REQUEST
 from claude_session import atomic_json
 from usage_accounting import accounting, sample
+from responses_events import ResponsesEvents, normalize_item
+from gemini_native import FEEDBACK, feedback_event, flush_timings
 
 CURRENT = ContextVar('shared_search', default=None)
 HOSTED = ('web_search', 'web_search_preview')
@@ -446,7 +448,7 @@ class SearchResponses:
         # Hash request contents; only the completed public response is persisted.
         # Exclude proxy-injected metadata and credentials from replay identity.
         fields = ('model', 'input', 'instructions', 'tools', 'tool_choice', 'reasoning', 'text', 'parallel_tool_calls')
-        identity = [REQUEST.get().get('headers', {}), {k: data.get(k) for k in fields},
+        identity = ['typed-events-v2', REQUEST.get().get('headers', {}), {k: data.get(k) for k in fields},
                     getattr(self.backend, 'model', type(self.backend).__name__)]
         cache_id = 'ws_request' + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         cache_path = self.journal.directory(turn.caller) / (cache_id + '.json')
@@ -473,6 +475,7 @@ class SearchResponses:
             if cached is not None:
                 return ResponsesAPIResponse(**cached)
             token = CURRENT.set(turn)
+            feedback_token = FEEDBACK.set(turn.queue if data.get('stream') else None)
             try:
                 call = await self.dispatch(data=routed, route_type=route_type, **kwargs)
                 response = await call
@@ -484,7 +487,7 @@ class SearchResponses:
                         # LiteLLM logs its loop ceiling and returns the unconsumed call.
                         raise ValueError(f'Model kept searching after search closed ({turn.rounds} search rounds)')
                     raise ValueError('Shared search interception did not consume an internal call')
-                output = turn.output + ([] if turn.mixed else value.get('output', []))
+                output = [normalize_item(i) for i in turn.output + ([] if turn.mixed else value.get('output', []))]
                 sources = historical_sources + [s for c in turn.calls if 'result' in c for s in c['result'].sources]
                 sources = list({s['url']: s for s in sources}.values())
                 cite(output, sources)
@@ -502,6 +505,7 @@ class SearchResponses:
                     'usage_accounting': accounting(latest, receipts)})
                 return response
             finally:
+                FEEDBACK.reset(feedback_token)
                 CURRENT.reset(token)
         async def locked_execute():
             key = (turn.caller, cache_id)
@@ -523,80 +527,50 @@ class SearchResponses:
     async def events(self, turn, execute):
         """Presentation only: the upstream callback engine runs in execute()."""
         task = asyncio.create_task(execute())
-        response_id = 'resp_' + uuid.uuid4().hex
-        sequence = 0
-        indexes = {}
-        started = set()
-        def event(kind, **fields):
-            nonlocal sequence
-            value = BaseLiteLLMOpenAIResponseObject(type=kind, sequence_number=sequence, **fields)
-            sequence += 1
-            return value
-        initial = {'id': response_id, 'object': 'response', 'created_at': int(time.time()),
-                   'model': turn.request['model'], 'status': 'in_progress', 'output': []}
+        renderer = ResponsesEvents(turn.request['model'])
         pending = None
         try:
-            yield event('response.created', response=initial)
+            yield renderer.created()
             while not task.done() or not turn.queue.empty():
-                pending = asyncio.create_task(turn.queue.get())
-                ready, _ = await asyncio.wait([task, pending], return_when=asyncio.FIRST_COMPLETED)
-                if pending not in ready:
-                    pending.cancel()
-                    await asyncio.gather(pending, return_exceptions=True)
-                    break
-                kind, call = pending.result()
-                if kind == 'reserve':
-                    for item_id in call:
-                        indexes.setdefault(item_id, len(indexes))
+                if not turn.queue.empty():
+                    kind, call = turn.queue.get_nowait()
+                else:
+                    pending = asyncio.create_task(turn.queue.get())
+                    ready, _ = await asyncio.wait([task, pending], return_when=asyncio.FIRST_COMPLETED)
+                    if pending not in ready:
+                        pending.cancel()
+                        await asyncio.gather(pending, return_exceptions=True)
+                        continue
+                    kind, call = pending.result()
+                    pending = None
+                if kind in ('model_delta', 'model_timing'):
+                    for event in feedback_event(renderer, (kind, call)):
+                        yield event
                     continue
-                indexes.setdefault(call['id'], len(indexes))
-                if call['id'] not in started:
-                    started.add(call['id'])
-                    yield event('response.output_item.added', output_index=indexes[call['id']],
-                                item={'type': 'web_search_call', 'id': call['id'], 'status': 'in_progress'})
-                fields = {'item_id': call['id'], 'output_index': indexes[call['id']]}
+                if kind == 'reserve':
+                    renderer.reserve(call)
+                    continue
+                for event in renderer.start({'type': 'web_search_call', 'id': call['id'], 'status': 'in_progress'}):
+                    yield event
+                fields = {'item_id': call['id'], 'output_index': renderer.indexes[call['id']]}
                 if kind == 'search_start':
-                    yield event('response.web_search_call.in_progress', **fields)
-                    yield event('response.web_search_call.searching', **fields)
+                    yield renderer.event('response.web_search_call.in_progress', **fields)
+                    yield renderer.event('response.web_search_call.searching', **fields)
                 elif not call['result'].error:
-                    yield event('response.web_search_call.completed', **fields)
+                    yield renderer.event('response.web_search_call.completed', **fields)
             response = plain(await task)
-            response['id'] = response_id
-            output = response['output']
-            for item in output:
-                item_id = item.get('id') or 'item_' + uuid.uuid4().hex
-                item['id'] = item_id
-                index = indexes.setdefault(item_id, len(indexes))
-                if item.get('type') == 'web_search_call' and item_id not in started:
-                    yield event('response.output_item.added', output_index=index, item=item)
-                if item.get('type') != 'web_search_call':
-                    yield event('response.output_item.added', output_index=index, item=item)
-                    for si, summary in enumerate(item.get('summary', [])):
-                        fields = {'item_id': item_id, 'output_index': index, 'summary_index': si}
-                        yield event('response.reasoning_summary_part.added', **fields, part={'type': 'summary_text', 'text': ''})
-                        yield event('response.reasoning_summary_text.delta', **fields, delta=summary.get('text', ''))
-                        yield event('response.reasoning_summary_text.done', **fields, text=summary.get('text', ''))
-                        yield event('response.reasoning_summary_part.done', **fields, part=summary)
-                    if item['type'] in ('function_call', 'custom_tool_call'):
-                        custom = item['type'] == 'custom_tool_call'
-                        field = 'input' if custom else 'arguments'
-                        prefix = 'response.custom_tool_call_input' if custom else 'response.function_call_arguments'
-                        yield event(prefix + '.delta', output_index=index, item_id=item_id, delta=item.get(field, ''))
-                        yield event(prefix + '.done', output_index=index, item_id=item_id, **{field: item.get(field, '')})
-                    for ci, part in enumerate(item.get('content', [])):
-                        if part.get('type') == 'output_text':
-                            yield event('response.content_part.added', output_index=index, item_id=item_id, content_index=ci, part=part)
-                            yield event('response.output_text.delta', output_index=index, item_id=item_id, content_index=ci, delta=part['text'])
-                            yield event('response.output_text.done', output_index=index, item_id=item_id, content_index=ci, text=part['text'])
-                            yield event('response.content_part.done', output_index=index, item_id=item_id, content_index=ci, part=part)
-                yield event('response.output_item.done', output_index=index, item=item)
-            response['output'] = output
-            yield event('response.completed', response=response)
+            for event in renderer.complete(response):
+                yield event
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            yield renderer.failed(exc)
         finally:
             task.cancel()
             if pending:
                 pending.cancel()
             await asyncio.gather(task, *([pending] if pending else []), return_exceptions=True)
+            flush_timings(turn.queue)
 
 
 def install():

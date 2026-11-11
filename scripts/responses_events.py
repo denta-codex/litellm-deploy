@@ -12,7 +12,8 @@ from litellm.types.utils import BaseLiteLLMOpenAIResponseObject
 
 def normalize_item(item):
     item = copy.deepcopy(item)
-    item.setdefault('id', 'item_' + uuid.uuid4().hex)
+    if not item.get('id'):
+        item['id'] = 'item_' + uuid.uuid4().hex
     if item.get('type') == 'reasoning':
         item.pop('content', None)
         item.pop('role', None)
@@ -119,11 +120,14 @@ class ResponsesEvents:
         response = copy.deepcopy(response)
         output = [normalize_item(i) for i in response.get('output', [])]
         ids = [i['id'] for i in output]
-        if len(ids) != len(set(ids)) or self.started - set(ids):
+        if len(ids) != len(set(ids)) or set(self.indexes) - set(ids):
             raise ValueError('Streamed items are missing or duplicated in completed output')
+        # First provider content determines public ordering (a summary may
+        # arrive after text). Reserve the remaining batch before emitting done.
+        self.reserve(ids)
+        output.sort(key=lambda i: self.indexes[i['id']])
         for item in output:
             yield from self.finish_item(item)
-        output.sort(key=lambda i: self.indexes[i['id']])
         # Reservations are allocated for public items only; a hole is a broken
         # search/model batch, not something to repair by renumbering deltas.
         if [self.indexes[i['id']] for i in output] != list(range(len(output))):
@@ -133,12 +137,25 @@ class ResponsesEvents:
         yield self.event('response.completed' if status == 'completed' else 'response.incomplete', response=response)
 
     def failed(self, exc):
+        from gemini_native import NativeStateError
         original = getattr(exc, 'original_exception', None) or exc
+        # LiteLLM may wrap request/codec failures. Only our deliberately safe
+        # diagnostics may escape that wrapper, never a raw provider body.
+        pending, seen = [exc], set()
+        while pending:
+            error = pending.pop()
+            if id(error) in seen: continue
+            seen.add(id(error))
+            if isinstance(error, NativeStateError):
+                original = error
+                break
+            pending.extend(e for e in (getattr(error, 'original_exception', None),
+                                       error.__cause__, error.__context__) if isinstance(e, BaseException))
         status = getattr(original, 'status_code', 500)
         code = {400: 'invalid_request_error', 401: 'authentication_error', 403: 'permission_denied',
                 408: 'request_timeout', 429: 'rate_limit_exceeded'}.get(status, 'server_error')
         # Adapter ValueErrors have deliberately non-secret diagnostics. Provider
         # exceptions can include raw request bodies, endpoints or credentials.
-        message = str(exc) if isinstance(exc, ValueError) else 'Model provider request failed'
+        message = str(original) if isinstance(original, NativeStateError) else str(exc) if isinstance(exc, ValueError) else 'Model provider request failed'
         return self.event('response.failed', response=self.initial | {'status': 'failed',
                           'error': {'code': code, 'message': message}})

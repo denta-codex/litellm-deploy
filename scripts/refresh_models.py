@@ -136,6 +136,11 @@ def configured_model(spec):
         codex['base_instructions_file'] = 'gemini-instructions.md'
     instructions = codex.pop('base_instructions_file', None)
     row = {'slug': name, 'description': codex['display_name'], **copy.deepcopy(ROW_DEFAULTS)}
+    if native_gemini:
+        # Enabled after stock Codex + search + compaction offline acceptance.
+        # These flags expose provider-marked summaries, not decrypted state.
+        row.update(supports_reasoning_summaries=True, supports_reasoning_summary_parameter=True,
+                   default_reasoning_summary='auto')
     row['max_context_window'] = codex['context_window']
     row.update(codex)
     if instructions is not None:

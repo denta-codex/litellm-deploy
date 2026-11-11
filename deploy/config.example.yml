@@ -96,6 +96,7 @@ models:
       vertex_location: global
       use_chat_completions_api: true
       reasoning_effort: medium
+      additional_drop_params: [prompt_cache_key]
     codex:
       display_name: Gemini Carbon
       base_instructions_file: gemini-instructions.md
