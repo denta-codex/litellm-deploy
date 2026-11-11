@@ -16,6 +16,11 @@ def normalize_item(item):
         item['id'] = 'item_' + uuid.uuid4().hex
     if item.get('type') == 'reasoning':
         item.pop('role', None)
+        # Gemini carriers and native summaries own opaque/public state. Raw
+        # content without an explicit summary is required by Kimi replay and
+        # is never rendered by ResponsesEvents.
+        if item.get('summary'):
+            item.pop('content', None)
         item.setdefault('summary', [])
     return item
 
