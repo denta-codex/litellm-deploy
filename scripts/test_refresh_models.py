@@ -88,6 +88,27 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(again['test_models'], [])
         self.assertFalse(again['test_reviewer'])
 
+    def test_modal_kimi_prompt_defaults_and_overrides(self):
+        spec = copy.deepcopy(SPEC)
+        spec['model_info'] = {'catalog_pricing': {'provider': 'moonshotai', 'model': 'kimi-k3.1-pro'}}
+        spec['litellm']['use_chat_completions_api'] = True
+        original = copy.deepcopy(spec)
+        _, row, _ = configured_model(spec)
+        self.assertEqual(spec, original)
+        self.assertEqual(row['base_instructions'], (refresh_models.SCRIPTS / 'kimi-instructions.md').read_text())
+        # reasoning_content is replay state, not a provider-authored summary.
+        self.assertFalse(row['supports_reasoning_summaries'])
+        self.assertEqual(row['default_reasoning_summary'], 'none')
+        self.assertFalse(row['supports_reasoning_summary_parameter'])
+        self.assertEqual(row['default_reasoning_level'], 'high')
+        for key, value in {'base_instructions': 'Explicit owner prompt',
+                           'supports_reasoning_summaries': True,
+                           'default_reasoning_summary': 'auto',
+                           'supports_reasoning_summary_parameter': True}.items():
+            variant = copy.deepcopy(spec)
+            variant['codex'][key] = value
+            self.assertEqual(configured_model(variant)[1][key], value)
+
     def test_legacy_access_program_metadata_is_normalized_and_converges(self):
         source = copy.deepcopy(self.source)
         catalog = copy.deepcopy(self.catalog)
