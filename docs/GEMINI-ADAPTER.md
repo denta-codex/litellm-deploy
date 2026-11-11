@@ -44,6 +44,11 @@ not the key or a whole environment. No provider authentication is modified.
 
 ## Offline verification
 
+Configured `vertex_ai/gemini-*` routes default to the shipped
+`gemini-instructions.md` using the existing catalog instructions-file mechanism.
+Explicit `codex.base_instructions` or `codex.base_instructions_file` overrides
+remain authoritative. Tool mode, schemas, and reasoning effort are unchanged.
+
 Use the existing locked environment, with `scripts` on `PYTHONPATH`:
 
 ```sh
