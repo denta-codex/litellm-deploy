@@ -63,9 +63,10 @@ models:
       api_key: os.environ/MODAL_API_KEY
       use_chat_completions_api: true
     model_info:
-      catalog_pricing: {provider: example-provider, model: example-model}
+      catalog_pricing: {provider: moonshotai, model: kimi-k3.1-pro}
     codex:
-      display_name: Modal Example
+      display_name: Modal Kimi K3.1 Pro
+      base_instructions_file: kimi-instructions.md
       context_window: 1048576
       input_modalities: [text, image]
       supported_reasoning_levels: [low, high, max]

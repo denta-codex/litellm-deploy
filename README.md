@@ -646,7 +646,20 @@ Modal endpoints are OpenAI-compatible routes:
 - `use_chat_completions_api: true`.
 
 Stock LiteLLM bridges Responses to Chat Completions. No Modal SDK or custom adapter
-is installed. Load the token with a `{modal_token: MODAL_API_KEY}` credential.
+is required. Load the token with a `{modal_token: MODAL_API_KEY}` credential.
+
+For Moonshot models identified by `model_info.catalog_pricing.provider:
+moonshotai`, the catalog ships `kimi-instructions.md` by default. An explicit
+`codex.base_instructions` or `base_instructions_file` remains authoritative.
+Kimi K3.1 Pro's complete `reasoning_content` is replayed with the original
+assistant message and tool calls through LiteLLM's native Chat bridge; no opaque
+state cache or separate session database is needed. Raw reasoning is replay
+state, not a provider-authored summary, so reasoning-summary catalog flags stay
+disabled. The pinned bridge keeps terminal items consistent with their streamed
+IDs, and shared search/compaction use the same typed event renderer.
+
+Kimi's configured reasoning effort remains unchanged. Its low/high/max levels
+are advertised only when declared by the per-machine configuration.
 
 Endpoint names are not model IDs. Set `model_info.catalog_pricing` explicitly to
 show prices. Begin with a fresh task: encrypted OpenAI compaction state is not

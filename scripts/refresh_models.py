@@ -134,6 +134,10 @@ def configured_model(spec):
     native_gemini = litellm['model'].startswith(('vertex_ai/gemini-', 'vertex_ai_beta/gemini-'))
     if native_gemini and not {'base_instructions', 'base_instructions_file'}.intersection(codex):
         codex['base_instructions_file'] = 'gemini-instructions.md'
+    kimi = ((model_info.get('catalog_pricing') or {}).get('provider') == 'moonshotai'
+            and litellm.get('use_chat_completions_api') is True)
+    if kimi and not {'base_instructions', 'base_instructions_file'}.intersection(codex):
+        codex['base_instructions_file'] = 'kimi-instructions.md'
     instructions = codex.pop('base_instructions_file', None)
     row = {'slug': name, 'description': codex['display_name'], **copy.deepcopy(ROW_DEFAULTS)}
     if native_gemini:
