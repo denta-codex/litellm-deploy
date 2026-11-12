@@ -728,9 +728,18 @@ def install(router=None, codec=None):
         if call is not None:
             candidates = kwargs['raw_response'].json().get('candidates', [])
             if candidates:
-                call['parts'] = copy.deepcopy(candidates[0].get('content', {}).get('parts', []))
+                parts = copy.deepcopy(candidates[0].get('content', {}).get('parts', []))
                 grounding = merge_grounding({}, candidates[0].get('groundingMetadata') or {})
                 context = merge_url_context({}, candidates[0].get('urlContextMetadata') or {})
+                if grounding['webSearchQueries'] or context['urlMetadata']:
+                    # Vertex returns each hidden server-side search/URL step as a
+                    # signature-only part, then rejects that part on replay
+                    # ("Invalid thought signature", verified live). Signed text
+                    # and function-call parts replay correctly without them.
+                    # Turns without server-side tool use keep stream-end text
+                    # signatures, which arrive in the same shape.
+                    parts = [p for p in parts if set(p) != {'thoughtSignature'}]
+                call['parts'] = parts
                 call.update(grounding=grounding, url_context=context,
                             search_queries=len(set(grounding['webSearchQueries'])),
                             url_retrievals=len(context['urlMetadata']),

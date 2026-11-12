@@ -166,6 +166,13 @@ sealed parts already hold the signed turn; LiteLLM would otherwise add a
 "Hosted web search: ..." assistant message. Model switches, compaction fallback,
 and rollback keep them as readable history.
 
+Vertex reports each hidden server-side search or URL step as a part that holds
+only a `thoughtSignature`. Replaying such a part fails with "Invalid thought
+signature", while the same turn without them replays correctly (both verified
+live on Carbon). When a turn reports search queries or URL retrievals, these
+signature-only parts are therefore not sealed. Turns without server-side tool use
+keep them, because a stream-end text signature arrives in the same shape.
+
 Histories that contain pre-cutover `ws_shared*` searches are expanded from the
 shared search journal before dispatch, as compaction fallback already does.
 

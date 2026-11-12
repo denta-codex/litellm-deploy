@@ -294,10 +294,13 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         for streaming, live, mixed in ((False, False, False), (True, False, True), (True, True, False), (True, True, True)):
             with self.subTest(streaming=streaming, live=live, mixed=mixed):
                 self.requests.clear(); self.live_stream = live; self.metadata = self.grounded()
-                first = [{'thought': True, 'text': 'Provider summary.'}, {'text': 'Café facts. '},
-                         {'text': 'BLUE is the answer.', 'thoughtSignature': SIGNATURE}]
-                if mixed: first.append({'functionCall': {'name': 'probe', 'args': {}}, 'thoughtSignature': TOOL_SIGNATURE})
-                self.parts = [first, [{'text': 'NEXT'}]]
+                # Vertex's hidden server-side steps arrive as signature-only parts.
+                provider = [{'thought': True, 'text': 'Provider summary.'}, {'thoughtSignature': 'server-step'},
+                            {'text': 'Café facts. '},
+                            {'text': 'BLUE is the answer.', 'thoughtSignature': SIGNATURE}]
+                if mixed: provider.append({'functionCall': {'name': 'probe', 'args': {}}, 'thoughtSignature': TOOL_SIGNATURE})
+                first = [p for p in provider if 'text' in p or 'functionCall' in p]
+                self.parts = [provider, [{'text': 'NEXT'}]]
                 prompt = f'Research fixture fact; mixed={mixed}'
                 with self.assertLogs('gemini_native', level='INFO') as logs:
                     final, events = await self.response(prompt, streaming, tools, bridge=bridge)
