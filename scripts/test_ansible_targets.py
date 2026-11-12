@@ -74,6 +74,24 @@ class AnsibleContracts(unittest.TestCase):
         for name, target in templates.items():
             self.assertEqual(paths[name].read_text(), candidates[target]['text'], name)
 
+    def test_recovery_journal_matches_deploys_cancel_on_disconnect_edit(self):
+        deploy = yaml.safe_load((SOURCE / 'deploy/deploy.yml').read_text())
+        task = next(task for play in deploy for task in play.get('tasks', [])
+                    if 'cancel_on_disconnect' in task.get('ansible.builtin.lineinfile', {}).get('line', ''))
+        samples = {'missing': 'model_list: []\ngeneral_settings:\n  master_key: k\nlitellm_settings: {}\n',
+                   'present': 'general_settings:\n  cancel_on_disconnect: true\n  master_key: k\n',
+                   'disabled': 'general_settings:\n  master_key: k\n  cancel_on_disconnect: false\n'}
+        tasks = []
+        for name, text in samples.items():
+            (self.directory / name).write_text(text)
+            tasks.append({'ansible.builtin.lineinfile': task['ansible.builtin.lineinfile'] | {
+                'path': str(self.directory / name)}, 'check_mode': False})
+        result = self.run_play({'hosts': 'all', 'gather_facts': False, 'tasks': tasks},
+                               self.write_config(self.example))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name, text in samples.items():
+            self.assertEqual((self.directory / name).read_text(), runtime.with_cancel_on_disconnect(text), name)
+
 
 if __name__ == '__main__':
     unittest.main()

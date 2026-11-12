@@ -195,6 +195,8 @@
     # a JSON request keeps running (and holds shared search's identical-request
     # lock) after its client gives up; streams already cancel on disconnect.
     - name: Cancel upstream work when a non-streaming client disconnects
+      # Migrates existing configs; runtime_rollout.with_cancel_on_disconnect journals the same
+      # edit. Remove both once every host's config.yaml carries the setting.
       ansible.builtin.lineinfile:
         path: "{{ litellm_config }}/config.yaml"
         regexp: '^  cancel_on_disconnect:'

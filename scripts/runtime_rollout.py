@@ -83,6 +83,27 @@ def templates(source):
     return result
 
 
+# Mirrors the deploy.yml lineinfile task that adds this setting to an existing proxy
+# configuration, so the edit is journalled (restored on rollback) instead of tripping the
+# protected-file check. Remove both once every host's config.yaml carries the setting.
+CANCEL_ON_DISCONNECT = '  cancel_on_disconnect: true\n'
+
+
+def with_cancel_on_disconnect(text):
+    lines = text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith('\n'):
+        lines[-1] += '\n'
+    existing = [index for index, line in enumerate(lines) if line.startswith('  cancel_on_disconnect:')]
+    anchors = [index for index, line in enumerate(lines) if line.startswith('general_settings:')]
+    if existing:
+        lines[existing[-1]] = CANCEL_ON_DISCONNECT
+    elif anchors:
+        lines.insert(anchors[-1] + 1, CANCEL_ON_DISCONNECT)
+    else:
+        lines.append(CANCEL_ON_DISCONNECT)
+    return ''.join(lines)
+
+
 def candidates(source):
     """Every managed file the deployment writes, with ``None`` for files it removes."""
     result={str(ROOT/name):{'text':(source/name).read_text(),'mode':0o600} for name in ('pyproject.toml','uv.lock')}
@@ -102,6 +123,9 @@ def candidates(source):
     if not (config/'config.yaml').exists():
         result[str(config/'config.yaml')] = {'text': render.get_template('config.yaml.j2').render(**variables),
                                             'mode': 0o600}
+    else:
+        current = record(config/'config.yaml')
+        result[str(config/'config.yaml')] = current | {'text': with_cancel_on_disconnect(current['text'])}
     return result
 
 
@@ -129,7 +153,9 @@ def prepare(source):
     after={name:value for name,value in candidates(source).items() if record(Path(name))!=value}
     journal={'schema':2,'commit':subprocess.check_output(['git','rev-parse','HEAD'],cwd=source,text=True).strip(),
         'home':str(HOME), 'uv':UV, 'service':service_state(), 'environment_existed':(ROOT/'.venv').exists(),
-        'before':{name:record(Path(name)) for name in after},'after':after,'protected':protected()}
+        'before':{name:record(Path(name)) for name in after},'after':after,
+        # A protected file this rollout itself edits is guarded by its before/after records instead.
+        'protected':{name:value for name,value in protected().items() if name not in after}}
     write(JOURNAL,json.dumps(journal))
     return {'prepared':True,'changed_files':len(after),'recovery':str(JOURNAL)}
 

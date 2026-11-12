@@ -59,6 +59,13 @@ class RuntimeTemplates(unittest.TestCase):
         for name in retired['dropins']:
             self.assertIsNone(self.result[f'{runtime.UNIT}.d/{name}'])
 
+    def test_existing_proxy_config_gains_only_the_disconnect_setting(self):
+        text = 'model_list: []\ngeneral_settings:\n  master_key: k\nlitellm_settings: {}\n'
+        updated = runtime.with_cancel_on_disconnect(text)
+        self.assertEqual(updated, text.replace('general_settings:\n', 'general_settings:\n'
+                                                '  cancel_on_disconnect: true\n'))
+        self.assertEqual(runtime.with_cancel_on_disconnect(updated), updated)
+
 
 class RuntimeToolchain(unittest.TestCase):
     def test_configuration_resolves_managed_uv_alias_to_exact_binary(self):
@@ -169,6 +176,18 @@ class RuntimeRecovery(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'routes/catalog'):
                 runtime.rollback()
             run.assert_not_called()
+
+    def test_protected_file_edited_by_the_rollout_is_journalled_and_restored(self):
+        runtime.JOURNAL.unlink()
+        self.after[str(self.config)]={'text':'Bedrock routes\ncancel','mode':runtime.record(self.config)['mode']}
+        with patch('runtime_rollout.subprocess.check_output',side_effect=[b'', 'fixture-commit']):
+            runtime.prepare(self.home)
+        self.assertNotIn(str(self.config),json.loads(runtime.JOURNAL.read_text())['protected'])
+        runtime.restore(self.after)
+        with patch('runtime_rollout.subprocess.run',return_value=subprocess.CompletedProcess([],0)), \
+                patch.object(runtime,'wait_for_health'):
+            runtime.rollback()
+        self.assertEqual(self.config.read_text(),'Bedrock routes')
 
 
 if __name__=='__main__':unittest.main()
