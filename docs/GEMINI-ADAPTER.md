@@ -94,9 +94,13 @@ runtime is introduced.
 `gemini_timing` logs contain only provider/model, dispatch timestamp, outcome, and
 milliseconds to first provider content, first public content event, and completion,
 plus integer `search_queries`, `url_retrievals`, and `url_failures` counts.
-Absent content stays null; cancellation also logs its outcome. No prompts, tool
-arguments/results, search queries, URLs, state, signatures, or keys enter these
-timing records.
+Absent content stays null. A failed call adds `error` with only the exception
+class and HTTP status. Cancellation also logs its outcome, including a client
+disconnect, which Starlette delivers through an anyio cancel scope that also
+interrupts the generator's cleanup; the dispatch task therefore logs its own
+record when it finishes. No prompts, tool arguments/results, provider error
+messages, search queries, URLs, state, signatures, or keys enter these timing
+records.
 These records use a dedicated metadata-only stderr handler, installed once at
 startup, so a quiet upstream root logger cannot suppress them. Other loggers are
 unchanged.
@@ -172,6 +176,16 @@ signature", while the same turn without them replays correctly (both verified
 live on Carbon). When a turn reports search queries or URL retrievals, these
 signature-only parts are therefore not sealed. Turns without server-side tool use
 keep them, because a stream-end text signature arrives in the same shape.
+
+In some of these turns Vertex places the step signature on the hidden parts and
+returns the client function call unsigned (seen live on Carbon with four
+searches and an `exec` call). Vertex rejects an unsigned first function call on
+replay, so every retry of the next request failed and Codex ended the turn. On
+replay, the first function call of a sealed model turn that has no signature
+gets Google's documented placeholder (`skip_thought_signature_validator`), the
+same fallback LiteLLM's stock conversion uses for Gemini 3+. This is applied at
+replay rather than sealing, so histories saved before the fix also recover. A
+metadata-only `gemini_signature_placeholder` line records each use.
 
 Histories that contain pre-cutover `ws_shared*` searches are expanded from the
 shared search journal before dispatch, as compaction fallback already does.

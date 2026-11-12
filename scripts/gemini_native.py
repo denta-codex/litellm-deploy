@@ -65,7 +65,7 @@ def feedback_event(renderer, entry):
     if kind == 'model_timing':
         call = value
         started = call['started_at']
-        LOG.info('gemini_timing %s', json.dumps({
+        timing = {
             'provider': call['origin'][0], 'model': call['origin'][1],
             'dispatch_at': call['dispatch_at'], 'outcome': call['outcome'],
             'first_content_ms': round(1000 * (call['first_content_at'] - started)) if 'first_content_at' in call else None,
@@ -73,7 +73,10 @@ def feedback_event(renderer, entry):
             'completion_ms': round(1000 * (call['completed_at'] - started)),
             # Counts only: queries and URLs are user content and never logged.
             'search_queries': call.get('search_queries', 0), 'url_retrievals': call.get('url_retrievals', 0),
-            'url_failures': call.get('url_failures', 0)}))
+            'url_failures': call.get('url_failures', 0)}
+        if 'error' in call:
+            timing['error'] = call['error']  # Class and status only; provider messages can quote input.
+        LOG.info('gemini_timing %s', json.dumps(timing))
         return []
     raise ValueError('Unknown Gemini feedback event')
 
@@ -84,6 +87,11 @@ def flush_timings(queue):
         entry = queue.get_nowait()
         if entry[0] == 'model_timing':
             feedback_event(None, entry)
+
+
+def failure(exc):
+    status = getattr(exc, 'status_code', None)
+    return {'type': type(exc).__name__, 'status': status if isinstance(status, int) else None}
 
 
 async def render_execution(renderer, execute, queue):
@@ -113,8 +121,14 @@ async def render_execution(renderer, execute, queue):
     finally:
         task.cancel()
         if pending: pending.cancel()
-        await asyncio.gather(task, *([pending] if pending else []), return_exceptions=True)
-        flush_timings(queue)
+        # A client disconnect arrives through an anyio cancel scope, which
+        # cancels this await again; the dispatch still records its timing
+        # when it finishes cancelling, so log it from the task itself.
+        task.add_done_callback(lambda _: flush_timings(queue))
+        try:
+            await asyncio.gather(task, *([pending] if pending else []), return_exceptions=True)
+        finally:
+            flush_timings(queue)
 
 
 def plain(value):
@@ -527,7 +541,7 @@ def native_messages(messages, model, params, original):
                         if content.get('role') == 'model':
                             parts.extend(content['parts'])
             marker = 'gemini_replay_' + uuid.uuid4().hex
-            replacements[marker] = parts
+            replacements[marker] = sign_first_call(parts, model)
             for offset in range(index, end):
                 shadow[offset]['content'] = marker if offset == index else None
                 shadow[offset].pop('reasoning_content', None)
@@ -545,6 +559,24 @@ def native_messages(messages, model, params, original):
     if replacements:
         raise ValueError('Gemini native model turn was lost during conversion')
     return contents
+
+
+def sign_first_call(parts, model):
+    """Vertex rejects a replayed step whose first functionCall is unsigned.
+
+    In a turn that also ran Google Search, Vertex sometimes signs the step on a
+    hidden server-side part, which cannot be replayed (see vertex_response),
+    and returns the call itself unsigned (seen live on Carbon). Every retry of
+    the next request then fails. Use Google's documented placeholder there,
+    exactly as LiteLLM's stock conversion does for unsigned Gemini 3+ calls.
+    """
+    from litellm.llms.vertex_ai.gemini.vertex_and_google_ai_studio_gemini import VertexGeminiConfig
+    from litellm.litellm_core_utils.prompt_templates.factory import _get_dummy_thought_signature
+    first = next((p for p in parts if 'functionCall' in p or 'function_call' in p), None)
+    if first is None or first.get('thoughtSignature') or not VertexGeminiConfig.is_gemini_3_or_newer(model or ''):
+        return parts
+    LOG.info('gemini_signature_placeholder %s', json.dumps({'model': origin(model or '')[1]}))
+    return [p | {'thoughtSignature': _get_dummy_thought_signature()} if p is first else p for p in parts]
 
 
 def seal_response(response, native, codec, request):
@@ -813,8 +845,8 @@ def install(router=None, codec=None):
                     return response
                 except asyncio.CancelledError:
                     call['outcome'] = 'cancelled'; raise
-                except Exception:
-                    call['outcome'] = 'failed'; raise
+                except Exception as exc:
+                    call['outcome'] = 'failed'; call['error'] = failure(exc); raise
                 finally:
                     call['completed_at'] = time.monotonic()
                     feedback_event(None, ('model_timing', call))
@@ -846,8 +878,8 @@ def install(router=None, codec=None):
                 return response
             except asyncio.CancelledError:
                 call['outcome'] = 'cancelled'; raise
-            except Exception:
-                call['outcome'] = 'failed'; raise
+            except Exception as exc:
+                call['outcome'] = 'failed'; call['error'] = failure(exc); raise
             finally:
                 if raw is not None: await raw.aclose()
                 if wrapper is not None: await wrapper.aclose()

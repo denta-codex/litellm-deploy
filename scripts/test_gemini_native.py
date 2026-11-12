@@ -285,6 +285,57 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]['response']['error']['code'], 'rate_limit_exceeded')
         self.assertFalse(any(e['type'] == 'response.completed' for e in events))
 
+    async def test_disconnect_through_cancel_scope_and_failures_are_logged(self):
+        import anyio
+        self.live_stream = True; self.gate = asyncio.Event()
+        self.parts = [[{'text': 'First'}, {'text': 'Last'}]]
+        data = dict(model=MODEL, input='Hello', stream=True, tools=[], store=False)
+        REQUEST.get()['request'] = data
+        stream = await (await self.integration.route(data, 'aresponses'))
+        with self.assertLogs('gemini_native', level='INFO') as logs:
+            # Starlette cancels a disconnected response through an anyio scope,
+            # which also cancels every later await in the generator's cleanup.
+            with anyio.CancelScope() as scope:
+                async for event in stream:
+                    if event.type == 'response.output_text.delta': scope.cancel()
+            for _ in range(100):
+                if any('gemini_timing' in line for line in logs.output): break
+                await asyncio.sleep(0.01)
+        timing = json.loads(next(l for l in logs.output if 'gemini_timing' in l).partition('gemini_timing ')[2])
+        self.assertEqual(timing['outcome'], 'cancelled')
+        self.assertNotIn('error', timing)
+        self.assertTrue(self.provider_closed)
+        self.requests.clear(); self.parts = []; self.gate = None; self.stream_error = True
+        with self.assertLogs('gemini_native', level='INFO') as logs:
+            events = [e.model_dump(exclude_none=True) async for e in await (await self.integration.route(data, 'aresponses'))]
+        self.assertEqual(events[-1]['type'], 'response.failed')
+        timing = json.loads(next(l for l in logs.output if 'gemini_timing' in l).partition('gemini_timing ')[2])
+        self.assertEqual((timing['outcome'], timing['error']['status']), ('failed', 429))
+        self.assertEqual(set(timing['error']), {'type', 'status'})
+
+    async def test_search_turn_with_unsigned_call_replays_with_placeholder_signature(self):
+        from litellm.litellm_core_utils.prompt_templates.factory import _get_dummy_thought_signature
+        bridge, _ = self.shared_bridge()
+        tools = [{'type': 'web_search', 'external_web_access': True},
+                 {'type': 'custom', 'name': 'exec', 'description': 'Fixture', 'format': {'type': 'text'}}]
+        # Carbon, seen live: the step signature sits on hidden server-side
+        # parts and the client call itself arrives unsigned.
+        call = {'functionCall': {'name': 'exec', 'args': {'input': 'true'}}}
+        self.parts = [[{'thought': True, 'text': 'Checking.'}, {'thoughtSignature': 'server-step'},
+                       {'thoughtSignature': 'server-step-2'}, call], [{'text': 'NEXT'}]]
+        self.metadata = self.grounded()
+        final, _ = await self.response('Research and run', True, tools, bridge=bridge)
+        client = next(i for i in final['output'] if i['type'] == 'custom_tool_call')
+        history = [{'role': 'user', 'content': 'Research and run'}, *final['output'],
+                   {'type': 'custom_tool_call_output', 'call_id': client['call_id'], 'output': 'DONE'}]
+        TOOL_CALLS_CACHE.flush_cache(); self.metadata = None
+        with self.assertLogs('gemini_native', level='INFO') as logs:
+            await self.response(history, True, tools, bridge=bridge)
+        model = [c for c in self.requests[-1]['contents'] if c['role'] == 'model'][0]['parts']
+        self.assertEqual(model, [{'thought': True, 'text': 'Checking.'},
+                                 call | {'thoughtSignature': _get_dummy_thought_signature()}])
+        self.assertTrue(any('gemini_signature_placeholder' in line for line in logs.output))
+
     async def test_native_search_mixed_client_tools_citations_and_replay(self):
         from gemini_native import GeminiResponses
         bridge, _ = self.shared_bridge()
