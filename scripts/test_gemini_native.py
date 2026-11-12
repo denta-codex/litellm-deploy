@@ -332,6 +332,45 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             await self.response(history, streaming, [tool])
             self.assertEqual([c for c in self.requests[-1]['contents'] if c['role'] == 'model'][-1]['parts'], self.parts[2])
 
+    async def test_late_repeated_and_orphan_tool_results_reach_the_provider(self):
+        """Codex can append a background command's result after a newer call."""
+        tools = [{'type': 'custom', 'name': 'exec', 'description': 'Fixture', 'format': {'type': 'text'}},
+                 {'type': 'function', 'name': 'wait', 'description': 'Fixture',
+                  'parameters': {'type': 'object', 'properties': {}}}]
+        call = {'type': 'custom_tool_call', 'call_id': 'call_exec', 'name': 'exec', 'input': 'sleep 30'}
+        first = {'type': 'custom_tool_call_output', 'call_id': 'call_exec', 'output': 'running'}
+        late = {'type': 'custom_tool_call_output', 'call_id': 'call_exec', 'output': 'LATE'}
+        between = {'role': 'user', 'content': 'Also wait'}
+        wait = [{'type': 'function_call', 'call_id': 'call_wait', 'name': 'wait', 'arguments': '{}'},
+                {'type': 'function_call_output', 'call_id': 'call_wait', 'output': 'waited'}]
+        user = {'role': 'user', 'content': 'Run it'}
+        orphan = {'type': 'function_call_output', 'call_id': 'call_missing', 'output': 'ORPHAN'}
+        def responses(contents):
+            return [p['function_response']['name'] for c in contents for p in c['parts'] if 'function_response' in p]
+        for streaming in (False, True):
+            self.requests.clear()
+            await self.response(copy.deepcopy([user, call, first, *wait]), streaming, tools)
+            control = self.requests[-1]['contents']
+            self.assertEqual(responses(control), ['exec', 'wait'])
+            for history in ([user, call, first, *wait, late], [user, call, first, *wait, orphan],
+                            [user, call, between, *wait, late]):
+                self.requests.clear()
+                with self.assertLogs('gemini_native', level='INFO') as logs:
+                    final, _ = await self.response(copy.deepcopy(history), streaming, tools)
+                self.assertEqual(final['status'], 'completed')
+                self.assertEqual(len(self.requests), 1)
+                contents = self.requests[-1]['contents']
+                repairs = [line for line in logs.output if 'gemini_history_repair' in line]
+                self.assertEqual(len(repairs), 1, logs.output)
+                self.assertNotIn('LATE', repairs[0])
+                self.assertNotIn('ORPHAN', json.dumps(contents))
+                if history[2] is between:
+                    # The first result for exec moves directly after its call.
+                    self.assertEqual(responses(contents), ['exec', 'wait'])
+                    self.assertIn('LATE', json.dumps(contents[2]))
+                else:
+                    self.assertEqual(contents, control)
+
     async def test_changed_batch_tampering_and_caller_isolation(self):
         first, _ = await self.response('Hello')
         for mode in ('text', 'id', 'cipher', 'caller', 'missing'):

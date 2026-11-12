@@ -315,6 +315,52 @@ def hydrate_input(source, request, replay_reasoning, original, codec):
     return result
 
 
+def repair_tool_results(messages):
+    """Keep each tool result where Gemini's converter can pair it with its call.
+
+    LiteLLM pairs a result only with the latest assistant tool-call message and
+    raises otherwise. Codex can append a background command's late result after
+    a newer call; that error then repeats on every retry and kills the chat.
+    Move a first result next to its call; drop repeats and results with no call.
+    """
+    from litellm.litellm_core_utils.prompt_templates.factory import THOUGHT_SIGNATURE_SEPARATOR
+    def field(message, key):
+        return message.get(key) if isinstance(message, dict) else getattr(message, key, None)
+    def ident(value):
+        return str(value or '').split(THOUGHT_SIGNATURE_SEPARATOR, 1)[0]
+    owners = {}
+    for index, message in enumerate(messages):
+        if field(message, 'role') == 'assistant':
+            for call in field(message, 'tool_calls') or []:
+                owners.setdefault(ident(field(call, 'id')), index)
+    latest, answered, late, kept = None, set(), {}, []
+    dropped = moved = 0
+    for index, message in enumerate(messages):
+        if field(message, 'role') == 'assistant' and field(message, 'tool_calls'):
+            latest = index
+        if field(message, 'role') != 'tool':
+            kept.append((index, message)); continue
+        call = ident(field(message, 'tool_call_id'))
+        owner = owners.get(call)
+        if call in answered or owner is None or owner > index:
+            dropped += 1; continue
+        answered.add(call)
+        if owner == latest:
+            kept.append((index, message))
+        else:
+            late.setdefault(owner, []).append(message); moved += 1
+    if not dropped and not moved:
+        return messages
+    LOG.info('gemini_history_repair %s', json.dumps({'dropped': dropped, 'moved': moved}))
+    result, pending = [], []
+    for index, message in kept:
+        if pending and field(message, 'role') != 'tool':
+            result.extend(pending); pending = []
+        result.append(message)
+        pending = late.get(index, pending)
+    return result + pending
+
+
 def native_messages(messages, model, params, original):
     """Let LiteLLM resolve user media and tool results, replacing only model parts."""
     if not any((m.get('provider_specific_fields') or {}).get(NATIVE) for m in messages):
@@ -471,7 +517,11 @@ def install(router=None, codec=None):
     patch(Transform, 'transform_responses_api_request_to_chat_completion_request', request_transform, True)
     original_input = Transform.transform_responses_api_input_to_messages
     def input_transform(input, responses_api_request, replay_reasoning=False):
-        return hydrate_input(input, responses_api_request, replay_reasoning, original_input, codec)
+        messages = hydrate_input(input, responses_api_request, replay_reasoning, original_input, codec)
+        target = TARGET.get()
+        if target is None or target[0] == 'foreign':
+            return messages
+        return repair_tool_results(messages)
     patch(Transform, 'transform_responses_api_input_to_messages', input_transform, True)
     original_messages = VertexGeminiConfig._transform_messages
     def message_transform(self, messages, model=None, litellm_params=None):
