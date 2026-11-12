@@ -63,6 +63,8 @@ class ResponsesEvents:
             elif item['type'] in ('function_call', 'custom_tool_call'):
                 skeleton['input' if item['type'] == 'custom_tool_call' else 'arguments'] = ''
                 skeleton['status'] = 'in_progress'
+            elif item['type'] == 'web_search_call':
+                skeleton['status'] = 'in_progress'
             yield self.event('response.output_item.added', output_index=self.indexes[item_id], item=skeleton)
 
     def delta(self, item_id, kind, text):
@@ -87,6 +89,9 @@ class ResponsesEvents:
                          **fields, delta=text)
 
     def finish_item(self, item):
+        # Shared search starts its calls mid-stream and emits their lifecycle
+        # itself; items first seen at completion get the full typed sequence.
+        fresh = item['id'] not in self.started
         yield from self.start(item)
         item_id, kind = item['id'], item['type']
         index = self.indexes[item_id]
@@ -120,6 +125,12 @@ class ResponsesEvents:
             prefix = 'response.custom_tool_call_input' if custom else 'response.function_call_arguments'
             yield self.event(prefix + '.delta', output_index=index, item_id=item_id, delta=item.get(field, ''))
             yield self.event(prefix + '.done', output_index=index, item_id=item_id, **{field: item.get(field, '')})
+        elif kind == 'web_search_call' and fresh:
+            fields = {'item_id': item_id, 'output_index': index}
+            yield self.event('response.web_search_call.in_progress', **fields)
+            yield self.event('response.web_search_call.searching', **fields)
+            if item.get('status') == 'completed':
+                yield self.event('response.web_search_call.completed', **fields)
         yield self.event('response.output_item.done', output_index=index, item=item)
 
     def complete(self, response):

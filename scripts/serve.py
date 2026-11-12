@@ -18,14 +18,16 @@ def main():
     install_claude(app)
     from chat_native import install as install_chat_native
     install_chat_native()
+    # Each install wraps the current dispatch, so later installs are outer.
+    # Gemini wraps shared search to claim hosted search for its own routes.
+    from shared_search import install as install_search
+    install_search()
     from gemini_native import install as install_gemini
     install_gemini()
     # Temporary subscription signaling adapter; retirement steps: docs/VOICE.md.
     if os.environ.get('LITELLM_VOICE_ENABLED') == 'true':
         from live_voice import install as install_voice
         install_voice(app)
-    from shared_search import install as install_search
-    install_search()
     from compaction_fallback import install as install_compaction
     install_compaction()
     from litellm.proxy.proxy_cli import run_server

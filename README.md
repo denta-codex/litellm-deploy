@@ -600,6 +600,8 @@ LiteLLM's `WebSearchInterceptionLogger`. LiteLLM's agentic loop performs the mod
 continuations. The extension supplies a subscription-backed search helper,
 preserves mixed client and search tool batches, and emits standard Responses
 search events to stock Codex. Native ChatGPT search keeps its own path.
+Vertex Gemini routes also keep their own path: they use Google Search and URL
+Context natively and never call the helper (see `docs/GEMINI-ADAPTER.md`).
 
 **Helper model.** The helper is `chatgpt/gpt-6-luna` at low effort. Set
 `SHARED_SEARCH_MODEL` to choose another configured ChatGPT route. ChatGPT
@@ -649,7 +651,8 @@ uv run --no-sync scripts/verify_shared_search.py --isolated --all-efforts
 ```
 
 Configured models opt in by listing `verify_shared_search.py` among their
-validators and by advertising search in their `codex` block.
+validators and by advertising search in their `codex` block. The validator checks
+what Codex sees, so on Gemini routes it exercises native search.
 
 ## Provider notes
 

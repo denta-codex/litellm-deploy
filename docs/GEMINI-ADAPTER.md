@@ -2,7 +2,8 @@
 
 The repository-owned adapter targets LiteLLM 1.106.5 and Vertex Gemini routes.
 Codex remains the sole client-tool executor and approval authority. This does
-not introduce an Antigravity agent or change the shared-search backend.
+not introduce an Antigravity agent or change the shared-search backend; Gemini
+routes search with Vertex's own Google Search and URL Context instead.
 
 ## Native state contract
 
@@ -66,11 +67,9 @@ an OpenAI caching hint that Vertex does not implement, as existing routes do.
 
 For streamed Gemini requests, the adapter consumes Vertex's real provider SSE
 stream, captures every native part (including signature-only chunks), and relays
-available text/marked summaries into the existing presentation queue. LiteLLM's
-agentic search engine still receives a complete Chat response per iteration.
-Internal search arguments are never streamed as client tool calls. Hosted search
-items come from the existing search interceptor; client calls wait for their
-complete assistant batch. The backend and search execution loop are unchanged.
+available text/marked summaries into the existing presentation queue. LiteLLM
+still receives one complete Chat response per request. Client calls wait for
+their complete assistant batch; search items follow it (see Native search).
 
 Only native parts marked `thought: true` can become visible Gemini summaries.
 They use reasoning-summary events; message items alone use answer-text events.
@@ -93,9 +92,11 @@ and remain readable. No cache migration, search-history wipe, or compatibility
 runtime is introduced.
 
 `gemini_timing` logs contain only provider/model, dispatch timestamp, outcome, and
-milliseconds to first provider content, first public content event, and completion.
+milliseconds to first provider content, first public content event, and completion,
+plus integer `search_queries`, `url_retrievals`, and `url_failures` counts.
 Absent content stays null; cancellation also logs its outcome. No prompts, tool
-arguments/results, state, signatures, or keys enter these timing records.
+arguments/results, search queries, URLs, state, signatures, or keys enter these
+timing records.
 These records use a dedicated metadata-only stderr handler, installed once at
 startup, so a quiet upstream root logger cannot suppress them. Other loggers are
 unchanged.
@@ -112,10 +113,61 @@ Each repair logs one `gemini_history_repair` record with integer `dropped` and
 
 Shared search logs `search_request` (short request hash, model, stream flag, and
 how many identical requests were already queued) and `search_dispatch` (lock wait
-in milliseconds) for every hosted-search turn, also metadata only. Identical
+in milliseconds) for every hosted-search turn on other providers, also metadata
+only. Gemini routes never reach that lock. Identical
 concurrent requests deliberately wait to share one result; the proxy's
 `cancel_on_disconnect` setting cancels an abandoned JSON request so it cannot hold
 that lock after its client gives up.
+
+## Native search
+
+`serve.py` installs `GeminiResponses` outside `SearchResponses`. For managed
+Vertex Gemini routes it claims the hosted `web_search`/`web_search_preview`
+declaration, removes it before shared search sees the request, and adds Vertex
+built-in tools to the provider request. `shared_search.py` is unchanged and still
+serves every other provider.
+
+| Codex declaration | Vertex tools |
+| --- | --- |
+| `web_search` (live, the default) | `googleSearch` and `url_context` |
+| `external_web_access: false` (cached) | `googleSearch` only, so no arbitrary page fetches |
+| none, or `tool_choice: none` (includes compaction) | none |
+
+At most one declaration is accepted, with the standard keys `type`,
+`external_web_access`, `search_content_types`, `search_context_size`, and
+`user_location`. Domain `filters`, unknown keys, and a `tool_choice` that forces
+hosted search return HTTP 400, because Google Search cannot enforce them. The
+response echoes the caller's original `tools`.
+
+Built-in tools are combined with Codex's function tools through
+`toolConfig.includeServerSideToolInvocations`. Without that flag LiteLLM drops the
+built-ins whenever function tools are present. A live Carbon probe verified the
+combination with the flag; it is deliberately kept on the wire.
+
+Results come only from Vertex metadata the model actually produced:
+
+- Each distinct `webSearchQueries` entry becomes a completed `web_search_call`
+  with a `search` action. Sources (Vertex's `vertexaisearch` redirect URLs) are
+  listed once, on the first call, because Vertex does not attribute them to a query.
+- Each `urlContextMetadata.urlMetadata` entry becomes an `open_page` call:
+  `completed` on `URL_RETRIEVAL_STATUS_SUCCESS`, otherwise `failed`.
+- `groundingSupports` become `url_citation` annotations. Vertex reports UTF-8
+  byte offsets within one part and omits zero `startIndex`/`partIndex`; these are
+  converted to character offsets, and the segment's quoted text wins when
+  re-chunked streaming makes the offsets disagree. They replace LiteLLM's own
+  byte-offset annotations.
+
+Streaming merges grounding and URL Context metadata across SSE chunks, so a
+trailing finish chunk cannot erase earlier queries. Search items are published
+after the answer/tool batch and before the state carrier, with the typed
+`response.web_search_call.*` lifecycle. The carrier stays `version: 1` and records
+their IDs in `search_ids`. Same-model replay skips those items, because the
+sealed parts already hold the signed turn; LiteLLM would otherwise add a
+"Hosted web search: ..." assistant message. Model switches, compaction fallback,
+and rollback keep them as readable history.
+
+Histories that contain pre-cutover `ws_shared*` searches are expanded from the
+shared search journal before dispatch, as compaction fallback already does.
 
 ## Acceptance and rollout
 
@@ -138,12 +190,16 @@ ordinary/custom and parallel/sequential tools, cache flushes, key reuse, content
 binding, caller isolation, a newly spawned process, and model switching. Streaming
 tests gate provider completion to prove that the first available summary **or text**
 arrives earlier, both directly and with hosted search declared but unused. They
-also cover signature-only chunks, actual/mixed search, citations, cancellation,
+also cover signature-only chunks, native search with and without client tools,
+live/cached/none modes and rejected settings, split streamed metadata, UTF-8
+citations, failed URL retrieval, pre-cutover search history, cancellation,
 terminal quota errors, late/suppressed summaries, and completed-output equality.
+A failing shared-search backend proves Gemini never calls the helper.
 The stock Codex test checks a synthetic Code Mode tool, exact-session resume after
-adapter/cache reinitialization, and forced compaction through the real shared-search
-and compaction wrappers. It asserts no inactive-item error, no summary in the final
-answer, and no discarded signature/tool result in the rewritten checkpoint.
+adapter/cache reinitialization, mocked native search items, and forced compaction
+through the real compaction, Gemini, and shared-search wrappers in production
+order. It asserts no inactive-item error, no summary in the final answer, and no
+discarded signature/tool result in the rewritten checkpoint.
 Offline stock-Codex acceptance passed with version 0.166.0.
 The retained research probe describes the original
 unadapted bridge; it is not a runtime acceptance test.

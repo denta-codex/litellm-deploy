@@ -30,6 +30,11 @@ MAX_STATE_BYTES = 16 * 1024 * 1024
 TARGET = ContextVar('gemini_target', default=None)
 CALL = ContextVar('gemini_call', default=None)
 FEEDBACK = ContextVar('gemini_feedback', default=None)
+# Hosted search mode for one managed Responses request: live, cached or none.
+# None means the request did not come through GeminiResponses; leave it stock.
+SEARCH = ContextVar('gemini_search', default=None)
+HOSTED = ('web_search', 'web_search_preview')
+SEARCH_SETTINGS = {'type', 'external_web_access', 'search_content_types', 'search_context_size', 'user_location'}
 LOG = logging.getLogger('gemini_native')
 INSTALLED = None
 
@@ -65,7 +70,10 @@ def feedback_event(renderer, entry):
             'dispatch_at': call['dispatch_at'], 'outcome': call['outcome'],
             'first_content_ms': round(1000 * (call['first_content_at'] - started)) if 'first_content_at' in call else None,
             'first_public_ms': round(1000 * (call['first_public_at'] - started)) if 'first_public_at' in call else None,
-            'completion_ms': round(1000 * (call['completed_at'] - started))}))
+            'completion_ms': round(1000 * (call['completed_at'] - started)),
+            # Counts only: queries and URLs are user content and never logged.
+            'search_queries': call.get('search_queries', 0), 'url_retrievals': call.get('url_retrievals', 0),
+            'url_failures': call.get('url_failures', 0)}))
         return []
     raise ValueError('Unknown Gemini feedback event')
 
@@ -207,6 +215,132 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
+def search_mode(data):
+    """Validate a hosted search declaration Gemini can honor with Google Search."""
+    hosted = [t for t in data.get('tools') or [] if t.get('type') in HOSTED]
+    choice = data.get('tool_choice')
+    if len(hosted) > 1:
+        raise NativeStateError('Only one hosted search declaration is supported')
+    if isinstance(choice, dict) and choice.get('type') in HOSTED:
+        raise NativeStateError('Gemini cannot force a hosted search call; use tool_choice auto')
+    if not hosted:
+        return 'none'
+    if 'filters' in hosted[0]:
+        raise NativeStateError('Gemini Google Search cannot enforce hosted search domain filters')
+    unknown = set(hosted[0]) - SEARCH_SETTINGS
+    if unknown:
+        raise NativeStateError('Unsupported hosted search settings: ' + ', '.join(sorted(unknown)))
+    if choice == 'none' or (isinstance(choice, dict) and choice.get('type') == 'none'):
+        return 'none'
+    # Cached search must not fetch arbitrary live pages, so it omits URL Context.
+    return 'cached' if hosted[0].get('external_web_access') is False else 'live'
+
+
+def merge_grounding(target, value):
+    """Streamed candidates may split or repeat grounding; keep one consistent copy."""
+    for value in value if isinstance(value, list) else [value]:
+        chunks = target.setdefault('groundingChunks', [])
+        keys = [json.dumps(c, sort_keys=True) for c in chunks]
+        local = []
+        for chunk in value.get('groundingChunks') or []:
+            key = json.dumps(chunk, sort_keys=True)
+            if key not in keys:
+                keys.append(key); chunks.append(copy.deepcopy(chunk))
+            local.append(keys.index(key))
+        supports = target.setdefault('groundingSupports', [])
+        for support in value.get('groundingSupports') or []:
+            support = copy.deepcopy(support)
+            if local:  # Indices refer to this message's own chunk list.
+                support['groundingChunkIndices'] = [local[i] for i in support.get('groundingChunkIndices') or []
+                                                    if isinstance(i, int) and 0 <= i < len(local)]
+            if support not in supports:
+                supports.append(support)
+        queries = target.setdefault('webSearchQueries', [])
+        queries.extend(q for q in value.get('webSearchQueries') or [] if q not in queries)
+        for key, item in value.items():
+            if key not in ('groundingChunks', 'groundingSupports', 'webSearchQueries'):
+                target[key] = copy.deepcopy(item)
+    return target
+
+
+def merge_url_context(target, value):
+    entries = target.setdefault('urlMetadata', [])
+    for value in value if isinstance(value, list) else [value]:
+        for entry in value.get('urlMetadata') or []:
+            known = next((e for e in entries if e.get('retrievedUrl') == entry.get('retrievedUrl')), None)
+            if known is None:
+                entries.append(copy.deepcopy(entry))
+            else:
+                known.update(copy.deepcopy(entry))
+        for key, item in value.items():
+            if key != 'urlMetadata':
+                target[key] = copy.deepcopy(item)
+    return target
+
+
+def cite_grounding(text, parts, grounding):
+    """Map Vertex segments to Responses character offsets in the answer text.
+
+    Vertex reports UTF-8 byte offsets within one part and omits zero-valued
+    startIndex/partIndex. Streaming re-chunks parts, so the quoted segment text
+    is authoritative whenever the offsets disagree with it.
+    """
+    chunks = grounding.get('groundingChunks') or []
+    starts, position = {}, 0
+    for index, part in enumerate(parts):
+        if isinstance(part.get('text'), str) and part.get('thought') is not True:
+            starts[index] = position; position += len(part['text'])
+    annotations = []
+    for support in grounding.get('groundingSupports') or []:
+        segment = support.get('segment') or {}
+        quote, span = segment.get('text'), None
+        index = segment.get('partIndex', 0)
+        if index in starts:
+            raw = parts[index]['text'].encode()
+            first, last = segment.get('startIndex', 0), segment.get('endIndex')
+            if isinstance(first, int) and isinstance(last, int) and 0 <= first <= last <= len(raw):
+                try:
+                    span = (starts[index] + len(raw[:first].decode()), starts[index] + len(raw[:last].decode()))
+                except UnicodeDecodeError:
+                    span = None
+        if span is None or (quote and text[span[0]:span[1]] != quote):
+            found = text.find(quote) if quote else -1
+            span = (found, found + len(quote)) if found >= 0 else None
+        if span is None:
+            continue
+        for chunk in support.get('groundingChunkIndices') or []:
+            web = (chunks[chunk].get('web') or {}) if isinstance(chunk, int) and 0 <= chunk < len(chunks) else {}
+            if web.get('uri'):
+                annotations.append({'type': 'url_citation', 'url': web['uri'],
+                                    'title': web.get('title') or web.get('domain') or web['uri'],
+                                    'start_index': span[0], 'end_index': span[1]})
+    return annotations
+
+
+def search_items(native):
+    """Public web_search_call items, only for searches Vertex confirmed."""
+    grounding, context = native.get('grounding') or {}, native.get('url_context') or {}
+    sources = []
+    for chunk in grounding.get('groundingChunks') or []:
+        uri = (chunk.get('web') or {}).get('uri')
+        if uri and all(s['url'] != uri for s in sources):
+            sources.append({'type': 'url', 'url': uri})
+    items = []
+    for query in dict.fromkeys(q for q in grounding.get('webSearchQueries') or [] if isinstance(q, str) and q):
+        action = {'type': 'search', 'query': query, 'queries': [query]}
+        if not items and sources:
+            # Vertex does not attribute chunks to queries; list them once.
+            action['sources'] = sources
+        items.append({'type': 'web_search_call', 'id': 'ws_' + uuid.uuid4().hex, 'status': 'completed', 'action': action})
+    for entry in context.get('urlMetadata') or []:
+        if entry.get('retrievedUrl'):
+            ok = entry.get('urlRetrievalStatus') == 'URL_RETRIEVAL_STATUS_SUCCESS'
+            items.append({'type': 'web_search_call', 'id': 'ws_' + uuid.uuid4().hex,
+                          'status': 'completed' if ok else 'failed',
+                          'action': {'type': 'open_page', 'url': entry['retrievedUrl']}})
+    return items
+
+
 class StateCodec:
     def __init__(self, path=None):
         self.path = Path(path) if path else key_path()
@@ -281,6 +415,10 @@ def hydrate_input(source, request, replay_reasoning, original, codec):
             raise NativeStateError('Gemini native assistant batch was duplicated')
         batches[positions[0]] = (positions, public, value)
         skip.update(positions)
+        # Native search items are display history; the sealed parts already
+        # hold the signed model turn. Stock conversion would add assistant text.
+        for sid in value.get('search_ids', []):
+            skip.update(ids.get(sid, []))
     result = original([], request, replay_reasoning)
     seen_calls = set()
     def append(messages):
@@ -423,12 +561,20 @@ def seal_response(response, native, codec, request):
         item.pop('provider_specific_fields', None)
         if item.get('type') == 'message':
             item['id'] = native['message_id']
+            for part in item.get('content') if isinstance(item.get('content'), list) else []:
+                if part.get('type') == 'output_text':
+                    # Replaces LiteLLM's byte-offset annotations.
+                    part['annotations'] = cite_grounding(part.get('text', ''), native['parts'], native.get('grounding') or {})
     batch = public_batch(output)
+    searches = search_items(native)
+    # After the published batch: grounding metadata arrives with the last chunk.
+    output.extend(searches)
     if batch:
         carrier_id = native['carrier_id']
         payload = {'version': 1, 'origin': native['origin'], 'parts': native['parts'],
                    'carrier_id': carrier_id, 'batch_ids': [i['id'] for i in batch],
-                   'batch_hash': digest(batch), 'reasoning_ids': [i['id'] for i in output if i['type'] == 'reasoning']}
+                   'batch_hash': digest(batch), 'reasoning_ids': [i['id'] for i in output if i['type'] == 'reasoning'],
+                   'search_ids': [i['id'] for i in searches]}
         output.append({'type': 'reasoning', 'id': carrier_id, 'summary': [],
                        'encrypted_content': codec.seal(payload, caller())})
     from litellm.types.llms.openai import ResponsesAPIResponse
@@ -437,9 +583,13 @@ def seal_response(response, native, codec, request):
 
 
 class GeminiResponses:
-    """Authenticated dispatch facade, using the same boundary as shared search."""
-    def __init__(self, dispatch, router=None):
-        self.dispatch, self.router = dispatch, router
+    """Authenticated dispatch facade, installed outside shared search.
+
+    Managed Gemini routes claim hosted search here and run Google Search and
+    URL Context natively, so the shared search helper never sees them.
+    """
+    def __init__(self, dispatch, router=None, journal=None):
+        self.dispatch, self.router, self.journal = dispatch, router, journal
 
     def managed(self, model):
         router = self.router
@@ -449,6 +599,22 @@ class GeminiResponses:
         return any(is_gemini((d.get('litellm_params') or {}).get('model', ''),
                              (d.get('litellm_params') or {}).get('custom_llm_provider') or
                              (d.get('litellm_params') or {}).get('model', '').partition('/')[0]) for d in deployments)
+
+    def claim_search(self, data):
+        mode = search_mode(data)
+        routed = copy.deepcopy(data)
+        if routed.get('tools'):
+            routed['tools'] = [t for t in routed['tools'] if t.get('type') not in HOSTED]
+        source = routed.get('input')
+        if isinstance(source, list) and any(i.get('type') == 'web_search_call' and
+                                            str(i.get('id', '')).startswith('ws_shared') for i in source):
+            # Searches made through the shared helper before Gemini owned search.
+            journal = self.journal
+            if journal is None:
+                from shared_search import SearchJournal
+                journal = SearchJournal()
+            routed['input'] = journal.expand(caller(), source)
+        return routed, mode
 
     async def route(self, data, route_type, **kwargs):
         if route_type != 'aresponses':
@@ -467,13 +633,24 @@ class GeminiResponses:
             raise BadRequestError(message='Previous response not found; send self-contained history',
                                   model=data['model'], llm_provider='vertex_ai',
                                   code='previous_response_not_found')
-        if data.get('stream') or FEEDBACK.get() is not None:
+        routed, mode = self.claim_search(data)
+        if routed.get('stream') or FEEDBACK.get() is not None:
             # A provider retry could replace an already-published batch. Fail
             # the stream terminally; an explicit client retry is a new request.
-            data = data | {'num_retries': 0, 'max_fallbacks': 0, 'disable_fallbacks': True}
-        if not data.get('stream'):
-            return await self.dispatch(data=data, route_type=route_type, **kwargs)
-        routed = copy.deepcopy(data); routed['stream'] = False
+            routed |= {'num_retries': 0, 'max_fallbacks': 0, 'disable_fallbacks': True}
+        async def searched():
+            token = SEARCH.set(mode)
+            try:
+                call = await self.dispatch(data=routed, route_type=route_type, **kwargs)
+                response = await call
+            finally:
+                SEARCH.reset(token)
+            if 'tools' in data and hasattr(response, 'tools'):
+                response.tools = copy.deepcopy(data['tools'])  # Echo the caller's declarations.
+            return response
+        if not routed.get('stream'):
+            return searched()
+        routed['stream'] = False
         async def run():
             from responses_events import ResponsesEvents
             events = ResponsesEvents(data['model'])
@@ -481,8 +658,7 @@ class GeminiResponses:
             async def execute():
                 token = FEEDBACK.set(queue)
                 try:
-                    call = await self.dispatch(data=routed, route_type=route_type, **kwargs)
-                    return await call
+                    return await searched()
                 finally:
                     FEEDBACK.reset(token)
             return render_execution(events, execute, queue)
@@ -528,6 +704,23 @@ def install(router=None, codec=None):
         return native_messages(messages, model, litellm_params,
                                lambda m, n, p: original_messages(self, m, n, p))
     patch(VertexGeminiConfig, '_transform_messages', message_transform)
+    original_map = VertexGeminiConfig.map_openai_params
+    def map_params(self, non_default_params, optional_params, model, drop_params):
+        result = original_map(self, non_default_params, optional_params, model, drop_params)
+        mode = SEARCH.get()
+        if mode in ('live', 'cached') and type(self) is VertexGeminiConfig and is_gemini(model, 'vertex_ai'):
+            tools = list(result.get('tools') or [])
+            present = {k for t in tools if isinstance(t, dict) for k in t}
+            if not present & {'googleSearch', 'google_search'}:
+                tools.append({'googleSearch': {}})
+            if mode == 'live' and not present & {'url_context', 'urlContext'}:
+                tools.append({'url_context': {}})
+            result['tools'] = tools
+            # Gemini combines built-in and client function tools only with
+            # this flag (verified on Vertex); LiteLLM would otherwise drop them.
+            result['include_server_side_tool_invocations'] = True
+        return result
+    patch(VertexGeminiConfig, 'map_openai_params', map_params)
     original_vertex = VertexGeminiConfig.transform_response
     def vertex_response(self, *args, **kwargs):
         response = original_vertex(self, *args, **kwargs)
@@ -536,6 +729,13 @@ def install(router=None, codec=None):
             candidates = kwargs['raw_response'].json().get('candidates', [])
             if candidates:
                 call['parts'] = copy.deepcopy(candidates[0].get('content', {}).get('parts', []))
+                grounding = merge_grounding({}, candidates[0].get('groundingMetadata') or {})
+                context = merge_url_context({}, candidates[0].get('urlContextMetadata') or {})
+                call.update(grounding=grounding, url_context=context,
+                            search_queries=len(set(grounding['webSearchQueries'])),
+                            url_retrievals=len(context['urlMetadata']),
+                            url_failures=sum(e.get('urlRetrievalStatus') != 'URL_RETRIEVAL_STATUS_SUCCESS'
+                                             for e in context['urlMetadata']))
                 # The pinned adapter also embeds signatures in call IDs and
                 # tool-cache entries. New Responses history must have only one
                 # state transport: the caller/model-bound sealed carrier.
@@ -548,7 +748,8 @@ def install(router=None, codec=None):
                     fields = getattr(tool.function, 'provider_specific_fields', None)
                     if fields:
                         tool.function.provider_specific_fields = {k: v for k, v in fields.items() if k != 'thought_signature'}
-                native = {k: call[k] for k in ('origin', 'parts', 'message_id', 'reasoning_id', 'carrier_id')}
+                native = {k: call[k] for k in ('origin', 'parts', 'message_id', 'reasoning_id', 'carrier_id',
+                                               'grounding', 'url_context')}
                 response.choices[0].message.provider_specific_fields = (
                     plain(response.choices[0].message).get('provider_specific_fields', {}) | {NATIVE: native})
         return response
@@ -565,7 +766,10 @@ def install(router=None, codec=None):
                 if candidate.get('index', 0) != 0: continue
                 target = aggregate['candidates'][0]
                 for key, value in candidate.items():
-                    if key != 'content': target[key] = copy.deepcopy(value)
+                    # A trailing finish chunk must not erase earlier grounding.
+                    if key == 'groundingMetadata': merge_grounding(target.setdefault(key, {}), value)
+                    elif key == 'urlContextMetadata': merge_url_context(target.setdefault(key, {}), value)
+                    elif key != 'content': target[key] = copy.deepcopy(value)
                 for part in candidate.get('content', {}).get('parts', []):
                     target['content']['parts'].append(copy.deepcopy(part))
                     call['received_bytes'] += len(json.dumps(part).encode())

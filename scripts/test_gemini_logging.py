@@ -40,4 +40,5 @@ feedback_event(None, ('model_timing', {
             'provider': 'vertex_ai', 'model': 'gemini-fixture', 'dispatch_at': 1000,
             'outcome': 'completed', 'first_content_ms': 1000,
             'first_public_ms': 2000, 'completion_ms': 3000,
+            'search_queries': 0, 'url_retrievals': 0, 'url_failures': 0,
         })

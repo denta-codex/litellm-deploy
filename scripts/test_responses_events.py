@@ -88,5 +88,24 @@ class EventsTests(unittest.TestCase):
         self.assertTrue(all(e.get('item_id', final_id) == final_id for e in events))
         self.assertEqual([e['content_index'] for e in events if e['type'] == 'response.output_text.delta'], [0, 1])
 
+    def test_completed_search_items_get_typed_lifecycle_once(self):
+        searches = [{'id': 'ws_done', 'type': 'web_search_call', 'status': 'completed',
+                     'action': {'type': 'search', 'query': 'fixture', 'queries': ['fixture']}},
+                    {'id': 'ws_failed', 'type': 'web_search_call', 'status': 'failed',
+                     'action': {'type': 'open_page', 'url': 'https://example.com/missing'}}]
+        renderer = ResponsesEvents('fixture')
+        events = plain(renderer.complete({'status': 'completed', 'output': [message(), *searches]}))
+        lifecycle = [(e['item_id'], e['type'].rpartition('.')[2]) for e in events if e['type'].startswith('response.web_search_call.')]
+        self.assertEqual(lifecycle, [('ws_done', 'in_progress'), ('ws_done', 'searching'), ('ws_done', 'completed'),
+                                     ('ws_failed', 'in_progress'), ('ws_failed', 'searching')])
+        added = [e['item'] for e in events if e['type'] == 'response.output_item.added' and e['item']['type'] == 'web_search_call']
+        self.assertEqual([i['status'] for i in added], ['in_progress', 'in_progress'])
+        self.assertEqual(events[-1]['response']['output'][1:], searches)
+        # Shared search starts and finishes its calls mid-stream; never repeat them.
+        renderer = ResponsesEvents('fixture')
+        list(renderer.start({'id': 'ws_done', 'type': 'web_search_call', 'status': 'in_progress'}))
+        events = plain(renderer.complete({'status': 'completed', 'output': searches[:1]}))
+        self.assertFalse(any(e['type'].startswith('response.web_search_call.') for e in events))
+
 
 if __name__ == '__main__': unittest.main()

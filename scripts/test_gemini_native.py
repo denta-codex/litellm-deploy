@@ -41,8 +41,14 @@ class FixtureStream(httpx.AsyncByteStream):
 
     async def __aiter__(self):
         try:
+            grounding = (self.owner.metadata or {}).get('groundingMetadata') or {}
             for index, part in enumerate(self.parts):
                 value = {'candidates': [{'index': 0, 'content': {'role': 'model', 'parts': [part]}}]}
+                if grounding and index == len(self.parts) - 1:
+                    # Queries and chunks arrive early; the finish chunk carries
+                    # only the rest and must not erase them.
+                    value['candidates'][0]['groundingMetadata'] = {
+                        k: grounding[k] for k in ('webSearchQueries', 'groundingChunks') if k in grounding}
                 yield ('data: ' + json.dumps(value) + '\n\n').encode()
                 if index == 0 and self.owner.gate is not None:
                     await self.owner.gate.wait()
@@ -50,7 +56,11 @@ class FixtureStream(httpx.AsyncByteStream):
                 yield ('data: ' + json.dumps({'error': {'code': 429, 'status': 'RESOURCE_EXHAUSTED',
                                                         'message': 'Synthetic quota failure'}}) + '\n\n').encode()
                 return
-            value = {'candidates': [{'index': 0, 'finishReason': 'STOP'}],
+            final = {'index': 0, 'finishReason': 'STOP'}
+            for key, item in (self.owner.metadata or {}).items():
+                final[key] = ({k: v for k, v in item.items() if k not in ('webSearchQueries', 'groundingChunks')}
+                              if key == 'groundingMetadata' else item)
+            value = {'candidates': [final],
                      'usageMetadata': {'promptTokenCount': 10, 'candidatesTokenCount': 5, 'thoughtsTokenCount': 3, 'totalTokenCount': 18},
                      'modelVersion': 'gemini-4-carbon'}
             self.owner.provider_completed = True
@@ -129,6 +139,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.requests, self.responses, self.parts = [], [], []
         self.live_stream = False
         self.fixture_factory = None
+        self.metadata = None  # Candidate-level grounding/URL Context fixture.
         self.gate = None
         self.provider_completed = self.provider_closed = self.stream_error = False
         self.token = REQUEST.set({'caller': 'fixture-owner', 'headers': {'thread-id': 'fixture'}, 'request': {}})
@@ -169,6 +180,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         value = {'candidates': [{'content': {'role': 'model', 'parts': parts}, 'finishReason': 'STOP', 'index': 0}],
                  'usageMetadata': {'promptTokenCount': 10, 'candidatesTokenCount': 5, 'thoughtsTokenCount': 3, 'totalTokenCount': 18},
                  'modelVersion': 'gemini-4-carbon'}
+        value['candidates'][0].update(copy.deepcopy(self.metadata or {}))
         if 'streamGenerateContent' in str(request.url):
             if self.live_stream:
                 return httpx.Response(200, headers={'Content-Type': 'text/event-stream'}, stream=FixtureStream(parts, self))
@@ -189,17 +201,32 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         return final, events
 
     def shared_bridge(self):
-        from shared_search import SearchResponses, SearchJournal, SharedSearchInterceptor, SearchResult
+        """Production order: GeminiResponses wraps SearchResponses."""
+        from shared_search import SearchResponses, SearchJournal, SharedSearchInterceptor
         class Backend:
-            def __init__(self): self.queries = []
             async def search(self, query, settings):
-                self.queries.append(query)
-                return SearchResult('BLUE', [{'title': 'Fixture', 'url': 'https://example.com/fact'}])
+                raise AssertionError('Gemini routes must not use the shared search helper')
         interceptor = SharedSearchInterceptor()
         litellm.callbacks = [interceptor]
-        backend = Backend()
-        return SearchResponses(self.integration.route, interceptor, backend,
-                               SearchJournal(Path(self.directory.name) / 'search'), self.router), backend
+        journal = SearchJournal(Path(self.directory.name) / 'search')
+        search = SearchResponses(self.integration.dispatch, interceptor, Backend(), journal, self.router)
+        self.integration.dispatch, self.integration.journal = search.route, journal
+        return self.integration, journal
+
+    @staticmethod
+    def grounded():
+        """Vertex-shaped metadata: UTF-8 byte offsets, zero values omitted."""
+        return {'groundingMetadata': {
+                    'webSearchQueries': ['fixture fact', 'fixture fact'],
+                    'groundingChunks': [{'web': {'uri': 'https://vertexaisearch.example/a', 'title': 'example.com', 'domain': 'example.com'}},
+                                        {'web': {'uri': 'https://vertexaisearch.example/b', 'title': 'other.org'}}],
+                    'groundingSupports': [{'segment': {'partIndex': 1, 'endIndex': 12, 'text': 'Café facts.'}, 'groundingChunkIndices': [0]},
+                                          {'segment': {'partIndex': 2, 'startIndex': 5, 'endIndex': 19, 'text': 'is the answer.'},
+                                           'groundingChunkIndices': [0, 1]}],
+                    'searchEntryPoint': {'renderedContent': '<div>fixture</div>'}},
+                'urlContextMetadata': {'urlMetadata': [
+                    {'retrievedUrl': 'https://example.com/page', 'urlRetrievalStatus': 'URL_RETRIEVAL_STATUS_SUCCESS'},
+                    {'retrievedUrl': 'https://example.com/missing', 'urlRetrievalStatus': 'URL_RETRIEVAL_STATUS_ERROR'}]}}
 
     async def test_delayed_summaries_and_signature_only_chunks_direct_and_hosted_unused(self):
         for hosted, summary_first in ((False, True), (True, True), (False, False), (True, False)):
@@ -209,7 +236,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
                       {'text': 'TURE_OK'}, {'thoughtSignature': SIGNATURE}]
             if not summary_first: signed = [signed[1], signed[2], signed[0], signed[3]]
             self.parts = [signed, [{'text': 'NEXT'}]]
-            bridge, backend = self.shared_bridge() if hosted else (self.integration, None)
+            bridge = self.shared_bridge()[0] if hosted else self.integration
             tools = [{'type': 'web_search'}] if hosted else []
             data = dict(model=MODEL, input=f'Hello; summary_first={summary_first}', tools=tools, stream=True,
                         reasoning={'effort': 'medium', 'summary': 'auto'}, store=False)
@@ -230,10 +257,11 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(final['output'], [e['item'] for e in events if e['type'] == 'response.output_item.done'])
             carrier = next(i for i in final['output'] if str(i.get('encrypted_content', '')).startswith(PREFIX))
             self.assertEqual(self.codec.open(carrier['encrypted_content'], 'fixture-owner')['parts'], signed)
+            self.assertFalse(any(i['type'] == 'web_search_call' for i in final['output']))
+            self.assertEqual({'googleSearch': {}} in self.requests[-1].get('tools', []), hosted)
             await self.response([*final['output'], {'role': 'user', 'content': 'Continue'}], True, tools, bridge=bridge)
             self.assertEqual([c for c in self.requests[-1]['contents'] if c['role'] == 'model'][0]['parts'], signed)
             self.assertTrue(self.provider_closed)
-            if backend is not None: self.assertEqual(backend.queries, [])
 
     async def test_stream_cancellation_closes_provider_and_quota_is_terminal(self):
         self.live_stream = True; self.gate = asyncio.Event()
@@ -257,34 +285,122 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(events[-1]['response']['error']['code'], 'rate_limit_exceeded')
         self.assertFalse(any(e['type'] == 'response.completed' for e in events))
 
-    async def test_actual_search_mixed_client_tools_and_native_state_replay(self):
-        from shared_search import SEARCH_NAME
-        for mixed in (False, True):
-            self.requests.clear(); self.live_stream = True
-            bridge, backend = self.shared_bridge()
-            first = [{'text': 'Checking.'}, {'functionCall': {'name': SEARCH_NAME, 'args': {'query': 'fixture fact'}},
-                                           'thoughtSignature': TOOL_SIGNATURE}]
-            if mixed: first.append({'functionCall': {'name': 'probe', 'args': {}}})
-            self.parts = [first, [{'text': 'BLUE: https://example.com/fact', 'thoughtSignature': SIGNATURE}], [{'text': 'NEXT'}]]
-            tools = [{'type': 'web_search'}, {'type': 'function', 'name': 'probe', 'description': 'Fixture',
-                                             'parameters': {'type': 'object', 'properties': {}}}]
-            prompt = f'Research fixture fact; mixed={mixed}'
-            final, events = await self.response(prompt, True, tools, bridge=bridge)
-            self.assertEqual(backend.queries, ['fixture fact'])
-            self.assertFalse(any(i.get('name') == SEARCH_NAME for i in final['output']))
-            self.assertTrue(any(i['type'] == 'web_search_call' for i in final['output']))
-            history = [{'role': 'user', 'content': prompt}, *final['output']]
-            if mixed:
-                client = next(i for i in final['output'] if i['type'] == 'function_call')
-                history.append({'type': 'function_call_output', 'call_id': client['call_id'], 'output': 'DONE'})
-            else:
+    async def test_native_search_mixed_client_tools_citations_and_replay(self):
+        from gemini_native import GeminiResponses
+        bridge, _ = self.shared_bridge()
+        tools = [{'type': 'web_search', 'external_web_access': True},
+                 {'type': 'function', 'name': 'probe', 'description': 'Fixture', 'parameters': {'type': 'object', 'properties': {}}}]
+        a, b = 'https://vertexaisearch.example/a', 'https://vertexaisearch.example/b'
+        for streaming, live, mixed in ((False, False, False), (True, False, True), (True, True, False), (True, True, True)):
+            with self.subTest(streaming=streaming, live=live, mixed=mixed):
+                self.requests.clear(); self.live_stream = live; self.metadata = self.grounded()
+                first = [{'thought': True, 'text': 'Provider summary.'}, {'text': 'Café facts. '},
+                         {'text': 'BLUE is the answer.', 'thoughtSignature': SIGNATURE}]
+                if mixed: first.append({'functionCall': {'name': 'probe', 'args': {}}, 'thoughtSignature': TOOL_SIGNATURE})
+                self.parts = [first, [{'text': 'NEXT'}]]
+                prompt = f'Research fixture fact; mixed={mixed}'
+                with self.assertLogs('gemini_native', level='INFO') as logs:
+                    final, events = await self.response(prompt, streaming, tools, bridge=bridge)
+                sent = self.requests[-1]
+                self.assertIn({'googleSearch': {}}, sent['tools'])
+                self.assertIn({'url_context': {}}, sent['tools'])
+                self.assertTrue(any(t.get('function_declarations') for t in sent['tools']))
+                self.assertTrue(sent['toolConfig']['includeServerSideToolInvocations'])
+                self.assertEqual(final['tools'], tools)
+                kinds = [i['type'] for i in final['output']]
+                self.assertEqual(kinds, ['reasoning', 'message', *(['function_call'] if mixed else []),
+                                         'web_search_call', 'web_search_call', 'web_search_call', 'reasoning'])
+                message = next(i for i in final['output'] if i['type'] == 'message')
+                text = message['content'][0]['text']
+                self.assertEqual(text, 'Café facts. BLUE is the answer.')
+                spans = [(c['start_index'], c['end_index'], c['url']) for c in message['content'][0]['annotations']]
+                self.assertEqual(spans, [(0, 11, a), (17, 31, a), (17, 31, b)])
+                self.assertEqual(text[17:31], 'is the answer.')
+                searches = [i for i in final['output'] if i['type'] == 'web_search_call']
+                self.assertEqual([(i['status'], i['action']['type']) for i in searches],
+                                 [('completed', 'search'), ('completed', 'open_page'), ('failed', 'open_page')])
+                self.assertEqual(searches[0]['action']['query'], 'fixture fact')
+                self.assertEqual(searches[0]['action']['sources'], [{'type': 'url', 'url': a}, {'type': 'url', 'url': b}])
+                if streaming:
+                    completed = [e['item_id'] for e in events if e['type'] == 'response.web_search_call.completed']
+                    self.assertEqual(completed, [i['id'] for i in searches[:2]])
+                timing = json.loads(next(l for l in logs.output if 'gemini_timing' in l).partition('gemini_timing ')[2])
+                self.assertEqual((timing['search_queries'], timing['url_retrievals'], timing['url_failures']), (1, 2, 1))
+                self.assertFalse(any(s in str(logs.output) for s in ('fixture fact', 'example.com', 'vertexaisearch')))
+                history = [{'role': 'user', 'content': prompt}, *final['output']]
+                if mixed:
+                    client = next(i for i in final['output'] if i['type'] == 'function_call')
+                    history.append({'type': 'function_call_output', 'call_id': client['call_id'], 'output': 'DONE'})
+                else:
+                    history.append({'role': 'user', 'content': 'Continue'})
+                TOOL_CALLS_CACHE.flush_cache(); self.metadata = None
+                await self.response(history, streaming, tools, bridge=bridge)
                 self.assertEqual([c for c in self.requests[-1]['contents'] if c['role'] == 'model'][0]['parts'], first)
-                history.append({'role': 'user', 'content': 'Continue'})
-                annotations = next(i for i in final['output'] if i['type'] == 'message' and 'BLUE' in json.dumps(i))['content'][0]['annotations']
-                self.assertTrue(annotations)
-            TOOL_CALLS_CACHE.flush_cache()
-            await self.response(history, True, tools, bridge=bridge)
-            self.assertEqual([c for c in self.requests[-1]['contents'] if c['role'] == 'model'][0]['parts'], first)
+                self.assertNotIn('Hosted web search', json.dumps(self.requests[-1]))
+                # A model switch keeps the readable search items, never the carrier.
+                calls = []
+                async def foreign_dispatch(**kwargs):
+                    calls.append(kwargs['data'])
+                    async def execute(): return 'FOREIGN'
+                    return execute()
+                await (await GeminiResponses(foreign_dispatch, self.router).route({'model': 'other/native', 'input': history}, 'aresponses'))
+                self.assertNotIn(PREFIX, json.dumps(calls[-1]))
+                self.assertEqual(sum(i.get('type') == 'web_search_call' for i in calls[-1]['input']), 3)
+
+    async def test_search_modes_and_unenforceable_settings(self):
+        from gemini_native import NativeStateError
+        bridge, _ = self.shared_bridge()
+        probe = {'type': 'function', 'name': 'probe', 'parameters': {'type': 'object', 'properties': {}}}
+        live, cached = {'googleSearch': {}}, [{'googleSearch': {}}]
+        cases = [({'type': 'web_search', 'search_content_types': ['text', 'image']}, None, [live, {'url_context': {}}]),
+                 ({'type': 'web_search', 'external_web_access': False}, 'auto', cached),
+                 ({'type': 'web_search_preview'}, 'none', []), ({'type': 'web_search'}, {'type': 'none'}, []), (None, None, [])]
+        for hosted, choice, expected in cases:
+            with self.subTest(hosted=hosted, choice=choice):
+                tools = [probe] + ([hosted] if hosted else [])
+                data = dict(model=MODEL, input='Hello', tools=tools, store=False, stream=False)
+                if choice is not None: data['tool_choice'] = choice
+                REQUEST.get()['request'] = data
+                result = (await (await bridge.route(data, 'aresponses'))).model_dump(exclude_none=True)
+                sent = self.requests[-1]
+                self.assertEqual([t for t in sent.get('tools', []) if not t.get('function_declarations')], expected)
+                self.assertEqual('includeServerSideToolInvocations' in sent.get('toolConfig', {}), bool(expected))
+                self.assertEqual(result['tools'], tools)
+        count = len(self.requests)
+        invalid = [([{'type': 'web_search', 'filters': {'allowed_domains': ['example.com']}}], None),
+                   ([{'type': 'web_search', 'unknown': True}], None),
+                   ([{'type': 'web_search'}, {'type': 'web_search_preview'}], None),
+                   ([{'type': 'web_search'}], {'type': 'web_search'})]
+        for tools, choice in invalid:
+            for streaming in (False, True):
+                data = dict(model=MODEL, input='Hello', tools=tools, store=False, stream=streaming)
+                if choice: data['tool_choice'] = choice
+                with self.subTest(tools=tools, streaming=streaming), self.assertRaises(NativeStateError) as raised:
+                    await bridge.route(data, 'aresponses')
+                self.assertEqual(raised.exception.status_code, 400)
+        self.assertEqual(len(self.requests), count)
+        # Compaction and other non-Responses traffic never gain built-in tools.
+        await (await bridge.route(dict(model=MODEL, input='Hello', tools=[], store=False), 'aresponses'))
+        self.assertNotIn('googleSearch', json.dumps(self.requests[-1]))
+
+    async def test_pre_cutover_shared_search_history_expands_for_gemini(self):
+        from shared_search import SEARCH_NAME
+        bridge, journal = self.shared_bridge()
+        call = {'type': 'function_call', 'call_id': 'call_search', 'name': SEARCH_NAME, 'arguments': '{"query": "fixture"}'}
+        journal.write('fixture-owner', 'ws_sharedfixture', {
+            'call': call, 'result': {'type': 'function_call_output', 'call_id': 'call_search', 'output': 'SHARED_RESULT'},
+            'sources': [], 'batch_ids': [], 'pending': []})
+        history = [{'role': 'user', 'content': 'Research'},
+                   {'type': 'web_search_call', 'id': 'ws_sharedfixture', 'status': 'completed',
+                    'action': {'type': 'search', 'query': 'fixture'}},
+                   {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Earlier answer'}]},
+                   {'role': 'user', 'content': 'Continue'}]
+        for streaming in (False, True):
+            await self.response(copy.deepcopy(history), streaming, [{'type': 'web_search'}], bridge=bridge)
+            sent = json.dumps(self.requests[-1])
+            self.assertIn('SHARED_RESULT', sent)
+            self.assertNotIn('Hosted web search', sent)
+            self.assertIn({'googleSearch': {}}, self.requests[-1]['tools'])
 
     async def test_signed_final_text_json_stream_restart_and_cache_flush(self):
         for streaming in (False, True):
@@ -461,8 +577,9 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
                 'codex': {'display_name': 'Fixture Gemini', 'context_window': 1048576,
                           'default_reasoning_level': 'medium', 'supported_reasoning_levels': ['low', 'medium', 'high']}})
             catalog.write_text(json.dumps({'models': [row]}))
-            bridge, _ = self.shared_bridge()
-            compactor = CompactionResponses(bridge.route, catalog)
+            _, journal = self.shared_bridge()
+            async def gemini(**kwargs): return await self.integration.route(**kwargs)
+            compactor = CompactionResponses(gemini, catalog)
             client_requests, errors = [], []
             from responses_events import ResponsesEvents
             failure_renderer = ResponsesEvents.failed
@@ -472,6 +589,7 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             self.enterContext(patch.object(ResponsesEvents, 'failed', failure))
             compacted = []
             def fixture():
+                self.metadata = None
                 if is_compaction(REQUEST.get()['request']):
                     compacted.append(len(self.requests))
                     return [{'text': 'CHECKPOINT: Remember FIXTURE_OK. No pending tools.', 'thoughtSignature': 'checkpoint-signature'}]
@@ -481,6 +599,12 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
                     return [{'thought': True, 'text': 'Visible provider summary.'},
                             {'functionCall': {'name': name, 'args': {'content': 'text("FIXTURE_TOOL_OK")'}},
                              'thoughtSignature': TOOL_SIGNATURE}]
+                # Mocked native search grounds the final answer.
+                self.metadata = {'groundingMetadata': {'webSearchQueries': ['fixture'],
+                    'groundingChunks': [{'web': {'uri': 'https://vertexaisearch.example/a', 'title': 'example.com'}}],
+                    'groundingSupports': [{'segment': {'endIndex': 10, 'text': 'FIXTURE_OK'}, 'groundingChunkIndices': [0]}]},
+                    'urlContextMetadata': {'urlMetadata': [{'retrievedUrl': 'https://example.com/page',
+                                                            'urlRetrievalStatus': 'URL_RETRIEVAL_STATUS_SUCCESS'}]}}
                 return [{'thought': True, 'text': 'Visible provider summary.'},
                         {'text': 'FIXTURE_OK', 'thoughtSignature': SIGNATURE}]
             self.fixture_factory = fixture; self.live_stream = True
@@ -538,14 +662,19 @@ class NativeTests(unittest.IsolatedAsyncioTestCase):
             session = next(e['thread_id'] for e in first if e['type'] == 'thread.started')
             self.assertTrue(any(i.get('type') == 'custom_tool_call_output' and 'FIXTURE_TOOL_OK' in json.dumps(i)
                                 for r in client_requests for i in r['input']), 'Code Mode tool result missing')
+            self.assertIn({'googleSearch': {}}, self.requests[0]['tools'])
+            self.assertIn({'url_context': {}}, self.requests[0]['tools'])
+            self.assertTrue(any(e['type'] == 'item.completed' and e['item']['type'] == 'web_search' for e in first), first)
             # Restart hooks/codec and flush live caches before the exact resume.
             self.integration.uninstall(); dispatch = self.integration.dispatch
             self.integration = install(self.router, StateCodec(self.key)); self.integration.dispatch = dispatch
-            bridge.dispatch = self.integration.route
+            self.integration.journal = journal
             TOOL_CALLS_CACHE.flush_cache()
             await run(['resume', session, '--skip-git-repo-check', '--json', 'Continue.'])
             self.assertTrue(any(str(i.get('encrypted_content', '')).startswith(PREFIX) for i in client_requests[-1]['input']))
+            self.assertTrue(any(i.get('type') == 'web_search_call' for i in client_requests[-1]['input']))
             self.assertEqual([c for c in self.requests[-1]['contents'] if c['role'] == 'model'][0]['parts'], self.responses[0])
+            self.assertNotIn('Hosted web search', json.dumps(self.requests[-1]))
             await run(['-c', 'model_auto_compact_token_limit=1', 'resume', session, '--skip-git-repo-check', '--json', 'Continue after compaction.'])
             self.assertTrue(compacted, 'Stock Codex did not request forced compaction')
             continued = self.requests[-1]
