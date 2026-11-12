@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import hashlib
 from importlib.metadata import version
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -33,6 +34,7 @@ from responses_events import ResponsesEvents, normalize_item
 from gemini_native import FEEDBACK, feedback_event, flush_timings
 
 CURRENT = ContextVar('shared_search', default=None)
+LOG = logging.getLogger('shared_search')
 HOSTED = ('web_search', 'web_search_preview')
 # Routes owned by the subscription refresh; they keep the provider's native search.
 NATIVE_PREFIX, NATIVE_REVIEW = 'chatgpt/', 'codex-auto-review'
@@ -46,6 +48,17 @@ CLOSED = 'Not run: search is closed for this response. Answer now with the resul
 
 def plain(value):
     return value.model_dump(exclude_none=True) if hasattr(value, 'model_dump') else copy.deepcopy(value)
+
+
+def configure_timing_logging():
+    """Publish request metadata even when the server root logger is quiet."""
+    LOG.setLevel(logging.INFO)
+    LOG.propagate = False
+    if not any(handler.name == 'shared-search-metadata' for handler in LOG.handlers):
+        handler = logging.StreamHandler()
+        handler.set_name('shared-search-metadata')
+        handler.setFormatter(logging.Formatter('%(message)s'))
+        LOG.addHandler(handler)
 
 
 @dataclass
@@ -512,9 +525,16 @@ class SearchResponses:
         async def locked_execute():
             key = (turn.caller, cache_id)
             entry = self.active.setdefault(key, [asyncio.Lock(), 0])
+            # Metadata only: identical concurrent requests wait here to share one result.
+            request = cache_id[len('ws_request'):][:12]
+            LOG.info('search_request %s', json.dumps({'request': request, 'model': model,
+                                                       'stream': bool(data.get('stream')), 'queued': entry[1]}))
+            arrived = time.monotonic()
             entry[1] += 1
             try:
                 async with entry[0]:
+                    LOG.info('search_dispatch %s', json.dumps({
+                        'request': request, 'wait_ms': round(1000 * (time.monotonic() - arrived))}))
                     return await execute()
             finally:
                 entry[1] -= 1
@@ -579,6 +599,7 @@ def install():
     if version('litellm') != '1.106.5':
         raise RuntimeError('Shared search requires LiteLLM 1.106.5; revalidate before upgrading')
     from litellm.proxy import common_request_processing
+    configure_timing_logging()
     interceptor = SharedSearchInterceptor()
     litellm.callbacks.append(interceptor)
     integration = SearchResponses(common_request_processing.route_request, interceptor)

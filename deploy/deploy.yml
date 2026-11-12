@@ -191,6 +191,16 @@
         mode: '0600'
         force: false
       notify: Restart LiteLLM
+    # The bootstrap above never rewrites an existing configuration. Without this,
+    # a JSON request keeps running (and holds shared search's identical-request
+    # lock) after its client gives up; streams already cancel on disconnect.
+    - name: Cancel upstream work when a non-streaming client disconnects
+      ansible.builtin.lineinfile:
+        path: "{{ litellm_config }}/config.yaml"
+        regexp: '^  cancel_on_disconnect:'
+        insertafter: '^general_settings:'
+        line: '  cancel_on_disconnect: true'
+      notify: Restart LiteLLM
     - name: Install system service
       ansible.builtin.template:
         src: litellm.service.j2

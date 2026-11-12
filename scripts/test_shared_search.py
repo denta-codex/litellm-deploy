@@ -383,10 +383,19 @@ class SharedSearchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.backend.queries, ['fixture fact'])
 
     async def test_concurrent_duplicate_requests_share_one_search(self):
-        first, second = await asyncio.gather(self.call(), self.call())
+        with self.assertLogs('shared_search', level='INFO') as logs:
+            first, second = await asyncio.gather(self.call(), self.call())
         self.assertEqual(first['output'], second['output'])
         self.assertEqual(self.backend.queries, ['fixture fact'])
         self.assertEqual(self.bridge.active, {})
+        records = [(line.split()[0].rpartition(':')[2], json.loads(line.partition(' ')[2])) for line in logs.output]
+        arrivals = [r for kind, r in records if kind == 'search_request']
+        dispatches = [r for kind, r in records if kind == 'search_dispatch']
+        self.assertEqual(sorted(r['queued'] for r in arrivals), [0, 1])
+        self.assertEqual(len(dispatches), 2)
+        self.assertEqual({r['request'] for r in arrivals}, {r['request'] for r in dispatches})
+        self.assertTrue(all(r['model'] == 'modal/fixture' and r['stream'] is False for r in arrivals))
+        self.assertNotIn('Find the fact', str(logs.output))
 
     async def test_failure_is_truthful_and_does_not_leak_exception_details(self):
         async def fail(query, settings):

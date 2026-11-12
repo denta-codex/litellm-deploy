@@ -103,6 +103,20 @@ Waiting for silent provider computation emits no invented progress. For JSON req
 first-content time is the receipt of the complete provider body; for streaming it
 is the first nonempty text/marked summary part.
 
+Codex can append a background command's late result after a newer tool call.
+LiteLLM's Gemini converter pairs a result only with the latest call and would
+fail every retry, so the adapter repairs Gemini-bound history first: a first
+result moves next to its call, and repeated or unmatched results are dropped.
+Each repair logs one `gemini_history_repair` record with integer `dropped` and
+`moved` counts only.
+
+Shared search logs `search_request` (short request hash, model, stream flag, and
+how many identical requests were already queued) and `search_dispatch` (lock wait
+in milliseconds) for every hosted-search turn, also metadata only. Identical
+concurrent requests deliberately wait to share one result; the proxy's
+`cancel_on_disconnect` setting cancels an abandoned JSON request so it cannot hold
+that lock after its client gives up.
+
 ## Acceptance and rollout
 
 Use the existing locked environment, with `scripts` on `PYTHONPATH`:
