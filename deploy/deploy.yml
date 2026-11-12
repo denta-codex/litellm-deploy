@@ -69,10 +69,14 @@
     # configuration. Its first refresh-models.yml run publishes models.json and
     # this check applies from then on. Remove the models.json condition together
     # with deploy/retired.yml, once every machine has published models.json.
+    # catalog_refresh_blocked=true is the recovery path when refresh validation
+    # fails because of a runtime bug that only a new deployment fixes: routes
+    # stay guarded, and the refresh that must follow publishes the catalog.
     - name: Verify installed routes and picker still match saved discovery
       ansible.builtin.command:
         argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ litellm_root }}/scripts/refresh_models.py",
-               --config, "{{ deploy_config_path }}", check-snapshot]
+               --config, "{{ deploy_config_path }}",
+               "{{ 'check-routes' if catalog_refresh_blocked | default(false) | bool else 'check-snapshot' }}"]
       changed_when: false
       check_mode: false
       when: installed_refresh.stat.exists and installed_models.stat.exists

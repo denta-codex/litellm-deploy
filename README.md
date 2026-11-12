@@ -196,6 +196,11 @@ can be deleted.
   - Rollback stops, rather than overwriting, if files were edited concurrently.
 - **Models.** Run `ansible-playbook -i deploy/inventory.yml deploy/refresh-models.yml -e refresh_action=rollback`.
   It recovers an interrupted refresh from `~/.local/state/litellm/model-refresh`.
+- **Refresh blocked by a runtime bug.** If `refresh-models.yml` fails validation
+  because of a bug in the installed gateway, `deploy.yml` stops at its snapshot
+  check until a refresh succeeds. Deploy the fix with
+  `-e catalog_refresh_blocked=true`. That preflight still rejects route drift but
+  accepts catalog-only drift. Then run `finish` and `refresh-models.yml` as usual.
 - **Codex runtime.** Run `codex-runtime.yml -e codex_runtime_action=rollback`, as
   described below.
 
