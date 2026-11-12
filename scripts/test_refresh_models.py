@@ -465,6 +465,48 @@ class ActivationTests(unittest.TestCase):
         self.refresh.rollback()
         self.assertEqual(self.refresh.originals(), self.originals)
 
+    def test_transient_provider_failure_reruns_the_check_once_and_is_reported(self):
+        summary = self.prepare()
+        models = summary['test_models'] + ([REVIEW_MODEL] if summary['test_reviewer'] else [])
+        self.refresh.activate()
+        calls = []
+        def probe(command, **kwargs):
+            calls.append(command)
+            if len(calls) == 1:
+                return subprocess.CompletedProcess(command, 1, '', 'litellm.ServiceUnavailableError: BedrockException - '
+                                                   'Bedrock is unable to process your request.')
+            return subprocess.CompletedProcess(command, 0, 'PASS', '')
+        with patch('refresh_models.subprocess.run', side_effect=probe), patch('refresh_models.time.sleep') as sleep:
+            result = self.refresh.validate()
+        self.assertEqual(calls[0], calls[1])
+        sleep.assert_called_once()
+        [(model, scripts)] = result['transient_retries'].items()
+        self.assertIn(model, models)
+        self.assertEqual(scripts, [Path(calls[0][5]).name])
+        log = (self.refresh.transaction / 'validation.log').read_text()
+        self.assertIn(f'PASS {model}: ', log)
+        self.assertIn('retried after transient provider error', log)
+        self.refresh.finish()
+
+    def test_repeated_transient_failure_fails_and_ordinary_failures_are_not_rerun(self):
+        summary = self.prepare()
+        models = summary['test_models'] + ([REVIEW_MODEL] if summary['test_reviewer'] else [])
+        self.refresh.activate()
+        for stderr, attempts, message in (('Error code: 503 Service Unavailable', 2, 'after one retry for a transient'),
+                                          ('AssertionError: tool call missing', 1, 'validation failed\n')):
+            calls = []
+            def probe(command, **kwargs):
+                calls.append(command)
+                return subprocess.CompletedProcess(command, 1, '', stderr)
+            with patch('refresh_models.subprocess.run', side_effect=probe), patch('refresh_models.time.sleep'):
+                with self.assertRaisesRegex(ValueError, message):
+                    self.refresh.validate()
+            # Each model stops at its first failing check.
+            self.assertEqual(len(calls), attempts * len(models))
+        self.assertFalse((self.refresh.transaction / 'validated').exists())
+        self.refresh.rollback()
+        self.assertEqual(self.refresh.originals(), self.originals)
+
     def test_publication_and_unchanged_rerun(self):
         self.prepare()
         self.refresh.activate()
@@ -548,7 +590,7 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(summary['test_models'], [])
         self.refresh.activate()
         with patch('refresh_models.subprocess.run') as run:
-            self.assertEqual(self.refresh.validate(), {'validated': []})
+            self.assertEqual(self.refresh.validate(), {'validated': [], 'transient_retries': {}})
             run.assert_not_called()
         self.refresh.finish()
         published = self.refresh.originals()

@@ -138,6 +138,9 @@ run with `mise exec --`, which is omitted here for brevity.
    uv run --no-sync scripts/runtime_rollout.py finish --source "$PWD"
    ```
 
+   If the deployment prints `MODEL REFRESH REQUIRED`, the new release changes
+   generated routes or picker entries. After `finish`, run step 4.
+
 3. **Log in to ChatGPT for LiteLLM** on a new machine. See
    [ChatGPT login](#chatgpt-login) below.
 
@@ -410,6 +413,14 @@ kept in `~/.local/state/litellm/model-refresh` only while work is unfinished.
 Recovery refuses to overwrite concurrent edits; in that case, inspect the
 directory and reconcile before retrying.
 
+**Transient provider errors.** If a validation check fails with a provider
+unavailability or throttling error (HTTP 503, 529, or 429, `ServiceUnavailable`,
+or Bedrock's "unable to process"), refresh waits 15 seconds and runs that whole
+check once more. Only the second run decides the result. The retry is labeled in
+`validation.log` and in the `transient_retries` result. Any other failure, or a
+second failure, fails the refresh. This applies only to acceptance validation;
+model routes themselves do not retry inference.
+
 **After a catalog change,** restart the Codex app server so it loads the new
 picker.
 
@@ -418,6 +429,12 @@ An expired ChatGPT login is reported. Refresh does not start an interactive logi
 Ordinary deployment checks the installed snapshot against the configuration. It
 never fetches anything or changes timestamps. If generated files are missing or
 inconsistent, it stops and asks you to run refresh.
+
+That preflight uses the previously installed scripts. After installing, deployment
+checks again with the new scripts. If the new release changes generated routes or
+picker entries, it prints `MODEL REFRESH REQUIRED`. Run refresh after
+`runtime_rollout.py finish`, not before the deployment, because validation needs
+the new code running.
 
 ### Recommended picker order
 

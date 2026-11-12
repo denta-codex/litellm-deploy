@@ -47,6 +47,8 @@ For `bedrock/...claude-fable-5-2`, `configured_model` supplies:
 65536 is headroom, not a guarantee that every high/max-effort request finishes.
 Limits and refusals must remain `response.incomplete`, with their real reason.
 There is no automatic token escalation, effort downgrade, or inference retry.
+(Refresh acceptance can rerun a whole failed check once after a provider 503 or
+throttle; see the README's "Refresh models". That does not affect the route.)
 
 The host's existing `use_chat_completions_api: true`, `allowed_openai_params:
 [tools, tool_choice]`, and narrow `additional_drop_params: [prompt_cache_key]`

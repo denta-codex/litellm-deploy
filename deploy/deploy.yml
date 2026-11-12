@@ -234,6 +234,26 @@
         method: GET
         status_code: 405
       when: not ansible_check_mode and litellm_voice_enabled
+    # The preflight check runs the previously installed code, so route or picker
+    # defaults introduced by this release only become visible here. Refresh is a
+    # separate step: it must run after runtime_rollout.py finish (the runtime
+    # journal protects the generated files) and validates against the new code.
+    - name: Check whether this release changes the generated models
+      ansible.builtin.command:
+        argv: ["{{ litellm_uv }}", run, --no-sync, --project, "{{ litellm_root }}", "{{ source_root }}/scripts/refresh_models.py",
+               --config, "{{ deploy_config_path }}", check-snapshot]
+      register: release_snapshot
+      changed_when: false
+      failed_when: false
+      check_mode: false
+      when: installed_models.stat.exists
+    - name: Report that published models need refresh-models.yml
+      ansible.builtin.debug:
+        msg:
+          - "MODEL REFRESH REQUIRED: this release changes the generated routes or picker."
+          - "{{ (release_snapshot.stderr | default('', true)).strip().splitlines()[-1:] | join('') }}"
+          - "Run runtime_rollout.py finish, then refresh-models.yml. Until then, deploy.yml stops at its snapshot check."
+      when: release_snapshot.rc | default(0) != 0
   handlers:
     - name: Restart LiteLLM
       ansible.builtin.systemd_service:

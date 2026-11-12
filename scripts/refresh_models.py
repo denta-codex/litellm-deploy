@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import tomllib
 import urllib.error
 import urllib.request
@@ -34,6 +35,13 @@ PREFIX = 'chatgpt/'
 REVIEW_MODEL = 'codex-auto-review'
 SCRIPTS = Path(__file__).parent
 CONFIGURED_NAME = re.compile(r'[a-z0-9][a-z0-9_-]*/[A-Za-z0-9][A-Za-z0-9._-]*')
+# Acceptance validation only; routes never retry inference. A failed check whose
+# output shows provider unavailability or throttling is rerun once in full, and
+# the rerun alone decides the result. Real defects fail both runs.
+TRANSIENT_PROVIDER = re.compile(
+    r'ServiceUnavailable|Service Unavailable|Bedrock is unable to process|Too Many Requests|RateLimitError'
+    r'|ThrottlingException|overloaded_error|\b(?:status|code|HTTP)\W{0,3}(?:429|503|529)\b', re.IGNORECASE)
+TRANSIENT_RETRY_DELAY = 15
 # Stock Codex catalog defaults for configured rows; ``codex`` keys override them.
 ROW_DEFAULTS = {
     'base_instructions': "You are Codex, a coding agent. Follow the user's request and use tools when needed.",
@@ -460,11 +468,22 @@ class Refresh:
         def script(name, *args):
             return [self.uv, 'run', '--no-sync', '--project', str(self.root), str(SCRIPTS / name), *args]
 
+        retried = {}
+
+        def run(name, command, timeout):
+            result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            note = ''
+            if result.returncode and TRANSIENT_PROVIDER.search(result.stdout + result.stderr):
+                retried.setdefault(name, []).append(Path(command[5]).name)
+                note = ' after one retry for a transient provider error'
+                time.sleep(TRANSIENT_RETRY_DELAY)
+                result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+            if result.returncode:
+                raise ValueError(f'{name}: validation failed{note}\n{result.stdout[-1500:]}\n{result.stderr[-2000:]}')
+
         def verify(name):
             if name == REVIEW_MODEL:
-                result = subprocess.run(script('verify_review.py'), capture_output=True, text=True, timeout=240)
-                if result.returncode:
-                    raise ValueError(f'{name}: validation failed\n{result.stdout[-1500:]}\n{result.stderr[-2000:]}')
+                run(name, script('verify_review.py'), 240)
                 return name
             spec = journal.get('verification', {}).get(name, {'args': [], 'validators': [], 'timeout': 600})
             # Configured validators run first: provider-specific checks fail fastest.
@@ -474,9 +493,7 @@ class Refresh:
             commands.append(script('verify_codex.py', '--model', name, '--catalog', catalog,
                                    *([] if rows[name].get('supports_search_tool', False) else ['--skip-search'])))
             for command in commands:
-                result = subprocess.run(command, capture_output=True, text=True, timeout=spec['timeout'])
-                if result.returncode:
-                    raise ValueError(f'{name}: validation failed\n{result.stdout[-1500:]}\n{result.stderr[-2000:]}')
+                run(name, command, spec['timeout'])
             return name
         # Bound subscription use and latency. Each probe owns a disposable Codex home.
         test_models = journal['summary']['test_models'] + ([REVIEW_MODEL] if journal['summary'].get('test_reviewer', False) else [])
@@ -484,18 +501,22 @@ class Refresh:
             futures = {executor.submit(verify, name): name for name in test_models}
             failures = []
             for future in as_completed(futures):
+                name = futures[future]
                 try:
-                    name = future.result()
+                    future.result()
                     checks = 'review route, streaming, JSON output' if name == REVIEW_MODEL else 'streaming, tools, context, advertised search'
-                    output.write(f'PASS {name}: {checks}\n')
+                    output.write(f'PASS {name}: {checks}')
                 except Exception as exc:
                     failures.append(str(exc))
-                    output.write(f'FAIL {futures[future]}\n')
+                    output.write(f'FAIL {name}')
+                if name in retried:
+                    output.write(f' (retried after transient provider error: {", ".join(retried[name])})')
+                output.write('\n')
                 output.flush()
         if failures:
             raise ValueError('\n'.join(failures))
         atomic_write(self.transaction / 'validated', 'yes\n')
-        return {'validated': test_models}
+        return {'validated': test_models, 'transient_retries': retried}
 
     def finish(self):
         journal = self.journal()
