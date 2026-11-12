@@ -5,6 +5,7 @@ import contextvars
 import json
 import os
 from pathlib import Path
+import re
 import time
 import uuid
 
@@ -19,6 +20,79 @@ from usage_accounting import accounting, publish, sample
 # Each idle worker is a Claude CLI process (~110 MiB). Evict the least recently
 # used idle worker beyond this; busy workers are never evicted.
 MAX_WORKERS = 20
+
+VISUALIZE = 'visualize{'
+VISUALIZE_LINE = re.compile(r'visualize(\{.*\})([ \t\r]*)')
+# A path-bearing reference line is short; anything longer streams unchanged.
+VISUALIZE_HOLD_LIMIT = 8192
+
+
+class VisualizeMarkers:
+    """Wrap whole-line ``visualize{...}`` references in Codex's inline-content markers.
+
+    Codex renders an inline visualization only for ``U+E200 visualize U+E202 {json} U+E201``.
+    Claude does not emit those private-use characters, so the adapter adds them. Only a
+    line that is exactly a reference (outside fenced code) is rewritten; text that cannot
+    become one streams without delay.
+    """
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.held = ''       # Current line, withheld while it may still be a reference.
+        self.holding = True  # At a line start, every line is a candidate until shown otherwise.
+        self.head = ''       # First characters of the current line, for fence detection.
+        self.fence = None
+
+    @staticmethod
+    def rewrite(line):
+        match = VISUALIZE_LINE.fullmatch(line)
+        if not match:
+            return line
+        try:
+            value = json.loads(match[1])
+        except ValueError:
+            return line
+        if not isinstance(value, dict) or not isinstance(value.get('path'), str) or not value['path']:
+            return line
+        return 'visualize' + match[1] + ''
+
+    def end_line(self, line_ending):
+        out = (self.rewrite(self.held) if self.holding and self.fence is None else self.held) + line_ending
+        marker = self.head.lstrip(' ')[:3]
+        if marker in ('```', '~~~') and len(self.head) - len(self.head.lstrip(' ')) <= 3:
+            if self.fence is None:
+                self.fence = marker
+            elif marker == self.fence:
+                self.fence = None
+        self.held, self.head, self.holding = '', '', True
+        return out
+
+    def feed(self, text):
+        out = []
+        for part in re.split('(\n)', text):
+            if part == '\n':
+                out.append(self.end_line('\n'))
+                continue
+            if len(self.head) < 8:
+                self.head += part[:8 - len(self.head)]
+            if not self.holding:
+                out.append(part)
+                continue
+            self.held += part
+            candidate = (self.fence is None and len(self.held) <= VISUALIZE_HOLD_LIMIT
+                         and (VISUALIZE.startswith(self.held) or self.held.startswith(VISUALIZE)))
+            if not candidate:
+                out.append(self.held)
+                self.held, self.holding = '', False
+        return ''.join(out)
+
+    def flush(self):
+        """Release a withheld final line at a response boundary; the next response starts fresh."""
+        out = self.end_line('')
+        self.reset()
+        return out
 
 
 def chunk(text='', *, tools=None, reasoning=None, finish=None, usage=None):
@@ -172,6 +246,8 @@ class ClaudeProvider(CustomLLM):
             normal_boundary = False
             emitted = []
             before_receipts = set(getattr(session, 'usage_receipts', {})) if session else set()
+            # Structured output is JSON, never prose with a reference line.
+            markers = None if config['output_format'] else VisualizeMarkers()
             try:
                 session, waiting = await self.reconcile(key, messages, config)
                 while True:
@@ -179,8 +255,14 @@ class ClaudeProvider(CustomLLM):
                     kind, data = ('tools', waiting) if waiting is not None else await session.queue.get()
                     waiting = None
                     items = []
+                    if markers and kind in ('tools', 'done'):
+                        held = markers.flush()
+                        if held:
+                            items.append(chunk(held))
                     if kind == 'text':
-                        items = [chunk(data)]
+                        text = markers.feed(data) if markers else data
+                        if text:
+                            items = [chunk(text)]
                     elif kind == 'reasoning':
                         items = [chunk(reasoning=data)]
                     elif kind == 'tools':
@@ -191,7 +273,7 @@ class ClaudeProvider(CustomLLM):
                         items.append(chunk(finish='tool_calls', usage=usage_counts(boundary_usage)))
                         normal_boundary = True
                     elif kind == 'done':
-                        items = [chunk(finish='stop', usage=usage_counts(data))]
+                        items.append(chunk(finish='stop', usage=usage_counts(data)))
                         normal_boundary = True
                     elif kind == 'error':
                         raise data

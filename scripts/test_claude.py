@@ -18,7 +18,7 @@ from claude_agent_sdk.types import AssistantMessage, RateLimitEvent, RateLimitIn
 from litellm.llms.custom_llm import CustomLLMError
 from claude_context import REQUEST, validate_request
 import claude_provider
-from claude_provider import ClaudeProvider, usage_counts
+from claude_provider import ClaudeProvider, VisualizeMarkers, usage_counts
 from claude_session import (CORRELATION, EFFORTS, MODEL, MODELS, WORKSPACE_NOTE, Session, configuration, content_blocks,
                             digest, history_prompt, mcp_names)
 from refresh_models import configured_model
@@ -66,6 +66,55 @@ def stream_event(kind, **fields):
 
 def fast_script(text='FAST', speed='fast'):
     return [stream_event('message_start', message={'usage': {'speed': speed}}), text, stream_event('message_stop')]
+
+
+REFERENCE = 'visualize{"path":"/v/chart.html","mode":"wide"}'
+MARKED = 'visualize{"path":"/v/chart.html","mode":"wide"}'
+
+
+def mark(text, pieces=None):
+    markers = VisualizeMarkers()
+    pieces = pieces or list(text)
+    return ''.join(markers.feed(piece) for piece in pieces) + markers.flush()
+
+
+class VisualizeMarkerTests(unittest.TestCase):
+    def test_reference_split_across_chunks_gets_markers(self):
+        text = 'Here it is:\n\n' + REFERENCE + '\n\nDone.'
+        expected = 'Here it is:\n\n' + MARKED + '\n\nDone.'
+        self.assertEqual(mark(text), expected)
+        self.assertEqual(mark(text, [text[:20], text[20:31], text[31:]]), expected)
+        self.assertEqual(mark('visualize{"path":"/a.html"}  \n'), 'visualize{"path":"/a.html"}\n')
+
+    def test_final_line_without_newline_is_marked_at_flush(self):
+        self.assertEqual(mark('Look:\n' + REFERENCE), 'Look:\n' + MARKED)
+
+    def test_non_references_are_unchanged(self):
+        for text in ['See visualize{"path":"/a.html"} for details.\n',
+                     'Use `visualize{"path":"/a.html"}` here.\n',
+                     '```text\nvisualize{"path":"/a.html"}\n```\n',
+                     '~~~\nvisualize{"path":"/a.html"}\n~~~',
+                     'visualize{"path":"/a.html"\n',
+                     'visualize{"mode":"wide"}\n',
+                     'visualize{"path":""}\n',
+                     '  visualize{"path":"/a.html"}\n',
+                     MARKED + '\n',
+                     'visualize\n',
+                     '']:
+            with self.subTest(text=text):
+                self.assertEqual(mark(text), text)
+
+    def test_reference_after_closed_fence_is_marked(self):
+        text = '```\nvisualize{"path":"/a.html"}\n```\n' + REFERENCE + '\n'
+        self.assertEqual(mark(text), '```\nvisualize{"path":"/a.html"}\n```\n' + MARKED + '\n')
+
+    def test_ordinary_text_streams_without_waiting_for_line_end(self):
+        markers = VisualizeMarkers()
+        self.assertEqual(markers.feed('Hello wor'), 'Hello wor')
+        self.assertEqual(markers.feed('ld\nvis'), 'ld\n')
+        self.assertEqual(markers.feed('it the page'), 'visit the page')
+        self.assertEqual(markers.feed(' now\n'), ' now\n')
+        self.assertEqual(markers.flush(), '')
 
 
 class FakeClient:
@@ -463,6 +512,31 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.choices[0].message.content, 'ANSWER')
         self.assertEqual(response.usage.total_tokens, 10)
 
+    async def test_visualize_reference_is_marked_and_replayed_identically(self):
+        FakeClient.scripted = [['Here:\n\nvisu', 'alize{"path":"/v/chart.html",', '"mode":"wide"}']]
+        first = await self.response()
+        self.assertEqual(''.join(c['text'] for c in first), 'Here:\n\n' + MARKED)
+        self.assertEqual(first[-1]['finish_reason'], 'stop')
+        self.assertEqual(first, await self.response())
+        other = ClaudeProvider(self.temp.name)
+        replay = [item async for item in other.astreaming(MODEL, [{'role': 'user', 'content': 'hello'}], optional_params={})]
+        self.assertEqual(replay, first)
+        # The next request carries the marked reply Codex saved; the same worker continues.
+        followup = [{'role': 'user', 'content': 'hello'}, {'role': 'assistant', 'content': 'Here:\n\n' + MARKED},
+                    {'role': 'user', 'content': 'next'}]
+        answer = await self.response(followup)
+        self.assertEqual(''.join(c['text'] for c in answer), 'ANSWER')
+        self.assertEqual(len(FakeClient.instances), 1)
+
+    async def test_withheld_reference_is_released_before_tool_calls(self):
+        FakeClient.scripted = [['Look:\n', REFERENCE,
+                                AssistantMessage([ToolUseBlock('sdk-1', 'mcp__codex__probe', {'value': 'x'})], MODEL),
+                                stream_event('message_stop'), 'wait']]
+        chunks = await self.response(tools=[FUNCTION])
+        kinds = ['tool' if c.get('tool_use') else 'finish' if c.get('finish_reason') else 'text' for c in chunks]
+        self.assertEqual(kinds, ['text', 'text', 'tool', 'finish'])
+        self.assertEqual(''.join(c['text'] for c in chunks), 'Look:\n' + MARKED)
+
     async def test_followup_effort_and_instruction_changes(self):
         messages = [{'role': 'user', 'content': 'hello'}]
         await self.response(messages)
@@ -604,6 +678,20 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
                     model=slug, input='hello', reasoning={'effort': 'high'}, stream=True)]
                 self.assertTrue(any(e['type'] == 'response.completed' for e in events))
                 self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'), 'ANSWER')
+
+    async def test_pinned_router_delivers_visualize_markers(self):
+        from litellm.utils import custom_llm_setup
+        FakeClient.scripted = [['Here:\n', REFERENCE]]
+        mapping = [{'provider': 'claudesdk', 'custom_handler': self.provider}]
+        with patch.object(litellm, 'custom_provider_map', mapping):
+            custom_llm_setup()
+            router = litellm.Router(model_list=claude_routes()['model_list'], num_retries=0)
+            events = [e.model_dump() async for e in await router.aresponses(
+                model='claude/opus-5.5', input='hello', stream=True)]
+        self.assertEqual(''.join(e.get('delta', '') for e in events if e['type'] == 'response.output_text.delta'),
+                         'Here:\n' + MARKED)
+        done = [e for e in events if e['type'] == 'response.completed'][0]
+        self.assertEqual(done['response']['output'][0]['content'][0]['text'], 'Here:\n' + MARKED)
 
     async def test_pinned_router_uses_captured_fast_tier(self):
         from litellm.utils import custom_llm_setup

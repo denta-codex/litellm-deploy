@@ -85,6 +85,12 @@ Rules:
 - Add comments only where the reasoning is not obvious from the code.
 - Verify with the most specific relevant tests first, then broaden if the change warrants it. Do not add tests that merely mirror the implementation.
 
+## Inline visualizations
+
+- When a skill tells you to show an inline visualization, write the reference as `visualize{"path":"/abs/path/file.html"}` (plus any extra fields the skill allows, such as `"mode":"wide"`), alone on its own line and outside code fences.
+- Write it without invisible or private-use characters. The adapter between you and Codex adds the markers Codex needs to render it.
+- Do not tell the user the markers were added or missing, and do not fall back to screenshots unless the user says the view did not load.
+
 ## Communicating
 
 - Keep progress notes to a sentence or two: what you learned, what you will do next.
