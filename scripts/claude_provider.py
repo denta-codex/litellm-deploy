@@ -332,6 +332,9 @@ class ClaudeProvider(CustomLLM):
             choices=[{'index': 0, 'message': message, 'finish_reason': chunks[-1]['finish_reason']}], usage=usage)
         if usage is None:
             response.usage = None
+        # LiteLLM records the provider only after its Responses bridge converts
+        # this message; chat_native needs it then to present summarized thinking.
+        response._hidden_params['custom_llm_provider'] = 'claudesdk'
         return response
 
 

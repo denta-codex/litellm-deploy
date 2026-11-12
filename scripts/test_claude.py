@@ -714,13 +714,27 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_pinned_router_emits_reasoning_summaries(self):
         from litellm.utils import custom_llm_setup
-        FakeClient.scripted = [[StreamEvent('event', 'sid', {'type': 'content_block_delta',
-            'delta': {'type': 'thinking_delta', 'thinking': 'A short summary.'}}), 'ANSWER']]
+        from chat_native import install as install_chat_native
+        # Production installs the Chat bridge hook, which hides raw Kimi/Fable
+        # thinking; Claude's summarized thinking must still be presented.
+        self.addCleanup(install_chat_native().uninstall)
+        thinking = StreamEvent('event', 'sid', {'type': 'content_block_delta',
+            'delta': {'type': 'thinking_delta', 'thinking': 'A short summary.'}})
+        FakeClient.scripted = [[thinking, 'ANSWER'], [thinking, 'ANSWER']]
+        summary = [{'type': 'summary_text', 'text': 'A short summary.'}]
         with patch.object(litellm, 'custom_provider_map', [{'provider': 'claudesdk', 'custom_handler': self.provider}]):
             custom_llm_setup()
             router = litellm.Router(model_list=claude_routes()['model_list'], num_retries=0)
             events = [e.model_dump() async for e in await router.aresponses(model='claude/opus-5.5', input='hello', stream=True)]
-            self.assertTrue(any('reasoning_summary' in e['type'] for e in events))
+            self.assertEqual(''.join(e['delta'] for e in events if e['type'] == 'response.reasoning_summary_text.delta'),
+                             'A short summary.')
+            done = next(e['item'] for e in events if e['type'] == 'response.output_item.done' and e['item']['type'] == 'reasoning')
+            self.assertEqual(done['summary'], summary)
+            completed = next(e['response'] for e in events if e['type'] == 'response.completed')
+            self.assertEqual(completed['output'][0], done)
+            # Shared search drives Claude without streaming; its renderer shows only summaries.
+            response = (await router.aresponses(model='claude/opus-5.5', input='hello', stream=False)).model_dump()
+            self.assertEqual(response['output'][0]['summary'], summary)
 
     async def test_usage_is_not_counted_twice_across_tool_boundary(self):
         session = Session(('usage',), configuration([], {'tools': [FUNCTION]}), self.temp.name, FakeClient)

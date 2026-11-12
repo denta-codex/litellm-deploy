@@ -5,18 +5,32 @@ from importlib.metadata import version
 from responses_events import normalize_item
 from litellm.types.utils import BaseLiteLLMOpenAIResponseObject
 
+# Providers whose Chat `reasoning_content` is already a provider-authored
+# summary. Claude subscription sessions request thinking with
+# display='summarized', so Anthropic returns summaries, not raw thinking.
+SUMMARY_PROVIDERS = frozenset({'claudesdk'})
+
 
 def plain(value):
     return value.model_dump(exclude_none=True) if hasattr(value, 'model_dump') else copy.deepcopy(value)
 
 
-def replay_item(value):
+def replay_item(value, summarized=False):
     item = normalize_item(plain(value))
     if item['type'] == 'reasoning':
-        # Raw Chat reasoning is replay state, not a provider-authored summary.
-        item['summary'] = []
         item.pop('status', None)
+        if not summarized:
+            # Raw Chat reasoning is replay state, not a provider-authored summary.
+            item['summary'] = []
+        elif item.get('content'):
+            # One summary part, matching the bridge's single streamed summary index.
+            text = ''.join(part.get('text', '') for part in item.pop('content'))
+            item['summary'] = [{'type': 'summary_text', 'text': text}] if text else []
     return item
+
+
+def summarizes(provider):
+    return provider in SUMMARY_PROVIDERS
 
 
 def install():
@@ -38,7 +52,8 @@ def install():
     def terminal(self, response):
         event = original_terminal(self, response)
         if event is not None:
-            output = [replay_item(item) for item in plain(event.response).get('output', [])]
+            summarized = summarizes(self.custom_llm_provider)
+            output = [replay_item(item, summarized) for item in plain(event.response).get('output', [])]
             done = getattr(self, '_bridge_done_items', {})
             for item in output:
                 prior = done.get(item['id'])
@@ -55,25 +70,29 @@ def install():
         # The stock converter preserves empty signed and redacted blocks too.
         snapshot = self.create_litellm_model_response()
         items = Transform._extract_reasoning_output_items(snapshot, snapshot.choices) if snapshot else []
-        item = replay_item(items[0] if items else event.item)
+        item = replay_item(items[0] if items else event.item, summarizes(self.custom_llm_provider))
         item['id'] = event.item.id
         event.item = BaseLiteLLMOpenAIResponseObject(**item)
         return event
     def transform(*args, **kwargs):
         response = original_transform(*args, **kwargs)
+        source = kwargs['chat_completion_response'] if 'chat_completion_response' in kwargs else args[2]
+        hidden = getattr(source, '_hidden_params', None) or {}
+        summarized = summarizes(hidden.get('custom_llm_provider'))
         # Upstream ID alignment uses attributes and model_copy. Plain dicts here
         # break that alignment (and can make deltas reference an unknown item).
-        response.output = [BaseLiteLLMOpenAIResponseObject(**replay_item(item))
+        response.output = [BaseLiteLLMOpenAIResponseObject(**replay_item(item, summarized))
                            for item in plain(response).get('output', [])]
         return response
 
     def present(self, event):
-        if event.type.startswith('response.reasoning_summary'):
+        summarized = summarizes(self.custom_llm_provider)
+        if event.type.startswith('response.reasoning_summary') and not summarized:
             # Suppress part/done events as well as deltas; raw signed or readable
             # thinking is not a summary. The replay item is still emitted.
             return None
         if event.type in ('response.output_item.added', 'response.output_item.done'):
-            event.item = BaseLiteLLMOpenAIResponseObject(**replay_item(event.item))
+            event.item = BaseLiteLLMOpenAIResponseObject(**replay_item(event.item, summarized))
             if event.type == 'response.output_item.done':
                 if not hasattr(self, '_bridge_done_items'):
                     self._bridge_done_items = {}
