@@ -39,6 +39,9 @@ class ConfigTests(unittest.TestCase):
             ('bad-mode', {'credential_mode': 'root'}),
             ('relative-home', {'home': 'home/example'}),
             ('browser-without-node', {'browser': True}),
+            ('browser-relative-node', {'browser': {'node': 'bin/node'}}),
+            ('browser-relative-executable', {'browser': {'node': '/usr/bin/node', 'executable': 'chrome'}}),
+            ('browser-unknown-key', {'browser': {'node': '/usr/bin/node', 'channel': 'chrome'}}),
             ('wrong-type', {'voice': 'yes'}),
             ('duplicate-credential', {'credentials': [credential, credential]}),
             ('proxy-key-listed', {'credentials': [credential | {'name': 'litellm-proxy-key'}]}),
@@ -47,6 +50,12 @@ class ConfigTests(unittest.TestCase):
         ]:
             with self.subTest(name=name), self.assertRaises(ValueError):
                 deploy_config.validate(self.example | changes)
+
+    def test_browser_executable_defaults_to_chromium(self):
+        default = deploy_config.validate(self.example | {'browser': {'node': '/usr/bin/node'}})
+        self.assertEqual(default['browser'], {'node': '/usr/bin/node', 'executable': '/usr/bin/chromium'})
+        chrome = {'node': '/usr/bin/node', 'executable': '/opt/google/chrome/chrome'}
+        self.assertEqual(deploy_config.validate(self.example | {'browser': chrome})['browser'], chrome)
 
     def test_ansible_maps_the_same_keys(self):
         tasks = yaml.safe_load((SOURCE / 'deploy/tasks/target.yml').read_text())

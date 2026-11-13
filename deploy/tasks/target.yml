@@ -21,6 +21,12 @@
       - deploy_settings.user is defined and deploy_settings.home is defined and deploy_settings.mise is defined
       - deploy_settings.codex_version is defined and deploy_settings.default_model is defined
       - deploy_settings.credential_mode | default('') in ['user', 'system']
+      - >-
+        deploy_settings.browser | default(false) is false or
+        (deploy_settings.browser is mapping and deploy_settings.browser.keys() | difference(['node', 'executable']) | length == 0
+         and deploy_settings.browser.node | default('') is string and deploy_settings.browser.node | default('') is abs
+         and deploy_settings.browser.executable | default('/usr/bin/chromium') is string
+         and deploy_settings.browser.executable | default('/usr/bin/chromium') is abs)
       - ansible_facts.user_id == deploy_settings.user
       - ansible_facts.user_dir == deploy_settings.home
     fail_msg: >-
@@ -44,7 +50,9 @@
     compaction_fallback_enabled: "{{ deploy_settings.compaction_fallback | default(true) }}"
     litellm_voice_enabled: "{{ deploy_settings.voice | default(false) }}"
     litellm_local_inference: "{{ deploy_settings.local_inference | default(false) }}"
-    litellm_browser: "{{ deploy_settings.browser | default(false) }}"
+    litellm_browser: >-
+      {{ ({'executable': '/usr/bin/chromium'} | combine(deploy_settings.browser))
+         if deploy_settings.browser | default(false) is mapping else false }}
     litellm_credentials: "{{ deploy_settings.credentials | default([]) }}"
     litellm_credential_exports: >-
       {{ {'litellm-proxy-key': {'env': 'LITELLM_MASTER_KEY'}}

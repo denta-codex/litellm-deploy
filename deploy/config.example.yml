@@ -24,7 +24,8 @@ forward_agent: false        # forward the SSH agent into the Codex app server
 compaction_fallback: true   # retry failed remote compaction locally
 voice: false                # subscription realtime voice endpoint
 local_inference: false      # llama.cpp runtime (deploy/local.yml)
-browser: false              # or {node: /absolute/path/to/node} for Codex browser tools
+browser: false              # or {node: /abs/node, executable: /abs/browser} for Codex browser tools;
+                            # executable defaults to /usr/bin/chromium
 
 # Encrypted systemd credentials loaded into the LiteLLM service. Each export
 # says how launch.py turns the credential into environment variables:

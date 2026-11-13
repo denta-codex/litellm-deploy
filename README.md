@@ -893,6 +893,24 @@ still carries only model traffic. Chromium starts only on a browser operation.
 - Browser subprocesses do not inherit provider credentials.
 - No arbitrary Node-execution tool is exposed.
 
+The browser always runs headless, so the host needs no display. It does need a
+Chromium-family browser whose sandbox works. `browser.executable` picks it and
+defaults to `/usr/bin/chromium`. The playbook does not install system packages.
+
+On Ubuntu 24.04, AppArmor blocks the Chromium sandbox for programs without a
+profile, and the snap Chromium cannot reach a home outside `/home` or hidden
+directories like `~/.local/state`. Install Google Chrome once by hand instead.
+Ubuntu ships an AppArmor profile for it. Add fonts so pages render normally:
+
+```sh
+curl -fLO https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+sudo apt install ./google-chrome-stable_current_amd64.deb   # also adds Google's apt source
+sudo apt install fonts-noto-core fonts-noto-cjk fonts-noto-color-emoji
+rm google-chrome-stable_current_amd64.deb
+```
+
+Then set `browser: {node: ..., executable: /opt/google/chrome/chrome}`.
+
 ```sh
 ansible-playbook -i deploy/inventory.yml deploy/browser.yml                                         # preview
 ansible-playbook -i deploy/inventory.yml deploy/browser.yml -e codex_browser_action=stage

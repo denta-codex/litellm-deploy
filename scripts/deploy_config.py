@@ -13,6 +13,7 @@ import yaml
 DEFAULT = Path.home() / '.config/litellm-deploy/config.yml'
 SYSTEM_CREDENTIAL = '/etc/credstore.encrypted/litellm-proxy-key'
 PROXY_CREDENTIAL = {'litellm-proxy-key': {'env': 'LITELLM_MASTER_KEY'}}
+BROWSER_EXECUTABLE = '/usr/bin/chromium'
 REQUIRED = {'user': str, 'home': str, 'mise': str, 'codex_version': str, 'default_model': str,
             'credential_mode': str}
 OPTIONAL = {'forward_agent': (bool, False), 'compaction_fallback': (bool, True), 'voice': (bool, False),
@@ -38,8 +39,15 @@ def validate(config):
         raise ValueError('credential_mode must be user or system')
     if not Path(result['home']).is_absolute() or not Path(result['mise']).is_absolute():
         raise ValueError('home and mise must be absolute paths')
-    if result['browser'] is True or (isinstance(result['browser'], dict) and not result['browser'].get('node')):
+    if result['browser'] is True:
         raise ValueError('browser must be false or a mapping with node')
+    if isinstance(result['browser'], dict):
+        browser = {'executable': BROWSER_EXECUTABLE} | result['browser']
+        if (set(browser) != {'node', 'executable'}
+                or not all(isinstance(browser[key], str) and Path(browser[key]).is_absolute()
+                           for key in browser)):
+            raise ValueError('browser needs an absolute node path and may set an absolute executable path')
+        result['browser'] = browser
     names = set()
     for credential in result['credentials']:
         if (not isinstance(credential, dict) or set(credential) != {'name', 'path', 'export'}

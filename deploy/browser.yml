@@ -9,6 +9,7 @@
     browser_skill: "{{ litellm_home }}/.codex/skills/browser"
     browser_node: "{{ litellm_browser.node }}"
     browser_npm: "{{ litellm_browser.node | dirname }}/npm"
+    browser_executable: "{{ litellm_browser.executable }}"
     browser_dropin: /etc/systemd/system/codex-app-server.service.d/40-browser.conf
   pre_tasks:
     - name: Load and validate the deployment configuration
@@ -21,6 +22,17 @@
           - litellm_browser is mapping
           - codex_browser_action in ['preview', 'stage', 'prepare', 'activate', 'verify', 'rollback', 'finish']
         fail_msg: Set browser.node in the deployment configuration to enable the browser capability.
+
+    - name: Inspect the configured browser executable
+      ansible.builtin.stat:
+        path: "{{ browser_executable }}"
+      register: browser_executable_stat
+
+    - name: Require an installed browser executable
+      ansible.builtin.assert:
+        that: browser_executable_stat.stat.exists and browser_executable_stat.stat.executable
+        fail_msg: "{{ browser_executable }} is not an installed executable. Install the browser or set browser.executable."
+      when: codex_browser_action in ['stage', 'prepare', 'activate', 'verify']
 
     - name: Calculate the immutable source release
       ansible.builtin.command:
@@ -112,6 +124,8 @@
           ansible.builtin.command:
             argv: ["{{ browser_node }}", --test, test/session.test.mjs]
             chdir: "{{ browser_release_dir }}"
+          environment:
+            CODEX_BROWSER_EXECUTABLE: "{{ browser_executable }}"
           changed_when: false
           when: not browser_paths.results[4].stat.exists and not ansible_check_mode
 
@@ -210,6 +224,8 @@
       ansible.builtin.command:
         argv: ["{{ browser_node }}", --test, test/session.test.mjs]
         chdir: "{{ browser_root }}/current"
+      environment:
+        CODEX_BROWSER_EXECUTABLE: "{{ browser_executable }}"
       changed_when: false
       when: codex_browser_action == 'verify' and not ansible_check_mode
 
